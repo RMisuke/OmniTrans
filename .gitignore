@@ -1,5 +1,6 @@
 .DS_Store
 AiTranslator/.build/
+AiTranslator/.swiftpm/
 *.md
 *.icns
-AiTranslator/.swiftpm/xcode/xcuserdata/
+token.txt

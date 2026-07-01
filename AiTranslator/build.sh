@@ -13,9 +13,9 @@ APP_DIR=".build/OmniTrans.app"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN" "$APP_DIR/Contents/MacOS/OmniTrans"
 # Copy app icon (about page)
-cp "../icon v0.1-min.icns" "$APP_DIR/Contents/Resources/icon.icns"
+cp "Resource/icon/icon.icns" "$APP_DIR/Contents/Resources/icon.icns"
 # Copy menu bar icon
-cp "../menubar icon v0.1.icns" "$APP_DIR/Contents/Resources/menubar.icns"
+cp "Resource/icon/menubar.icns" "$APP_DIR/Contents/Resources/menubar.icns"
 
 # Minimal Info.plist
 cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
