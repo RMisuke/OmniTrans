@@ -10,12 +10,18 @@ struct OmniTransApp: App {
         MenuBarExtra(isInserted: .constant(true)) {
             ContentView(state: state)
         } label: {
-            Image(nsImage: menubarIcon)
+            MenubarIconView(isTranslating: state.isTranslating)
         }
         .menuBarExtraStyle(.window)
     }
+}
 
-    private var menubarIcon: NSImage {
+/// Breathing animated menubar icon — subtly pulses when translating.
+private struct MenubarIconView: View {
+    let isTranslating: Bool
+    @State private var breathing = false
+
+    private var nsImage: NSImage {
         if let path = Bundle.main.path(forResource: "menubar", ofType: "icns"),
            let icon = NSImage(contentsOfFile: path) {
             icon.isTemplate = true
@@ -23,6 +29,28 @@ struct OmniTransApp: App {
             return icon
         }
         return NSImage(systemSymbolName: "character.bubble.fill", accessibilityDescription: nil)!
+    }
+
+    var body: some View {
+        ZStack {
+            if isTranslating {
+                // Breathing ring behind the icon
+                Circle()
+                    .trim(from: 0, to: 0.3)
+                    .stroke(Color.accentColor.opacity(0.5), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    .rotationEffect(.degrees(breathing ? 360 : 0))
+                    .frame(width: 22, height: 22)
+                    .animation(.linear(duration: 1.8).repeatForever(autoreverses: false), value: breathing)
+                    .onAppear { breathing = true }
+                    .onDisappear { breathing = false }
+            }
+            Image(nsImage: nsImage)
+                .opacity(isTranslating ? (breathing ? 0.6 : 0.9) : 1.0)
+                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: breathing)
+        }
+        .onChange(of: isTranslating) { _, translating in
+            breathing = translating
+        }
     }
 }
 
@@ -33,7 +61,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Apply saved appearance mode
         let mode = UserDefaults.standard.string(forKey: "app_appearance") ?? "system"
         switch mode {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
@@ -67,11 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingWindow = nil
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return false
-    }
-
-    // MARK: - OCR Selection
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     private func startOCRSelection() {
         OCRSelectionOverlay.shared.beginCapture { [weak self] text in
@@ -100,17 +123,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let text, !text.isEmpty { s.translate() }
     }
 
-    // MARK: - Onboarding
-
     private func showOnboardingIfNeeded() {
         guard !UserDefaults.standard.bool(forKey: "has_completed_onboarding") else { return }
-
         let contentView = OnboardingView { [weak self] in
             self?.dismissOnboarding()
         }
-
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 540),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered, defer: false
         )

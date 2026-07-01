@@ -137,9 +137,8 @@ final class AppState: ObservableObject {
         activeStreamTask = Task { [weak self] in
             guard let self else { return }
             let (resolvedProvider, usingFallback) = await TranslationActor.shared.resolveWithFallback(provider)
-            if usingFallback {
-                print("[OmniTrans] Falling back to local Ollama")
-            }
+            if usingFallback { print("[OmniTrans] Falling back to local Ollama") }
+
             let isWord = WordDetector.isWord(text)
 
             // Pick the right provider: dict config first, then fallback to current selection
@@ -154,77 +153,24 @@ final class AppState: ObservableObject {
             // Dict mode only if it's a word AND the effective provider supports it
             let isDict = isWord && !effectiveProvider.kind.isTraditionalMT
 
-            // ── macOS Native provider: local, no network ──
-            if effectiveProvider.kind == .macOSNative {
-                if isDict {
-                    self.isDictionaryMode = true
-                    let entry = MacOSNativeProvider.lookupWord(text)
-                    await MainActor.run {
-                        self.dictionaryEntry = entry
-                        self.isTranslating = false
-                        self.streamingFinished = true
-                        self.showSuccessPulse = true
-                        self.isDictionaryMode = false
-                    }
-                } else {
-                    if #available(macOS 15.0, *) {
-                        let stream = MacOSNativeProvider.translateStream(
-                            text, sourceLang: self.sourceLang,
-                            targetLang: self.targetLang
-                        )
-                        do {
-                            var fullText = ""
-                            for try await chunk in stream {
-                                fullText = chunk
-                                await MainActor.run { self.translatedText = fullText }
-                            }
-                            await MainActor.run {
-                                self.translatedText = fullText
-                                self.isTranslating = false
-                                self.streamingFinished = true
-                                self.showSuccessPulse = true
-                            }
-                        } catch {
-                            let msg = Self.friendlyNativeError(error)
-                            await MainActor.run {
-                                self.errorMessage = msg
-                                self.isTranslating = false
-                                self.showErrorShake = true
-                            }
-                        }
-                    } else {
-                        await MainActor.run {
-                            self.errorMessage = "原生离线翻译需要 macOS 15 (Sequoia) 或更高版本。请升级系统或切换至云端 API。"
-                            self.isTranslating = false
-                            self.showErrorShake = true
-                        }
-                    }
-                }
-                if !isDict {
-                    await MainActor.run { self.addHistory(text: text, result: self.translatedText, provider: effectiveProvider) }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                    self.showSuccessPulse = false
-                    self.showErrorShake = false
-                }
-                return
-            }
+            // ── Route via strategy factory ──
+            let context = EngineRoutingContext(
+                text: text,
+                provider: effectiveProvider,
+                isWord: isWord
+            )
+            let engine = TranslationEngineFactory.makeEngine(context: context)
 
-            let stream: AsyncThrowingStream<String, Error>
-            if isDict && !effectiveProvider.kind.isTraditionalMT {
-                stream = await TranslationActor.shared.translateDictionary(
-                    text: text, sourceLang: self.sourceLang,
-                    targetLang: self.targetLang, provider: effectiveProvider
-                )
-            } else {
-                stream = await TranslationActor.shared.translateStream(
-                    text: text, sourceLang: self.sourceLang,
-                    targetLang: self.targetLang, provider: effectiveProvider
-                )
-            }
-            if isDict {
-                self.isDictionaryMode = true
-            }
+            let stream = engine.execute(
+                text: text,
+                provider: effectiveProvider,
+                isDictionaryMode: isDict,
+                sourceLang: self.sourceLang,
+                targetLang: self.targetLang
+            )
+
+            if isDict { self.isDictionaryMode = true }
+
             var fullText = ""
             var lastFlush = ContinuousClock.Instant.now
             let flushInterval = Duration.milliseconds(50)
@@ -244,31 +190,52 @@ final class AppState: ObservableObject {
                 self.isTranslating = false
                 self.streamingFinished = true
                 self.showSuccessPulse = true
-                // Parse dictionary JSON for word lookups
                 self.isDictionaryMode = false
-                print("[AppState] dict mode: parsing fullText len=\(fullText.count)")
-                if isDict, let entry = DictionaryEntry.parse(from: fullText, word: text) {
-                    self.dictionaryEntry = entry
+
+                // Parse dictionary result
+                if isDict {
+                    if effectiveProvider.kind == .macOSNative {
+                        self.dictionaryEntry = MacOSNativeProvider.lookupWord(text)
+                    } else if let entry = DictionaryEntry.parse(from: fullText, word: text) {
+                        self.dictionaryEntry = entry
+                    } else {
+                        self.dictionaryEntry = nil
+                    }
                 } else {
-                    self.dictionaryEntry = nil; isDictionaryMode = false
+                    self.dictionaryEntry = nil
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.showSuccessPulse = false }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    self.showSuccessPulse = false
+                }
                 self.retryCount = 0
                 self.addHistory(text: text, result: fullText, provider: effectiveProvider)
             } catch {
+                // ── Fallback to non-streaming ──
                 do {
-                    let r = try await TranslationService.translate(text: text, sourceLang: self.sourceLang, targetLang: self.targetLang, using: effectiveProvider)
+                    let r = try await TranslationService.translate(
+                        text: text, sourceLang: self.sourceLang,
+                        targetLang: self.targetLang, using: effectiveProvider
+                    )
                     self.translatedText = r.text
                     self.isTranslating = false; self.streamingFinished = true
                     self.showSuccessPulse = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.showSuccessPulse = false }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        self.showSuccessPulse = false
+                    }
                     self.retryCount = 0
                     self.addHistory(text: text, result: r.text, provider: effectiveProvider)
                 } catch {
-                    self.errorMessage = error.localizedDescription
+                    // ── Terminal error ──
+                    let msg = effectiveProvider.kind == .macOSNative
+                        ? Self.friendlyNativeError(error)
+                        : error.localizedDescription
+                    self.errorMessage = msg
                     self.isTranslating = false
                     self.showErrorShake = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.showErrorShake = false }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        self.showErrorShake = false
+                    }
                     let errMsg = error.localizedDescription.lowercased()
                     let isNetworkError = errMsg.contains("网络") || errMsg.contains("network")
                         || errMsg.contains("timeout") || errMsg.contains("connection")

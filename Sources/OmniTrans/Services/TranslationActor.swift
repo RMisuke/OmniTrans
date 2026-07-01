@@ -536,3 +536,45 @@ private struct GemStreamChunk: Codable {
     struct Cand: Codable { struct Cont: Codable { struct Part: Codable { let text: String? }; let parts: [Part]? }; let content: Cont? }
     let candidates: [Cand]?
 }
+
+// MARK: - TranslationEngineProtocol conformance
+
+extension TranslationActor: TranslationEngineProtocol {
+    /// Unified entry point called by the factory.
+    /// Routes to the correct internal pipeline based on mode.
+    nonisolated func execute(
+        text: String,
+        provider: APIProvider,
+        isDictionaryMode: Bool,
+        sourceLang: TranslationLanguage,
+        targetLang: TranslationLanguage
+    ) -> AsyncThrowingStream<String, Error> {
+        // Capture shared as a local constant so the nonisolated context can reference it.
+        let actor = Self.shared
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                let stream: AsyncThrowingStream<String, Error>
+                if isDictionaryMode && !provider.kind.isTraditionalMT && provider.kind != .macOSNative {
+                    stream = await actor.translateDictionary(
+                        text: text, sourceLang: sourceLang,
+                        targetLang: targetLang, provider: provider
+                    )
+                } else {
+                    stream = await actor.translateStream(
+                        text: text, sourceLang: sourceLang,
+                        targetLang: targetLang, provider: provider
+                    )
+                }
+                do {
+                    for try await chunk in stream {
+                        continuation.yield(chunk)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}

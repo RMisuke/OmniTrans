@@ -239,12 +239,8 @@ struct TranslationView: View {
 
             ScrollView {
                 if state.isTranslating && state.translatedText.isEmpty {
-                    HStack(spacing: 6) {
-                        ProgressView().scaleEffect(0.6)
-                        Text("正在调用 \(state.selectedProvider?.name ?? "API") 翻译...")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
-                    .padding(.leading, 16).padding(.top, 10)
+                    SkeletonShimmerView()
+                        .padding(.horizontal, 4).padding(.top, 8)
                 }
                 if let error = state.errorMessage {
                     errorBlock(error)
@@ -254,6 +250,10 @@ struct TranslationView: View {
                         .font(.system(size: 15))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .bottom)),
+                            removal: .identity
+                        ))
                     if state.isTranslating && showCursor {
                         Rectangle()
                             .fill(Color.accentColor)
@@ -262,6 +262,7 @@ struct TranslationView: View {
                 }
                 .padding(.horizontal, 12).padding(.top, 4)
             }
+            .animation(.easeOut(duration: 0.2), value: state.translatedText)
             .padding(.bottom, 8)
         }
     }

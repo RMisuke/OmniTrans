@@ -1,26 +1,46 @@
 import SwiftUI
 
-/// Professional dictionary card — word header, phonetic, colour-coded POS definitions, examples.
+/// Professional dictionary card with staggered entrance and hover micro-interactions.
 struct DictionaryCardView: View {
     let entry: DictionaryEntry
 
+    @State private var showHeader = false
+    @State private var showPhonetic = false
+    @State private var showDefinitions = false
+    @State private var showExamples = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            wordHeader
-            if !entry.phonetic.isEmpty { phoneticRow }
-            if !entry.definitions.isEmpty {
+            if showHeader { wordHeader.transition(.opacity.combined(with: .move(edge: .top))) }
+            if showPhonetic, !entry.phonetic.isEmpty { phoneticRow.transition(.opacity) }
+            if showDefinitions, !entry.definitions.isEmpty {
                 Divider().padding(.vertical, AppTheme.spaceSM)
-                definitionsList
+                definitionsList.transition(.opacity.combined(with: .move(edge: .leading)))
             }
-            if !entry.examples.isEmpty {
+            if showExamples, !entry.examples.isEmpty {
                 Divider().padding(.vertical, AppTheme.spaceSM)
-                examplesList
+                examplesList.transition(.opacity.combined(with: .move(edge: .leading)))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { animateIn() }
+        .onChange(of: entry.word) { _ in animateIn() }
+        .animation(.spring(response: 0.32, dampingFraction: 0.78), value: showHeader)
+        .animation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.04), value: showPhonetic)
+        .animation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.08), value: showDefinitions)
+        .animation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.12), value: showExamples)
+    }
+
+    private func animateIn() {
+        showHeader = false; showPhonetic = false; showDefinitions = false; showExamples = false
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { showHeader = true }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.04)) { showPhonetic = true }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.08)) { showDefinitions = true }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.12)) { showExamples = true }
     }
 
     // MARK: - Word header
+
     private var wordHeader: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "character.book.closed.fill")
@@ -33,6 +53,7 @@ struct DictionaryCardView: View {
     }
 
     // MARK: - Phonetic
+
     private var phoneticRow: some View {
         HStack(spacing: 6) {
             Image(systemName: "waveform").font(.caption2).foregroundColor(AppTheme.textSecondary)
@@ -42,23 +63,17 @@ struct DictionaryCardView: View {
     }
 
     // MARK: - Definitions
+
     private var definitionsList: some View {
         VStack(alignment: .leading, spacing: AppTheme.spaceSM) {
             ForEach(entry.definitions) { def in
-                HStack(alignment: .top, spacing: AppTheme.spaceSM) {
-                    Text(def.pos)
-                        .font(.caption2).fontWeight(.bold).foregroundColor(.white)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(RoundedRectangle(cornerRadius: 3).fill(posColor(def.pos)))
-                    Text(def.meaning)
-                        .font(.system(size: AppTheme.fontSizeBody)).foregroundColor(AppTheme.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                DefinitionRowView(def: def, posColor: posColor)
             }
         }
     }
 
     // MARK: - Examples
+
     private var examplesList: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(entry.examples.enumerated()), id: \.element.id) { idx, ex in
@@ -75,6 +90,7 @@ struct DictionaryCardView: View {
     }
 
     // MARK: - POS colour
+
     private func posColor(_ pos: String) -> Color {
         let lower = pos.lowercased()
         if lower.contains("noun") || lower.contains("n.")  { return .blue }
@@ -86,5 +102,28 @@ struct DictionaryCardView: View {
         if lower.contains("pron") { return .indigo }
         if lower.contains("interj") { return .red }
         return .gray
+    }
+}
+
+/// Individual definition row with hover micro-interaction.
+private struct DefinitionRowView: View {
+    let def: DictionaryEntry.Definition
+    let posColor: (String) -> Color
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: AppTheme.spaceSM) {
+            Text(def.pos)
+                .font(.caption2).fontWeight(.bold).foregroundColor(.white)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 3).fill(posColor(def.pos)))
+                .scaleEffect(isHovered ? 1.05 : 1.0)
+                .shadow(color: posColor(def.pos).opacity(isHovered ? 0.35 : 0), radius: 4, y: 1)
+                .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
+            Text(def.meaning)
+                .font(.system(size: AppTheme.fontSizeBody)).foregroundColor(AppTheme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onHover { hovering in isHovered = hovering }
     }
 }

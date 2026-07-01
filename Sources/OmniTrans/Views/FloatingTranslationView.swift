@@ -36,6 +36,8 @@ struct FloatingTranslationView: View {
         .frame(minWidth: 340, minHeight: 380)
         .background(.regularMaterial)
         .cornerRadius(12)
+        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: isDict)
+        .animation(.spring(response: 0.3, dampingFraction: 0.72), value: state.dictionaryEntry?.word)
         .onKeyPress(.escape) { FloatingPanel.shared.hide(); return .handled }
         .onChange(of: state.isTranslating) { _, t in t ? startAnimating() : stopAnimating() }
         .onChange(of: state.inputText) { _, v in state.detectedIsWord = WordDetector.isWord(v) }
@@ -227,14 +229,19 @@ struct FloatingTranslationView: View {
 
     private var streamingTextView: some View {
         ScrollView {
-            HStack(alignment: .top, spacing: 0) {
-                Text(state.translatedText)
-                    .font(.system(size: 15)).textSelection(.enabled).lineSpacing(4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if state.isTranslating && showCursor {
-                    Rectangle().fill(Color.accentColor).frame(width: 2, height: 15)
-                }
-            }.padding(.horizontal, 14).padding(.vertical, 8)
+            if state.translatedText.isEmpty {
+                // Skeleton shimmer while waiting for first token
+                SkeletonShimmerView()
+            } else {
+                HStack(alignment: .top, spacing: 0) {
+                    Text(state.translatedText)
+                        .font(.system(size: 15)).textSelection(.enabled).lineSpacing(4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if state.isTranslating && showCursor {
+                        Rectangle().fill(Color.accentColor).frame(width: 2, height: 15)
+                    }
+                }.padding(.horizontal, 14).padding(.vertical, 8)
+            }
         }
     }
 
@@ -244,7 +251,12 @@ struct FloatingTranslationView: View {
                 .font(.system(size: 15)).textSelection(.enabled).lineSpacing(4)
                 .padding(.horizontal, 14).padding(.vertical, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .move(edge: .bottom)),
+                    removal: .identity
+                ))
         }
+        .animation(.easeOut(duration: 0.2), value: state.translatedText)
     }
 
     private func errorView(_ err: String) -> some View {

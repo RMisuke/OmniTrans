@@ -1,32 +1,54 @@
 import SwiftUI
 
-/// Apple Dictionary.app‑style layout.  Serif word header, accent divider,
-/// zebra-striped definition rows with POS badges.
+/// Apple Dictionary.app‑style layout with staggered entrance animation.
 struct NativeDictionaryView: View {
     let entry: DictionaryEntry
 
+    @State private var showHeader = false
+    @State private var showDefs = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(entry.word)
-                .font(.system(size: 28, weight: .semibold, design: .serif))
-                .foregroundColor(AppTheme.textPrimary)
-                .padding(.bottom, 10)
+            if showHeader {
+                Text(entry.word)
+                    .font(.system(size: 28, weight: .semibold, design: .serif))
+                    .foregroundColor(AppTheme.textPrimary)
+                    .padding(.bottom, 10)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
 
-            Rectangle()
-                .fill(AppTheme.textAccent).frame(height: 2).frame(maxWidth: 60)
-                .padding(.bottom, 14)
+                Rectangle()
+                    .fill(AppTheme.textAccent).frame(height: 2).frame(maxWidth: 60)
+                    .padding(.bottom, 14)
+                    .transition(.scale(scale: 0, anchor: .leading).combined(with: .opacity))
+            }
 
-            if entry.definitions.isEmpty {
-                emptyState
-            } else {
-                ForEach(Array(entry.definitions.enumerated()), id: \.element.id) { idx, def in
-                    definitionRow(def, index: idx)
+            if showDefs {
+                if entry.definitions.isEmpty {
+                    emptyState.transition(.opacity)
+                } else {
+                    ForEach(Array(entry.definitions.enumerated()), id: \.element.id) { idx, def in
+                        definitionRow(def, index: idx)
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .leading)),
+                                removal: .identity
+                            ))
+                    }
                 }
             }
             Spacer(minLength: 12)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 4)
+        .onAppear { animateIn() }
+        .onChange(of: entry.word) { _ in animateIn() }
+        .animation(.spring(response: 0.3, dampingFraction: 0.78), value: showHeader)
+        .animation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.06), value: showDefs)
+    }
+
+    private func animateIn() {
+        showHeader = false; showDefs = false
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { showHeader = true }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.06)) { showDefs = true }
     }
 
     private var emptyState: some View {
