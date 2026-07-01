@@ -1,5 +1,4 @@
 .DS_Store
-AiTranslator/.build/
-AiTranslator/.swiftpm/
+.build/
+.swiftpm/
 token.txt
-*.icns
