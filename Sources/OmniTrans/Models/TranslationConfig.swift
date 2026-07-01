@@ -38,4 +38,25 @@ enum TranslationLanguage: String, CaseIterable, Identifiable, Codable {
         case .vietnamese: return "vi"
         }
     }
+
+    /// Bridges to `Locale.Language` for the system Translation framework.
+    @available(macOS 15.0, *)
+    var systemLocaleLanguage: Locale.Language {
+        switch self {
+        case .auto:       return Locale.Language(identifier: "en")
+        case .chinese:    return Locale.Language(identifier: "zh-Hans")
+        case .english:    return Locale.Language(identifier: "en")
+        case .japanese:   return Locale.Language(identifier: "ja")
+        case .korean:     return Locale.Language(identifier: "ko")
+        case .french:     return Locale.Language(identifier: "fr")
+        case .german:     return Locale.Language(identifier: "de")
+        case .spanish:    return Locale.Language(identifier: "es")
+        case .russian:    return Locale.Language(identifier: "ru")
+        case .portuguese: return Locale.Language(identifier: "pt")
+        case .italian:    return Locale.Language(identifier: "it")
+        case .arabic:     return Locale.Language(identifier: "ar")
+        case .thai:       return Locale.Language(identifier: "th")
+        case .vietnamese: return Locale.Language(identifier: "vi")
+        }
+    }
 }

@@ -28,7 +28,25 @@ enum TranslationService {
         case .openAI, .openAICompat: return try await openAI(text, sourceLang, targetLang, provider)
         case .anthropic:             return try await anthropic(text, sourceLang, targetLang, provider)
         case .gemini:                return try await gemini(text, sourceLang, targetLang, provider)
+        case .macOSNative:         throw TranslationError.apiError("macOS Native should be handled locally")
+        case .googleMT:             return try await mtFallback(text, sourceLang, targetLang, provider, kind: .googleMT)
+        case .bingMT:               return try await mtFallback(text, sourceLang, targetLang, provider, kind: .bingMT)
+        case .alibabaMT:            return try await mtFallback(text, sourceLang, targetLang, provider, kind: .alibabaMT)
         }
+    }
+
+    /// Non-streaming fallback for traditional MT providers.
+    /// Delegates to TranslationActor for single-shot translation.
+    private static func mtFallback(
+        _ text: String, _ src: TranslationLanguage, _ tgt: TranslationLanguage,
+        _ p: APIProvider, kind: ProviderKind
+    ) async throws -> TranslationResult {
+        let result = try await TranslationActor.shared.mtTranslate(
+            text: text, tgt: tgt, provider: p
+        )
+        return TranslationResult(
+            text: result, providerName: p.name, model: p.modelName, tokensUsed: 0
+        )
     }
 
 

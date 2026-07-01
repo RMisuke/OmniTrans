@@ -1,8 +1,25 @@
 import Carbon
-import Cocoa
 import Vision
+import Cocoa
 
 /// 划词取词: CGEvent 模拟 Cmd+C (需辅助功能权限) → AX fallback
+
+/// Dedicated low-priority queue for OCR computation
+let ocrQueue = DispatchQueue(label: "com.omnitrans.ocr", qos: .userInitiated)
+
+/// Thread-safe reusable VNRecognizeTextRequest singleton — avoids per-capture allocation
+let sharedOCRRequest: VNRecognizeTextRequest = {
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = true
+    request.recognitionLanguages = [
+        "zh-Hans", "zh-Hant", "en",
+        "ja", "ko", "fr", "de", "es"
+    ]
+    request.minimumTextHeight = 0.02
+    return request
+}()
+
 final class HotkeyManager {
     static let shared = HotkeyManager()
 
@@ -184,167 +201,41 @@ final class HotkeyManager {
         reregister(carbonKey: Int(kVK_ANSI_D), carbonMods: Int(optionKey))
     }
 
-    // MARK: - Capture pipeline
+        // MARK: - Capture pipeline (Chain of Responsibility)
 
+    /// Translate-only capture: Simulated Cmd+C → AX API (no OCR fallback)
     func capture() -> String? {
-        // Channel 1: Simulated Cmd+C (primary, fastest)
-        if Self.isTrusted, let text = captureViaSimulatedCopy() { return text }
-        // Channel 2: AX API direct selection read
-        if let ax = captureViaAX() { return ax }
+        for strategy in translateStrategies {
+            if let text = strategy.tryCapture() { return text }
+        }
         return nil
     }
 
-    /// Translate-only capture — no OCR fallback (OCR is its own hotkey)
+    /// Alias for translate hotkey callback — identical to capture()
     func captureWithoutOCR() -> String? {
         return capture()
     }
 
-    /// Full capture including OCR fallback (used internally for compatibility)
+    /// Full capture with OCR fallback (used by OCR hotkey and internally)
     func captureWithOCR() -> String? {
-        if let text = capture() { return text }
-        return captureViaVisionOCR()
-    }
-
-    /// Third channel: adaptive OCR capture — tries multiple capture sizes around mouse,
-    /// orders text spatially (top→bottom, left→right), filters by confidence.
-    @available(macOS, deprecated: 14.0, message: "CGWindowListCreateImage deprecated — ScreenCaptureKit preferred for future")
-    private func captureViaVisionOCR() -> String? {
-        return autoreleasepool {
-            let mouse = NSEvent.mouseLocation
-
-            // Adaptive sizes: tight → moderate → wide
-            let passes: [(width: CGFloat, height: CGFloat, minConfidence: Float)] = [
-                (240, 50,  0.35),   // pass 1: tight focus, high confidence
-                (400, 90,  0.25),   // pass 2: moderate, relaxed confidence
-                (560, 140, 0.15),   // pass 3: wide fallback
-            ]
-
-            for (w, h, minConf) in passes {
-                let rect = CGRect(
-                    x: mouse.x - w / 2,
-                    y: mouse.y - h / 2,
-                    width: w, height: h
-                )
-                guard let cgImage = CGWindowListCreateImage(
-                    rect, .optionOnScreenOnly, kCGNullWindowID, .bestResolution
-                ) else { continue }
-
-                let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .accurate
-                request.usesLanguageCorrection = true
-                request.recognitionLanguages = [
-                    "zh-Hans", "zh-Hant", "en",
-                    "ja", "ko", "fr", "de", "es"
-                ]
-                // Minimum text height to filter noise (in normalized coords 0..1)
-                request.minimumTextHeight = 0.02
-
-                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-                do { try handler.perform([request]) } catch { continue }
-
-                guard let observations = request.results,
-                      !observations.isEmpty else { continue }
-
-                // Filter by confidence, sort spatially: top→bottom then left→right
-                let filtered = observations
-                    .compactMap { obs -> (text: String, y: Float, x: Float, width: Float)? in
-                        guard let candidate = obs.topCandidates(1).first,
-                              candidate.confidence >= minConf else { return nil }
-                        let text = candidate.string
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !text.isEmpty else { return nil }
-                        let bb = obs.boundingBox
-                        return (text, Float(bb.origin.y), Float(bb.origin.x), Float(bb.width))
-                    }
-                    .sorted { a, b in
-                        // Group by Y ± 0.03 tolerance → same line, then sort by X
-                        if abs(a.y - b.y) > 0.03 { return a.y > b.y }  // top first
-                        return a.x < b.x  // left to right within line
-                    }
-
-                guard !filtered.isEmpty else { continue }
-
-                // Deduplicate adjacent identical tokens
-                var deduped: [String] = []
-                var prev = ""
-                for item in filtered {
-                    if item.text != prev { deduped.append(item.text) }
-                    prev = item.text
-                }
-
-                // Join with line breaks between Y-groups
-                var result = ""
-                var lastY: Float = -1
-                for item in filtered {
-                    if lastY >= 0, abs(item.y - lastY) > 0.03 {
-                        result += "\n"
-                    }
-                    if !result.isEmpty && result.last != "\n" { result += " " }
-                    result += item.text
-                    lastY = item.y
-                }
-                let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { return trimmed }
-            }
-            return nil
+        for strategy in ocrStrategies {
+            if let text = strategy.tryCapture() { return text }
         }
+        return nil
     }
 
-    private func captureViaSimulatedCopy() -> String? {
-        let pb = NSPasteboard.general
-        let initialCount = pb.changeCount
-        let savedStrings = pb.readObjects(forClasses: [NSString.self], options: nil) as? [String]
+    private let translateStrategies: [TextCaptureStrategy] = [
+        ClipboardCaptureStrategy(),
+        AXCaptureStrategy()
+    ]
 
-        // Atomic restore with changeCount validation — only restore if our copy is the sole change
-        defer {
-            let currentCount = pb.changeCount
-            if currentCount == initialCount + 1 {
-                pb.clearContents()
-                if let strings = savedStrings, !strings.isEmpty {
-                    pb.setString(strings.joined(separator: "\n"), forType: .string)
-                }
-            }
-            // else: user/third-party wrote during capture window — abandon restore
-        }
+    private let ocrStrategies: [TextCaptureStrategy] = [
+        ClipboardCaptureStrategy(),
+        AXCaptureStrategy(),
+        VisionOCRCaptureStrategy()
+    ]
 
-        let src = CGEventSource(stateID: .hidSystemState)
-        guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true),
-              let up   = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
-        else { return nil }
-        down.flags = .maskCommand
-        up.flags   = .maskCommand
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
 
-        var captured: String?
-        for _ in 0..<40 {
-            if pb.changeCount != initialCount {
-                captured = pb.string(forType: .string)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if let c = captured, !c.isEmpty { break }
-            }
-            Thread.sleep(forTimeInterval: 0.005)
-        }
-
-        return captured
-    }
-
-    private func captureViaAX() -> String? {
-        guard AXIsProcessTrusted() else { return nil }
-        let system = AXUIElementCreateSystemWide()
-        guard let appRef = system.copyAttribute(kAXFocusedApplicationAttribute as CFString),
-              CFGetTypeID(appRef) == AXUIElementGetTypeID()
-        else { return nil }
-        let app = appRef as! AXUIElement
-        guard let elemRef = app.copyAttribute(kAXFocusedUIElementAttribute as CFString),
-              CFGetTypeID(elemRef) == AXUIElementGetTypeID()
-        else { return nil }
-        let elem = elemRef as! AXUIElement
-        guard let s = elem.copyAttribute(kAXSelectedTextAttribute as CFString) as? String,
-              !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return nil }
-        return s
-    }
 }
 
 // ── C callback ──
@@ -384,11 +275,3 @@ private func unifiedHotkeyCallback(_: EventHandlerCallRef?, _ event: EventRef?, 
     return noErr
 }
 
-// ── AX convenience ──
-private extension AXUIElement {
-    func copyAttribute(_ attr: CFString) -> CFTypeRef? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(self, attr, &value) == .success else { return nil }
-        return value
-    }
-}

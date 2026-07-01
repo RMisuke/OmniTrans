@@ -23,6 +23,14 @@ enum APITestService {
                 try await testAnthropic(provider: provider)
             case .gemini:
                 try await testGoogle(provider: provider)
+            case .macOSNative:
+                break // local, always available
+            case .googleMT:
+                try await testGoogleMT(provider: provider)
+            case .bingMT:
+                try await testBingMT(provider: provider)
+            case .alibabaMT:
+                try await testAlibabaMT(provider: provider)
             }
             let latency = Date().timeIntervalSince(start)
             return .success(latency: latency)
@@ -42,6 +50,14 @@ enum APITestService {
                 return try await fetchAnthropicModels(provider: provider)
             case .gemini:
                 return try await fetchGoogleModels(provider: provider)
+            case .macOSNative:
+                return .success(["macOS Dictionary + Translation"])
+            case .googleMT:
+                return .success(["nmt"])
+            case .bingMT:
+                return .success(["general"])
+            case .alibabaMT:
+                return .success(["general"])
             }
         } catch {
             return .failure(error.localizedDescription)
@@ -164,4 +180,48 @@ enum APITestService {
         }
         _ = try JSONSerialization.jsonObject(with: data)
     }
+
+    // MARK: - Private: MT test helpers
+
+    private static func testGoogleMT(provider: APIProvider) async throws {
+        var components = URLComponents(string: provider.baseURL)!
+        components.queryItems = [URLQueryItem(name: "key", value: provider.apiKey)]
+        guard let url = components.url else { throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效地址"]) }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 15
+        let body: [String: Any] = ["q": "test", "target": "zh", "format": "text"]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "Google MT 认证失败"])
+        }
+        _ = try JSONSerialization.jsonObject(with: data)
+    }
+
+    private static func testBingMT(provider: APIProvider) async throws {
+        let region = provider.customRegion.isEmpty ? "global" : provider.customRegion
+        guard let url = URL(string: "\(provider.baseURL)/languages?api-version=3.0") else {
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效地址"])
+        }
+        var req = URLRequest(url: url)
+        req.setValue(provider.apiKey, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
+        req.setValue(region, forHTTPHeaderField: "Ocp-Apim-Subscription-Region")
+        req.timeoutInterval = 15
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "Bing MT 认证失败，请检查 Key 和 Region"])
+        }
+        _ = try JSONSerialization.jsonObject(with: data)
+    }
+
+    private static func testAlibabaMT(provider: APIProvider) async throws {
+        // Use a real signed API call to verify credentials
+        try await AlibabaCloudSigner.testConnectivity(
+            accessKeyId: provider.apiKey,
+            accessKeySecret: provider.apiSecret
+        )
+    }
 }
+

@@ -35,14 +35,12 @@ struct ContentView: View {
             }
             .help("翻译: \(HotkeyManager.hotkeyLabel())  |  OCR 框选: \(HotkeyManager.ocrHotkeyLabel())")
             Spacer()
-            Text("v\(kAppVersion)").font(.caption2).foregroundColor(.secondary)
             Button(action: { NSApplication.shared.terminate(nil) }) {
                 HStack(spacing: 2) { Image(systemName: "power"); Text("退出") }.font(.caption2)
             }.buttonStyle(.borderless).help("退出 OmniTrans").keyboardShortcut("q", modifiers: .command)
         }.padding(.horizontal, 12).padding(.vertical, 5)
     }
 
-    // D3: Keycap-style hotkey label
     private var keycapView: some View {
         let label = HotkeyManager.hotkeyLabel()
         return HStack(spacing: 1) {

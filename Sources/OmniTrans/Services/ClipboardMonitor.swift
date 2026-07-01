@@ -1,10 +1,14 @@
 import Cocoa
 
-/// Polls NSPasteboard changeCount and fires translation when new text is copied
+/// Zero-CPU clipboard monitor — reacts to system notifications instead of polling.
+/// On app-switch and pasteboard-distributed-notification events, compares changeCount
+/// atomically and fires translation only when new text is detected.
+///
+/// When the AX accessibility path fails to capture text on hotkey, the HotkeyManager
+/// can call `checkNow()` to force a single atomic changeCount comparison — no Timer needed.
 final class ClipboardMonitor {
     static let shared = ClipboardMonitor()
 
-    private var timer: Timer?
     private var lastChangeCount: Int = 0
     private var isRunning = false
     private var lastTranslationTime: Date = .distantPast
@@ -17,21 +21,42 @@ final class ClipboardMonitor {
         guard !isRunning else { return }
         isRunning = true
         lastChangeCount = NSPasteboard.general.changeCount
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.check()
-        }
-        RunLoop.main.add(timer!, forMode: .common)
+
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(self, selector: #selector(onWorkspaceEvent),
+                       name: NSWorkspace.didActivateApplicationNotification, object: nil)
+
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(onPasteboardChanged),
+            name: NSNotification.Name("com.apple.pasteboard.changed"),
+            object: nil, suspensionBehavior: .deliverImmediately
+        )
     }
 
     func stop() {
         isRunning = false
-        timer?.invalidate()
-        timer = nil
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        DistributedNotificationCenter.default().removeObserver(self)
     }
 
     var isMonitoring: Bool { isRunning }
 
+    /// Called externally (e.g. from HotkeyManager after AX text-capture fails)
+    /// to perform a single atomic clipboard comparison without a Timer loop.
+    func checkNow() {
+        check()
+    }
+
+    @objc private func onWorkspaceEvent(_ notification: Notification) {
+        check()
+    }
+
+    @objc private func onPasteboardChanged(_ notification: Notification) {
+        check()
+    }
+
     private func check() {
+        guard isRunning else { return }
         guard !suppressNext else { suppressNext = false; lastChangeCount = NSPasteboard.general.changeCount; return }
         let pb = NSPasteboard.general
         guard pb.changeCount != lastChangeCount else { return }
@@ -42,7 +67,6 @@ final class ClipboardMonitor {
               !text.isEmpty
         else { return }
 
-        // Debounce: skip if last translation was less than 2 seconds ago
         let now = Date()
         guard now.timeIntervalSince(lastTranslationTime) > 2.0 else { return }
         lastTranslationTime = now
@@ -51,7 +75,6 @@ final class ClipboardMonitor {
             let s = AppState.shared
             guard !s.isTranslating else { return }
             s.resetForNew(text: text)
-            // Show floating panel
             if let delegate = NSApplication.shared.delegate as? AppDelegate {
                 delegate.showFloatingPanel()
             }

@@ -33,6 +33,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Apply saved appearance mode
+        let mode = UserDefaults.standard.string(forKey: "app_appearance") ?? "system"
+        switch mode {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+        default:      NSApp.appearance = nil
+        }
         HotkeyManager.shared.onHotkey = { [weak self] text in
             self?.fire(text: text)
         }
@@ -79,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showFloatingPanel() {
         if !didSetup {
             let p = FloatingPanel.shared
-            p.setFrame(NSRect(x: 0, y: 0, width: 380, height: 200), display: false)
+            p.setFrame(NSRect(x: 0, y: 0, width: 380, height: 380), display: false)
             p.contentView = NSHostingView(rootView: FloatingTranslationView(state: AppState.shared))
             panel = p; didSetup = true
         }

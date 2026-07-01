@@ -1,258 +1,218 @@
 import SwiftUI
-import AppKit
 
 struct OnboardingView: View {
     let onDismiss: () -> Void
-
     @State private var page = 0
     private let totalPages = 3
 
     var body: some View {
         VStack(spacing: 0) {
-            // Page content — manual paging for macOS compatibility
+            // ── Content ──
             ZStack {
-                switch page {
-                case 0: permissionsPage
-                case 1: securityPage
-                case 2: usagePage
-                default: EmptyView()
-                }
+                if page == 0 { welcomePage.transition(.opacity) }
+                if page == 1 { securityPage.transition(.opacity) }
+                if page == 2 { featuresPage.transition(.opacity) }
             }
-            .frame(minHeight: 520)
             .animation(.easeInOut(duration: 0.25), value: page)
+            .frame(minHeight: 420)
 
             Divider()
 
-            // Bottom bar
+            // ── Footer ──
             HStack {
                 // Page dots
                 HStack(spacing: 6) {
                     ForEach(0..<totalPages, id: \.self) { i in
                         Circle()
                             .fill(i == page ? Color.accentColor : Color.secondary.opacity(0.3))
-                            .frame(width: 8, height: 8)
-                            .animation(.easeInOut(duration: 0.2), value: page)
+                            .frame(width: 7, height: 7)
                     }
                 }
-
                 Spacer()
-
                 if page > 0 {
                     Button("上一步") { withAnimation { page -= 1 } }
-                        .keyboardShortcut(.leftArrow, modifiers: [])
-                        .buttonStyle(.borderless)
-                        .controlSize(.large)
+                        .buttonStyle(.borderless).controlSize(.large)
                 }
-
                 if page < totalPages - 1 {
                     Button("下一步") { withAnimation { page += 1 } }
-                        .keyboardShortcut(.rightArrow, modifiers: [])
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
+                        .buttonStyle(.borderedProminent).controlSize(.large)
                 } else {
-                    Button("开始使用") { onDismiss() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .keyboardShortcut(.return, modifiers: .command)
+                    Button("开始使用 OmniTrans") { onDismiss() }
+                        .buttonStyle(.borderedProminent).controlSize(.large)
+                        .keyboardShortcut(.return, modifiers: .command)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
+            .padding(.horizontal, 32).padding(.vertical, 16)
         }
-        .frame(minWidth: 560)
+        .frame(width: 600)
     }
 
-    // MARK: - Page 1: Permissions
+    // MARK: - Page 0 — Welcome
 
-    private var permissionsPage: some View {
+    private var welcomePage: some View {
         VStack(spacing: 20) {
-            Image(systemName: "hand.raised.slash")
-                .font(.system(size: 48))
-                .foregroundColor(.accentColor)
-                .padding(.top, 12)
+            // App icon
+            if let iconPath = Bundle.main.path(forResource: "icon", ofType: "icns"),
+               let nsImage = NSImage(contentsOfFile: iconPath) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .frame(width: 72, height: 72)
+                    .cornerRadius(16)
+                    .shadow(radius: 3)
+            } else {
+                Image(systemName: "character.bubble.fill")
+                    .font(.system(size: 56))
+                    .foregroundColor(.accentColor)
+            }
 
-            Text("需要两项系统权限")
-                .font(.title2)
-                .bold()
+            Text("欢迎使用 OmniTrans")
+                .font(.system(size: 26, weight: .bold))
 
-            Text("OmniTrans通过快捷键和划词取词工作，需要以下权限才能正常运行")
-                .font(.subheadline)
+            Text("AI 驱动的智能翻译工具，集成在菜单栏中随时调用")
+                .font(.system(size: 15))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
+                .padding(.horizontal, 40)
 
-            VStack(alignment: .leading, spacing: 16) {
-                permissionRow(
-                    icon: "accessibility",
-                    title: "辅助功能权限",
-                    desc: "用于读取其他应用中的选中文本",
-                    action: "系统设置 → 隐私与安全性 → 辅助功能",
-                    url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            VStack(alignment: .leading, spacing: 14) {
+                OnboardRow(
+                    icon: "text.bubble.fill",
+                    color: .blue,
+                    title: "划词翻译",
+                    desc: "选中任意文本，按下 \(HotkeyManager.hotkeyLabel()) 即刻弹出悬浮翻译窗"
                 )
-                permissionRow(
-                    icon: "rectangle.dashed.badge.record",
-                    title: "屏幕录制权限",
-                    desc: "用于 OCR 识别无法直接选中的文本（如图片中的文字）",
-                    action: "系统设置 → 隐私与安全性 → 屏幕录制",
-                    url: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+                OnboardRow(
+                    icon: "rectangle.dashed",
+                    color: .orange,
+                    title: "OCR 框选翻译",
+                    desc: "按下 \(HotkeyManager.ocrHotkeyLabel()) 拖拽框选屏幕任意区域，识别图片与 PDF 文字"
+                )
+                OnboardRow(
+                    icon: "character.book.closed.fill",
+                    color: .purple,
+                    title: "智能词典",
+                    desc: "输入单词自动切换词典模式，显示音标、释义、例句"
                 )
             }
-            .padding(.horizontal, 20)
-
-            Text("权限仅用于翻译功能，不会记录或上传屏幕内容")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            .padding(.horizontal, 40)
         }
+        .padding(.vertical, 30)
     }
 
-    private func permissionRow(icon: String, title: String, desc: String, action: String, url: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundColor(.orange)
-                .frame(width: 28)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.callout).bold()
-                Text(desc).font(.caption).foregroundColor(.secondary)
-                Button {
-                    if let u = URL(string: url) {
-                        NSWorkspace.shared.open(u)
-                    }
-                } label: {
-                    Text(action).font(.caption2)
-                }
-                .buttonStyle(.link)
-            }
-        }
-        .padding(12)
-        .background(Color.primary.opacity(0.04))
-        .cornerRadius(8)
-    }
-
-    // MARK: - Page 2: Security
+    // MARK: - Page 1 — Permissions & Security
 
     private var securityPage: some View {
         VStack(spacing: 20) {
-            Image(systemName: "key.horizontal")
+            Image(systemName: "lock.shield.fill")
                 .font(.system(size: 48))
                 .foregroundColor(.green)
-                .padding(.top, 12)
 
-            Text("API 密钥安全存储")
-                .font(.title2)
-                .bold()
+            Text("隐私与安全")
+                .font(.system(size: 24, weight: .bold))
 
-            Text("你的 API 密钥将加密保存在系统钥匙串中")
-                .font(.subheadline)
+            Text("OmniTrans 将您的隐私放在首位")
+                .font(.system(size: 15))
                 .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
 
-            VStack(alignment: .leading, spacing: 16) {
-                securityRow(
-                    icon: "lock.shield",
-                    title: "钥匙串加密",
-                    desc: "所有 API 密钥使用 macOS 钥匙串加密存储，与 iCloud 钥匙串同步，安全可靠"
+            VStack(alignment: .leading, spacing: 12) {
+                OnboardRow(
+                    icon: "key.horizontal",
+                    color: .green,
+                    title: "AES-256 本地加密",
+                    desc: "API 密钥使用 AES-256-GCM 加密存储在本机，密钥绑定硬件标识，其他应用或用户无法读取"
                 )
-                securityRow(
-                    icon: "eye.slash",
-                    title: "仅本地使用",
-                    desc: "密钥仅在调用 AI API 时通过 HTTPS 发送，不会上传至任何第三方服务器"
+                OnboardRow(
+                    icon: "network.slash",
+                    color: .indigo,
+                    title: "无数据收集",
+                    desc: "翻译请求通过 HTTPS 直连 API 服务商，不经过任何中间服务器。软件无埋点，不上传任何数据"
                 )
-                securityRow(
-                    icon: "touchid",
-                    title: "输入钥匙串密码",
-                    desc: "保存 API 密钥时，系统可能会提示输入登录密码或使用 Touch ID 授权"
+                OnboardRow(
+                    icon: "hand.raised.slash.fill",
+                    color: .orange,
+                    title: "按需授权",
+                    desc: "首次使用时按需申请辅助功能与屏幕录制权限，权限仅用于取词翻译，不记录屏幕内容"
                 )
             }
-            .padding(.horizontal, 20)
-
-            Text("钥匙串密码即 Mac 登录密码")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            .padding(.horizontal, 40)
         }
+        .padding(.vertical, 30)
     }
 
-    private func securityRow(icon: String, title: String, desc: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundColor(.green)
-                .frame(width: 28)
+    // MARK: - Page 2 — Features
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.callout).bold()
-                Text(desc).font(.caption).foregroundColor(.secondary)
-            }
-        }
-        .padding(12)
-        .background(Color.primary.opacity(0.04))
-        .cornerRadius(8)
-    }
-
-    // MARK: - Page 3: Usage
-
-    private var usagePage: some View {
+    private var featuresPage: some View {
         VStack(spacing: 20) {
-            Image(systemName: "wand.and.stars")
+            Image(systemName: "sparkles")
                 .font(.system(size: 48))
                 .foregroundColor(.purple)
-                .padding(.top, 12)
 
-            Text("快速上手")
-                .font(.title2)
-                .bold()
+            Text("强大的翻译能力")
+                .font(.system(size: 24, weight: .bold))
 
-            VStack(alignment: .leading, spacing: 16) {
-                usageRow(
-                    icon: "command",
-                    title: "快捷键翻译",
-                    desc: "在任意应用中选中文本，按下 \(HotkeyManager.hotkeyLabel()) 即可弹出翻译悬浮窗"
+            Text("集成多种翻译引擎，覆盖所有使用场景")
+                .font(.system(size: 15))
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 12) {
+                OnboardRow(
+                    icon: "cpu.fill",
+                    color: .blue,
+                    title: "12+ AI 大模型",
+                    desc: "OpenAI · Claude · Gemini · 通义千问 · DeepSeek · SenseNova 等，支持流式输出"
                 )
-                usageRow(
-                    icon: "rectangle.dashed",
-                    title: "OCR 框选翻译",
-                    desc: "按下 \(HotkeyManager.ocrHotkeyLabel())，鼠标拖拽框选屏幕区域，自动 OCR 识别并翻译（适合图片、PDF 中的文字）"
+                OnboardRow(
+                    icon: "globe",
+                    color: .green,
+                    title: "3 种机器翻译",
+                    desc: "Google Translate · Bing Translator · 阿里云机器翻译，稳定可靠"
                 )
-                usageRow(
-                    icon: "doc.on.clipboard",
-                    title: "剪贴板监听",
-                    desc: "开启后在设置中启用「自动翻译拷贝内容」，复制文本即自动翻译"
+                OnboardRow(
+                    icon: "apple.logo",
+                    color: .gray,
+                    title: "macOS 原生引擎",
+                    desc: "内置系统离线词典与神经网络翻译，零网络、零 Token 消耗"
                 )
-                usageRow(
-                    icon: "gearshape",
-                    title: "配置 API",
-                    desc: "在设置 → API 配置中添加 AI 服务商，支持 OpenAI、Claude、Gemini 及国内主流模型"
-                )
-                usageRow(
-                    icon: "rectangle.3.group",
-                    title: "悬浮窗操作",
-                    desc: "翻译结果直接在悬浮窗显示，可切换语言、拷贝结果，按 Esc 或点击外部关闭"
+                OnboardRow(
+                    icon: "gearshape.fill",
+                    color: .secondary,
+                    title: "灵活配置",
+                    desc: "词典/翻译模式可独立选模型 · 深色/浅色主题 · 自定义提示词 · 翻译历史回溯"
                 )
             }
-            .padding(.horizontal, 20)
-
-            Text("点击菜单栏 💬 图标也可打开完整翻译窗口")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            .padding(.horizontal, 40)
         }
+        .padding(.vertical, 30)
     }
+}
 
-    private func usageRow(icon: String, title: String, desc: String) -> some View {
+// MARK: - Reusable row
+
+private struct OnboardRow: View {
+    let icon: String
+    let color: Color
+    let title: String
+    let desc: String
+
+    var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.title3)
-                .foregroundColor(.purple)
-                .frame(width: 28)
+                .font(.system(size: 20))
+                .foregroundColor(color)
+                .frame(width: 32)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.callout).bold()
-                Text(desc).font(.caption).foregroundColor(.secondary)
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                Text(desc)
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(12)
-        .background(Color.primary.opacity(0.04))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.05))
         .cornerRadius(8)
     }
 }

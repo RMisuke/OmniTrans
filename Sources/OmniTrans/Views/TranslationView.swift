@@ -34,6 +34,8 @@ struct TranslationView: View {
         .onChange(of: state.streamingFinished) { _, _ in stopCursor() }
     }
 
+    // MARK: - Toast
+
     private var copyToast: some View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
@@ -57,7 +59,6 @@ struct TranslationView: View {
             if state.isTranslating {
                 ProgressView().scaleEffect(0.5).padding(.leading, 4)
             }
-            // A3: Success check
             if state.showSuccessPulse {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
@@ -78,6 +79,8 @@ struct TranslationView: View {
         .padding(.vertical, 6)
     }
 
+    // MARK: - Provider menu
+
     private var providerMenu: some View {
         Menu {
             if state.enabledProviders.isEmpty {
@@ -87,7 +90,10 @@ struct TranslationView: View {
             } else {
                 Section("选择 API") {
                     ForEach(state.enabledProviders) { p in
-                        Button(action: { state.selectedProviderID = p.id }) {
+                        Button(action: {
+                            state.selectedProviderID = p.id
+                            ProviderStorageManager.saveSelectedProviderID(p.id)
+                        }) {
                             HStack {
                                 Circle()
                                     .fill(p.id == state.selectedProviderID ? Color.accentColor : Color.clear)
@@ -137,94 +143,93 @@ struct TranslationView: View {
                 }
             }) {
                 Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundColor(.accentColor)
-                    .rotationEffect(.degrees(swapTrigger ? 180 : 0))
             }
             .buttonStyle(.borderless)
-            .help("交换源语言和目标语言")
+            .help("交换语言")
 
             Picker("目标语言", selection: $state.targetLang) {
-                ForEach(TranslationLanguage.allCases.filter { $0 != .auto }) { l in
-                    Text(l.rawValue).tag(l)
-                }
+                ForEach(TranslationLanguage.allCases.filter { $0 != .auto }) { l in Text(l.rawValue).tag(l) }
             }
             .pickerStyle(.menu)
             .frame(width: 120)
 
             Spacer()
 
-            Button(action: { state.translate() }) {
-                HStack(spacing: 4) {
-                    if state.isTranslating {
-                        ProgressView().scaleEffect(0.7)
-                    } else {
-                        Image(systemName: "arrow.trianglehead.swap")
+            // ── Clear button ──
+            if !state.inputText.isEmpty {
+                Button(action: clearAll) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "xmark.circle").font(.caption)
+                        Text("清空").font(.caption)
                     }
-                    Text(state.isTranslating ? "翻译中" : "翻译")
                 }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+                .help("清空输入和翻译结果")
+            }
+
+            // ── Translate button ──
+            Button(action: { state.translate() }) {
+                HStack(spacing: 2) {
+                    Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 11))
+                    Text("翻译").font(.system(size: 11))
+                }
+                .padding(.horizontal, 6).padding(.vertical, 3)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
             .disabled(state.isTranslating || state.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .keyboardShortcut(.return, modifiers: .command)
-            .help("开始翻译 (⌘↩)")
+            .keyboardShortcut(.return, modifiers: [])
         }
     }
 
-    // MARK: - Input (B1: distinguished bg)
+    // MARK: - Input
 
     private var inputArea: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("输入文本")
-                    .font(.caption).foregroundColor(.secondary)
+                Text("输入文本").font(.caption).foregroundColor(.secondary)
                 Spacer()
-                if !state.inputText.isEmpty {
-                    Text("\(state.inputText.count) 字符").font(.caption2).foregroundColor(.secondary)
-                    Button("清空") { state.inputText = "" }
-                        .font(.caption2).buttonStyle(.borderless)
-                }
+                Text("\(state.inputText.count) 字符").font(.caption2).foregroundColor(.secondary)
             }
             .padding(.horizontal, 12).padding(.top, 6)
 
-            ZStack(alignment: .topLeading) {
-                if state.inputText.isEmpty {
-                    Text("选中文本 → 快捷键 → 悬浮窗翻译  |  也可直接粘贴后点翻译")
-                        .font(.body)
-                        .foregroundColor(.secondary.opacity(0.5))
-                        .padding(.horizontal, 14)
-                        .padding(.top, 10)
+            if state.detectedIsWord {
+                HStack(spacing: 4) {
+                    Image(systemName: "character.book.closed.fill")
+                        .font(.caption2).foregroundColor(.accentColor)
+                    Text("检测到单词 — 词典模式")
+                        .font(.system(size: 10)).foregroundColor(.accentColor)
                 }
-                TextEditor(text: $state.inputText)
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .background(.clear)
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 4)
+                .padding(.horizontal, 10).padding(.vertical, 3)
+                .background(Color.accentColor.opacity(0.08))
+                .cornerRadius(4)
+                .padding(.horizontal, 12).padding(.top, 4)
             }
+
+            TextEditor(text: $state.inputText)
+                .font(.system(size: 15))
+                .frame(minHeight: 72, maxHeight: 120)
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 8)
         }
-        .background(Color.primary.opacity(0.02))
     }
 
-    // MARK: - Output (B1: distinguished bg, B2: char count)
+    // MARK: - Output
 
     private var outputArea: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("翻译结果")
-                    .font(.caption).foregroundColor(.secondary)
+                Text("翻译结果").font(.caption).foregroundColor(.secondary)
                 Spacer()
                 if !state.translatedText.isEmpty {
-                    Text("\(state.translatedText.count) 字符")
-                        .font(.caption2).foregroundColor(.secondary)
+                    Text("\(state.translatedText.count) 字符").font(.caption2).foregroundColor(.secondary)
                 }
                 if !state.translatedText.isEmpty {
                     Button(action: copyResult) {
-                        HStack(spacing: 2) {
-                            Image(systemName: "doc.on.doc")
-                            Text("拷贝")
-                        }
-                        .font(.caption2)
+                        Image(systemName: "doc.on.doc").font(.caption2)
                     }
                     .buttonStyle(.borderless)
                     .help("拷贝翻译结果")
@@ -239,58 +244,43 @@ struct TranslationView: View {
                         Text("正在调用 \(state.selectedProvider?.name ?? "API") 翻译...")
                             .font(.caption).foregroundColor(.secondary)
                     }
-                    .padding(.leading, 16)
-                    .padding(.top, 10)
+                    .padding(.leading, 16).padding(.top, 10)
                 }
-
                 if let error = state.errorMessage {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                                // A3: error shake
-                                .offset(x: state.showErrorShake ? 3 : 0)
-                                .animation(state.showErrorShake ? .easeInOut(duration: 0.06).repeatCount(4, autoreverses: true) : .default, value: state.showErrorShake)
-                            Text("翻译失败").font(.caption).bold().foregroundColor(.orange)
-                        }
-                        Text(error).font(.caption).foregroundColor(.red).lineLimit(3)
-                        HStack(spacing: 8) {
-                            Button(action: { state.retryTranslate() }) {
-                                Label("重试", systemImage: "arrow.clockwise")
-                                    .font(.caption2)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .disabled(state.isTranslating)
-                        }
-                    }
-                    .padding(10)
-                    .background(Color.red.opacity(0.06))
-                    .cornerRadius(8)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 6)
+                    errorBlock(error)
                 }
-
-                // A1: Streaming text with cursor
                 HStack(alignment: .top, spacing: 0) {
                     Text(state.translatedText)
-                        .font(.body)
+                        .font(.system(size: 15))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if state.isTranslating && showCursor {
                         Rectangle()
                             .fill(Color.accentColor)
-                            .frame(width: 2, height: 16)
-                            .opacity(showCursor ? 1 : 0)
-                            .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: showCursor)
+                            .frame(width: 2, height: 15)
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.top, 4)
+                .padding(.horizontal, 12).padding(.top, 4)
             }
-            .padding(.bottom, 4)
+            .padding(.bottom, 8)
         }
-        .background(Color.primary.opacity(0.03))
+    }
+
+    // MARK: - Error
+
+    private func errorBlock(_ error: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(error).font(.caption).foregroundColor(.red)
+            Button(action: { state.retryTranslate() }) {
+                Label("重试", systemImage: "arrow.clockwise").font(.caption2)
+            }
+            .buttonStyle(.borderedProminent).controlSize(.small)
+            .disabled(state.isTranslating)
+        }
+        .padding(10)
+        .background(Color.red.opacity(0.08))
+        .cornerRadius(8)
+        .padding(.horizontal, 12).padding(.top, 6)
     }
 
     // MARK: - Actions
@@ -302,19 +292,21 @@ struct TranslationView: View {
         state.targetLang = tmp
     }
 
+    private func clearAll() {
+        state.inputText = ""
+        state.translatedText = ""
+        state.dictionaryEntry = nil
+        state.errorMessage = nil
+    }
+
     private func copyResult() {
         ClipboardMonitor.shared.suppressNext = true
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(state.translatedText, forType: .string)
-        // D1: Haptic
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         showCopyToast = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            showCopyToast = false
-        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { showCopyToast = false }
     }
-
-    // MARK: - Cursor
 
     private func startCursor() {
         showCursor = true
