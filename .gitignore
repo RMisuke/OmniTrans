@@ -2,3 +2,5 @@
 .build/
 .swiftpm/
 token.txt
+OmniTrans Release/
+doc/
