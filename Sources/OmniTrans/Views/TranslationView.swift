@@ -67,6 +67,35 @@ struct TranslationView: View {
             }
 
             Spacer()
+
+            // Prompt profile picker
+            Menu {
+                ForEach(ProfileStore.shared.profiles) { profile in
+                    Button(action: { ProfileStore.shared.selectProfile(profile.id) }) {
+                        HStack {
+                            Image(systemName: profile.iconName).font(.caption)
+                            Text(profile.name)
+                            if profile.id == ProfileStore.shared.activeProfileID {
+                                Image(systemName: "checkmark").font(.caption).foregroundColor(.accentColor)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "text.bubble").font(.system(size: 9))
+                    Text(ProfileStore.shared.activeProfile?.name ?? "默认")
+                        .font(.caption2).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.system(size: 7))
+                }
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 5).padding(.vertical, 2)
+                .background(Color.primary.opacity(0.06))
+                .cornerRadius(4)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 90)
+
             providerMenu
             Button(action: { showSettings = true }) {
                 Image(systemName: "gearshape")
@@ -228,6 +257,15 @@ struct TranslationView: View {
                     Text("\(state.translatedText.count) 字符").font(.caption2).foregroundColor(.secondary)
                 }
                 if !state.translatedText.isEmpty {
+                    Button(action: {
+                        let textToSpeak = state.translatedText
+                        guard !textToSpeak.isEmpty else { return }
+                        TTSManager.shared.speakNative(text: textToSpeak)
+                    }) {
+                        Image(systemName: "speaker.wave.2").font(.caption2)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("朗读翻译结果")
                     Button(action: copyResult) {
                         Image(systemName: "doc.on.doc").font(.caption2)
                     }

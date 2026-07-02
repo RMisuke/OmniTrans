@@ -31,6 +31,8 @@ enum APITestService {
                 try await testBingMT(provider: provider)
             case .alibabaMT:
                 try await testAlibabaMT(provider: provider)
+            case .volcengineMT:
+                try await testVolcengineMT(provider: provider)
             }
             let latency = Date().timeIntervalSince(start)
             return .success(latency: latency)
@@ -57,6 +59,8 @@ enum APITestService {
             case .bingMT:
                 return .success(["general"])
             case .alibabaMT:
+                return .success(["general"])
+            case .volcengineMT:
                 return .success(["general"])
             }
         } catch {
@@ -221,6 +225,13 @@ enum APITestService {
         try await AlibabaCloudSigner.testConnectivity(
             accessKeyId: provider.apiKey,
             accessKeySecret: provider.apiSecret
+        )
+    }
+
+    private static func testVolcengineMT(provider: APIProvider) async throws {
+        try await VolcengineSigner.testConnectivity(
+            accessKey: provider.apiKey,
+            secretKey: provider.apiSecret
         )
     }
 }

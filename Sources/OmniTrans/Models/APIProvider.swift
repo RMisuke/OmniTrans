@@ -9,13 +9,14 @@ enum ProviderKind: String, Codable, CaseIterable, Identifiable {
     case googleMT   = "Google 翻译"
     case bingMT     = "Bing 翻译"
     case alibabaMT  = "阿里云翻译"
+    case volcengineMT = "火山翻译"
 
     var id: String { rawValue }
 
     /// Whether this kind is a traditional (non-streaming) machine translation API.
     var isTraditionalMT: Bool {
         switch self {
-        case .googleMT, .bingMT, .alibabaMT: return true
+        case .googleMT, .bingMT, .alibabaMT, .volcengineMT: return true
         default: return false
         }
     }
@@ -30,6 +31,7 @@ enum ProviderKind: String, Codable, CaseIterable, Identifiable {
         case .googleMT:      return "https://translation.googleapis.com/language/translate/v2"
         case .bingMT:        return "https://api.cognitive.microsofttranslator.com"
         case .alibabaMT:     return "https://mt.cn-hangzhou.aliyuncs.com"
+        case .volcengineMT:  return "https://translate.volcengineapi.com"
         }
     }
 
@@ -43,6 +45,7 @@ enum ProviderKind: String, Codable, CaseIterable, Identifiable {
         case .googleMT:      return "nmt"
         case .bingMT:        return "general"
         case .alibabaMT:     return "general"
+        case .volcengineMT:  return "general"
         }
     }
 }

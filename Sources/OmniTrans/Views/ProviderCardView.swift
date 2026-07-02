@@ -92,7 +92,7 @@ struct ProviderCardView: View {
                 SecureField(keyPlaceholder, text: $editKey).textFieldStyle(.roundedBorder).onChange(of: editKey) { markDirty() }
             }
             if editKind.isTraditionalMT {
-                if editKind == .alibabaMT || editKind == .bingMT {
+                if editKind == .alibabaMT || editKind == .volcengineMT || editKind == .bingMT {
                     HStack(spacing: 6) {
                         Text(secretLabel).font(.caption).foregroundColor(AppTheme.textSecondary).frame(width: 70, alignment: .leading)
                         SecureField(secretPlaceholder, text: $editSecret).textFieldStyle(.roundedBorder).onChange(of: editSecret) { markDirty() }
@@ -131,10 +131,10 @@ struct ProviderCardView: View {
         Text(kind.rawValue).font(.caption2).foregroundColor(AppTheme.textAccent).padding(.horizontal, 6).padding(.vertical, 1).background(AppTheme.textAccent.opacity(0.1)).cornerRadius(4)
     }
 
-    private var keyLabel: String { switch editKind { case .alibabaMT: "Key ID"; case .bingMT: "Key"; default: "API Key" } }
-    private var keyPlaceholder: String { switch editKind { case .alibabaMT: "AccessKey ID"; default: "sk-..." } }
-    private var secretLabel: String { switch editKind { case .alibabaMT: "Secret"; case .bingMT: "Secret"; default: "Secret" } }
-    private var secretPlaceholder: String { switch editKind { case .alibabaMT: "AccessKey Secret"; case .bingMT: "API Secret"; default: "..." } }
+    private var keyLabel: String { switch editKind { case .alibabaMT, .volcengineMT: "Key ID"; case .bingMT: "Key"; default: "API Key" } }
+    private var keyPlaceholder: String { switch editKind { case .alibabaMT, .volcengineMT: "Access Key"; default: "sk-..." } }
+    private var secretLabel: String { switch editKind { case .alibabaMT, .volcengineMT: "Secret"; case .bingMT: "Secret"; default: "Secret" } }
+    private var secretPlaceholder: String { switch editKind { case .alibabaMT, .volcengineMT: "Secret Key"; case .bingMT: "API Secret"; default: "..." } }
 
     private var actionButtons: some View {
         HStack(spacing: 4) {

@@ -44,7 +44,7 @@ struct OnboardingView: View {
             }
             .padding(.horizontal, 32).padding(.vertical, 16)
         }
-        .frame(width: 600)
+        .frame(width: 640)
     }
 
     // MARK: - Page 0 — Welcome
@@ -68,7 +68,7 @@ struct OnboardingView: View {
             Text("欢迎使用 OmniTrans")
                 .font(.system(size: 26, weight: .bold))
 
-            Text("AI 驱动的智能翻译工具，集成在菜单栏中随时调用")
+            Text("纯 Swift 原生的智能翻译工具，菜单栏常驻 · 零第三方依赖 · 约 4 MB")
                 .font(.system(size: 15))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -88,10 +88,10 @@ struct OnboardingView: View {
                     desc: "按下 \(HotkeyManager.ocrHotkeyLabel()) 拖拽框选屏幕任意区域，识别图片与 PDF 文字"
                 )
                 OnboardRow(
-                    icon: "character.book.closed.fill",
+                    icon: "speaker.wave.2.fill",
                     color: .purple,
-                    title: "智能词典",
-                    desc: "输入单词自动切换词典模式，显示音标、释义、例句"
+                    title: "TTS 朗读",
+                    desc: "翻译结果或词典词汇可一键朗读，悬浮窗关闭时自动停止"
                 )
             }
             .padding(.horizontal, 40)
@@ -119,7 +119,7 @@ struct OnboardingView: View {
                     icon: "key.horizontal",
                     color: .green,
                     title: "AES-256 本地加密",
-                    desc: "API 密钥使用 AES-256-GCM 加密存储在本机，密钥绑定硬件标识，其他应用或用户无法读取"
+                    desc: "API 密钥使用 AES-256-GCM 文件加密（弃用 Keychain），密钥绑定 IOPlatformUUID"
                 )
                 OnboardRow(
                     icon: "network.slash",
@@ -147,10 +147,10 @@ struct OnboardingView: View {
                 .font(.system(size: 48))
                 .foregroundColor(.purple)
 
-            Text("强大的翻译能力")
+            Text("全栈翻译能力")
                 .font(.system(size: 24, weight: .bold))
 
-            Text("集成多种翻译引擎，覆盖所有使用场景")
+            Text("策略工厂 + 三级降级 + 解析器抽象，覆盖所有场景")
                 .font(.system(size: 15))
                 .foregroundColor(.secondary)
 
@@ -158,26 +158,26 @@ struct OnboardingView: View {
                 OnboardRow(
                     icon: "cpu.fill",
                     color: .blue,
-                    title: "12+ AI 大模型",
-                    desc: "OpenAI · Claude · Gemini · 通义千问 · DeepSeek · SenseNova 等，支持流式输出"
+                    title: "策略工厂 + 解析器抽象",
+                    desc: "TranslationEngineFactory 统一分发引擎，OpenAI/Claude/Gemini 各用独立 SSE 解析器"
                 )
                 OnboardRow(
                     icon: "globe",
                     color: .green,
-                    title: "3 种机器翻译",
-                    desc: "Google Translate · Bing Translator · 阿里云机器翻译，稳定可靠"
+                    title: "三级自动降级",
+                    desc: "LLM → MT → macOS 原生引擎逐级回退，失败即时切换"
                 )
                 OnboardRow(
                     icon: "apple.logo",
                     color: .gray,
-                    title: "macOS 原生引擎",
-                    desc: "内置系统离线词典与神经网络翻译，零网络、零 Token 消耗"
+                    title: "火山翻译 · Qwen · DeepSeek",
+                    desc: "新增火山翻译 HMAC-SHA256 签名认证，模型全面升级至最新版本"
                 )
                 OnboardRow(
                     icon: "gearshape.fill",
                     color: .secondary,
-                    title: "灵活配置",
-                    desc: "词典/翻译模式可独立选模型 · 深色/浅色主题 · 自定义提示词 · 翻译历史回溯"
+                    title: "动态窗口 + 场景预设",
+                    desc: "四种尺寸 + 自动适配内容高度；翻译/润色/口语/代码/文案 5 种 prompt 模板"
                 )
             }
             .padding(.horizontal, 40)

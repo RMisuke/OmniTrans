@@ -32,6 +32,7 @@ enum TranslationService {
         case .googleMT:             return try await mtFallback(text, sourceLang, targetLang, provider, kind: .googleMT)
         case .bingMT:               return try await mtFallback(text, sourceLang, targetLang, provider, kind: .bingMT)
         case .alibabaMT:            return try await mtFallback(text, sourceLang, targetLang, provider, kind: .alibabaMT)
+        case .volcengineMT:         return try await mtFallback(text, sourceLang, targetLang, provider, kind: .volcengineMT)
         }
     }
 

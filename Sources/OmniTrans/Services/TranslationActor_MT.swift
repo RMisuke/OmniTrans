@@ -138,3 +138,104 @@ enum AlibabaCloudSigner {
         return Data(authCode).base64EncodedString()
     }
 }
+
+// MARK: - Volcengine (火山翻译) HMAC-SHA256 Signer
+
+enum VolcengineSigner {
+    private static let unreservedChars = CharacterSet(charactersIn:
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~")
+
+    /// Volcengine TranslateText API.
+    /// Docs: https://www.volcengine.com/docs/4640/130872
+    /// Uses query-parameter based HMAC-SHA256 signing (similar to Alibaba Cloud).
+    static func signedQuery(
+        accessKey: String,
+        secretKey: String,
+        sourceText: String,
+        sourceLanguage: String = "auto",
+        targetLanguage: String = "zh"
+    ) -> String {
+        let timestamp = iso8601Timestamp()
+        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+
+        var params: [(String, String)] = [
+            ("AccessKeyId", accessKey),
+            ("Action", "TranslateText"),
+            ("Version", "2020-06-01"),
+            ("SourceLanguage", sourceLanguage),
+            ("TargetLanguage", targetLanguage),
+            ("TextList", "[\(sourceText.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? sourceText)]"),
+            ("SignatureMethod", "HMAC-SHA256"),
+            ("SignatureNonce", nonce),
+            ("SignatureVersion", "1.0"),
+            ("Timestamp", timestamp),
+        ]
+
+        params.sort { $0.0 < $1.0 }
+
+        let canonicalQuery = params.map { key, value in
+            percentEncode(key) + "=" + percentEncode(value)
+        }.joined(separator: "&")
+
+        let stringToSign = "GET&" + percentEncode("/") + "&" + percentEncode(canonicalQuery)
+        let signature = hmacSHA256Base64(key: secretKey + "&", message: stringToSign)
+
+        return canonicalQuery + "&Signature=" + percentEncode(signature)
+    }
+
+    static func testConnectivity(accessKey: String, secretKey: String) async throws {
+        let query = signedQuery(
+            accessKey: accessKey,
+            secretKey: secretKey,
+            sourceText: "hello",
+            sourceLanguage: "en",
+            targetLanguage: "zh"
+        )
+        guard let url = URL(string: "https://translate.volcengineapi.com/?\(query)") else {
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效地址"])
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 15
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw NSError(domain: "", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "无响应"])
+        }
+        let body = String(data: data, encoding: .utf8) ?? ""
+        guard http.statusCode == 200 else {
+            print("[VolcengineTest] ❌ HTTP \(http.statusCode): \(body.prefix(200))")
+            throw NSError(domain: "", code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "火山翻译认证失败: \(body.prefix(100))"])
+        }
+        print("[VolcengineTest] ✅ HTTP 200")
+        // Try to parse TranslationList
+        if body.contains("TranslationList") {
+            print("[VolcengineTest] ✅ hello translated")
+        }
+    }
+
+    // MARK: - Private helpers
+
+    private static func iso8601Timestamp() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")!
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        return f.string(from: Date())
+    }
+
+    private static func percentEncode(_ string: String) -> String {
+        string.addingPercentEncoding(withAllowedCharacters: unreservedChars) ?? string
+    }
+
+    private static func hmacSHA256Base64(key: String, message: String) -> String {
+        guard let keyData = key.data(using: .utf8),
+              let msgData = message.data(using: .utf8)
+        else { return "" }
+        let symmetricKey = SymmetricKey(data: keyData)
+        let authCode = HMAC<SHA256>.authenticationCode(for: msgData, using: symmetricKey)
+        return Data(authCode).base64EncodedString()
+    }
+}

@@ -33,7 +33,7 @@ struct FloatingTranslationView: View {
             bottomBar
             resizeGrip
         }
-        .frame(minWidth: 340, minHeight: 380)
+        .frame(minWidth: 340, minHeight: 280)
         .background(.regularMaterial)
         .cornerRadius(12)
         .animation(.spring(response: 0.35, dampingFraction: 0.75), value: isDict)
@@ -48,6 +48,7 @@ struct FloatingTranslationView: View {
                     .stroke(Color.green, lineWidth: 2)
             }
         }
+
     }
 
     // MARK: - Drag handle
@@ -79,15 +80,20 @@ struct FloatingTranslationView: View {
                 Menu {
                     ForEach(state.enabledProviders) { p in
                         Button(action: {
-                            state.selectedProviderID = p.id
-                            ProviderStorageManager.saveSelectedProviderID(p.id)
+                            if isDict {
+                                state.dictProviderID = p.id
+                                ProviderStorageManager.saveDictProviderID(p.id)
+                            } else {
+                                state.selectedProviderID = p.id
+                                ProviderStorageManager.saveSelectedProviderID(p.id)
+                            }
                         }) {
                             HStack {
                                 Circle()
-                                    .fill(p.id == state.selectedProviderID ? Color.accentColor : Color.clear)
+                                    .fill(p.id == (isDict ? state.dictProviderID : state.selectedProviderID) ? Color.accentColor : Color.clear)
                                     .frame(width: 6, height: 6)
                                 Text(p.name.isEmpty ? "未命名" : p.name)
-                                if p.id == state.selectedProviderID {
+                                if p.id == (isDict ? state.dictProviderID : state.selectedProviderID) {
                                     Image(systemName: "checkmark")
                                         .font(.caption).foregroundColor(.accentColor)
                                 }
@@ -97,7 +103,7 @@ struct FloatingTranslationView: View {
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: "cpu").font(.system(size: 9))
-                        Text(state.selectedProvider?.name ?? "API")
+                        Text(isDict ? dictProviderName : (state.selectedProvider?.name ?? "API"))
                             .font(.caption2).lineLimit(1)
                             .frame(maxWidth: 70)
                         Image(systemName: "chevron.down").font(.system(size: 7))
@@ -291,7 +297,40 @@ struct FloatingTranslationView: View {
                 Button(action: copyResult) {
                     Image(systemName: "doc.on.doc").font(.caption)
                 }.buttonStyle(.borderless)
+                Button(action: {
+                    let textToSpeak: String
+                    if isDict, let entry = state.dictionaryEntry {
+                        textToSpeak = entry.word
+                    } else {
+                        textToSpeak = state.translatedText
+                    }
+                    guard !textToSpeak.isEmpty else { return }
+                    TTSManager.shared.speakNative(text: textToSpeak)
+                }) {
+                    Image(systemName: "speaker.wave.2").font(.caption)
+                }.buttonStyle(.borderless)
+                    .disabled(state.translatedText.isEmpty && state.dictionaryEntry == nil)
             }
+            // Prompt profile quick picker
+            Menu {
+                ForEach(ProfileStore.shared.profiles) { profile in
+                    Button(action: { ProfileStore.shared.selectProfile(profile.id) }) {
+                        HStack {
+                            Image(systemName: profile.iconName).font(.caption)
+                            Text(profile.name)
+                            if profile.id == ProfileStore.shared.activeProfileID {
+                                Image(systemName: "checkmark").font(.caption).foregroundColor(.accentColor)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "text.bubble")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 24)
             Button(isDict ? "重新查词" : "翻译") { state.translate() }
                 .buttonStyle(.borderedProminent).controlSize(.small)
                 .disabled(state.isTranslating || state.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -325,10 +364,13 @@ struct FloatingTranslationView: View {
     private func startDictProgress() {
         dictProgress = 0
         Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { t in
-            guard state.isDictionaryMode else { t.invalidate(); return }
-            dictProgress = min(dictProgress + 0.04, 0.9)
+            Task { @MainActor [weak state] in
+                guard let state, state.isDictionaryMode else { t.invalidate(); return }
+                dictProgress = min(dictProgress + 0.04, 0.9)
+            }
         }
     }
+
 
     private func copyResult() {
         ClipboardMonitor.shared.suppressNext = true

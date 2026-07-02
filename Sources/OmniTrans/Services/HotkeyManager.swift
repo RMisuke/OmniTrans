@@ -30,7 +30,10 @@ final class HotkeyManager {
     // OCR capture hotkey (Opt+F by default)
     private var ocrHotkeyRef: EventHotKeyRef?
     private var ocrHandlerRef: EventHandlerRef?
+    private var replaceHotkeyRef: EventHotKeyRef?
+    private var replaceHandlerRef: EventHandlerRef?
     var onOCRHotkey: (() -> Void)?
+    var onReplaceHotkey: (() -> Void)?
 
     /// 当前是否拥有辅助功能权限
     static var isTrusted: Bool { AXIsProcessTrusted() }
@@ -54,6 +57,19 @@ final class HotkeyManager {
         let k = UserDefaults.standard.integer(forKey: "hotkey_carbonKey")
         let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
         let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_D)
+        var s = ""
+        if mods & UInt32(controlKey) != 0 { s += "⌃" }
+        if mods & UInt32(optionKey)  != 0 { s += "⌥" }
+        if mods & UInt32(shiftKey)   != 0 { s += "⇧" }
+        if mods & UInt32(cmdKey)     != 0 { s += "⌘" }
+        s += keyToString(UInt16(key))
+        return s
+    }
+
+    /// 当前原位替换快捷键的显示字符串 e.g. "⌥R"
+    static func replaceHotkeyLabel() -> String {
+        let key  = UInt32(kVK_ANSI_R)
+        let mods = UInt32(optionKey)
         var s = ""
         if mods & UInt32(controlKey) != 0 { s += "⌃" }
         if mods & UInt32(optionKey)  != 0 { s += "⌥" }
@@ -170,6 +186,26 @@ final class HotkeyManager {
                             &spec, ptr, &ocrHandlerRef)
     }
 
+    // MARK: - Replace hotkey (⌥R by default)
+
+    func registerReplace() {
+        let ptr = Unmanaged.passUnretained(self).toOpaque()
+        let hid = EventHotKeyID(signature: 0x4149544C, id: 3)
+        let key  = UInt32(kVK_ANSI_R)
+        let mods = UInt32(optionKey)
+        RegisterEventHotKey(key, mods, hid,
+                            GetApplicationEventTarget(), 0, &replaceHotkeyRef)
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                 eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), unifiedHotkeyCallback, 1,
+                            &spec, ptr, &replaceHandlerRef)
+    }
+
+    func unregisterReplace() {
+        if let r = replaceHotkeyRef  { UnregisterEventHotKey(r); replaceHotkeyRef = nil }
+        if let h = replaceHandlerRef { RemoveEventHandler(h); replaceHandlerRef = nil }
+    }
+
     /// Re-register OCR hotkey (called after user customization)
     func reregisterOCR(carbonKey: Int, carbonMods: Int) {
         unregisterOCR()
@@ -181,6 +217,17 @@ final class HotkeyManager {
     /// Reset OCR hotkey to default (Option+F)
     func resetOCRToDefault() {
         reregisterOCR(carbonKey: Int(kVK_ANSI_F), carbonMods: Int(optionKey))
+    }
+
+    /// Re-register replace hotkey (called after user customization)
+    func reregisterReplace(carbonKey: Int, carbonMods: Int) {
+        unregisterReplace()
+        registerReplace()
+    }
+
+    /// Reset replace hotkey to default (Option+R)
+    func resetReplaceToDefault() {
+        reregisterReplace(carbonKey: Int(kVK_ANSI_R), carbonMods: Int(optionKey))
     }
 
     func unregisterOCR() {
@@ -241,6 +288,7 @@ final class HotkeyManager {
 // ── C callback ──
 private var _debounce = Date.distantPast
 private var _ocrDebounce = Date.distantPast
+private var _replaceDebounce = Date.distantPast
 
 private func unifiedHotkeyCallback(_: EventHandlerCallRef?, _ event: EventRef?, _ userData: UnsafeMutableRawPointer?) -> OSStatus {
     guard let ptr = userData, let event else { return -1 }
@@ -270,6 +318,11 @@ private func unifiedHotkeyCallback(_: EventHandlerCallRef?, _ event: EventRef?, 
         guard now.timeIntervalSince(_ocrDebounce) > 0.8 else { return noErr }
         _ocrDebounce = now
         DispatchQueue.main.async { mgr.onOCRHotkey?() }
+    } else if hid.id == 3 {
+        // Replace hotkey (⌥R) — paste translation result into frontmost app
+        guard now.timeIntervalSince(_replaceDebounce) > 0.8 else { return noErr }
+        _replaceDebounce = now
+        DispatchQueue.main.async { mgr.onReplaceHotkey?() }
     }
 
     return noErr

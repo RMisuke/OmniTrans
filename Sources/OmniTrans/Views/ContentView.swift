@@ -20,7 +20,8 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: showSettings)
-        .frame(minWidth: 420, maxWidth: 700, minHeight: 460, maxHeight: 620)
+        .frame(minWidth: 480, idealWidth: 480, minHeight: 500, idealHeight: 500)
+        .onDisappear { TTSManager.shared.stop() }
     }
 
     private var bottomBar: some View {
@@ -32,8 +33,11 @@ struct ContentView: View {
                 Text("·").font(.caption2).foregroundColor(.secondary)
                 ocrKeycapView
                 Text("框选 OCR").font(.caption2).foregroundColor(.secondary)
+                Text("·").font(.caption2).foregroundColor(.secondary)
+                replaceKeycapView
+                Text("原位替换").font(.caption2).foregroundColor(.secondary)
             }
-            .help("翻译: \(HotkeyManager.hotkeyLabel())  |  OCR 框选: \(HotkeyManager.ocrHotkeyLabel())")
+            .help("翻译: \(HotkeyManager.hotkeyLabel())  |  OCR 框选: \(HotkeyManager.ocrHotkeyLabel())  |  原位替换: \(HotkeyManager.replaceHotkeyLabel())")
             Spacer()
             Button(action: { NSApplication.shared.terminate(nil) }) {
                 HStack(spacing: 2) { Image(systemName: "power"); Text("退出") }.font(.caption2)
@@ -60,6 +64,23 @@ struct ContentView: View {
 
     private var ocrKeycapView: some View {
         let label = HotkeyManager.ocrHotkeyLabel()
+        return HStack(spacing: 1) {
+            ForEach(Array(label.enumerated()), id: \.offset) { _, ch in
+                Text(String(ch))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(.primary)
+                    .padding(.horizontal, 3).padding(.vertical, 1)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(.quaternary)
+                            .shadow(color: .black.opacity(0.15), radius: 0.5, y: 0.5)
+                    )
+            }
+        }
+    }
+
+    private var replaceKeycapView: some View {
+        let label = HotkeyManager.replaceHotkeyLabel()
         return HStack(spacing: 1) {
             ForEach(Array(label.enumerated()), id: \.offset) { _, ch in
                 Text(String(ch))

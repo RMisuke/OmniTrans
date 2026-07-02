@@ -1,7 +1,7 @@
 import Foundation
 import Carbon
 
-let kAppVersion = "0.3"
+let kAppVersion = "0.4-dev"
 
 @MainActor
 final class AppState: ObservableObject {
@@ -113,6 +113,31 @@ final class AppState: ObservableObject {
 
     // MARK: - Translation
 
+    /// Returns the next enabled provider after `current` in list order (wraps around).
+    /// Returns nil if no other enabled provider exists.
+    func nextFallbackProvider(after current: APIProvider) -> APIProvider? {
+        let enabled = enabledProviders
+        guard enabled.count > 1 else { return nil }
+        guard let idx = enabled.firstIndex(where: { $0.id == current.id }) else {
+            return enabled.first
+        }
+        let next = (idx + 1) % enabled.count
+        if next == idx { return nil }
+        return enabled[next]
+    }
+
+    /// Returns full ordered fallback chain starting from `provider`.
+    func fallbackChain(from provider: APIProvider) -> [APIProvider] {
+        let enabled = enabledProviders
+        guard !enabled.isEmpty else { return [provider] }
+        guard let idx = enabled.firstIndex(where: { $0.id == provider.id }) else { return enabled }
+        var chain: [APIProvider] = []
+        for i in idx..<enabled.count { chain.append(enabled[i]) }
+        for i in 0..<idx { chain.append(enabled[i]) }
+        return chain
+    }
+
+
     func retryTranslate() {
         translate()
     }
@@ -153,14 +178,9 @@ final class AppState: ObservableObject {
             // Dict mode only if it's a word AND the effective provider supports it
             let isDict = isWord && !effectiveProvider.kind.isTraditionalMT
 
-            // ── Route via strategy factory ──
-            let context = EngineRoutingContext(
-                text: text,
-                provider: effectiveProvider,
-                isWord: isWord
-            )
-            let engine = TranslationEngineFactory.makeEngine(context: context)
-
+            // ── Route via factory (fallback handled at AppState level) ──
+            let ctx = EngineRoutingContext(text: text, provider: effectiveProvider, isWord: isDict)
+            let engine = TranslationEngineFactory.makeEngine(context: ctx)
             let stream = engine.execute(
                 text: text,
                 provider: effectiveProvider,
@@ -211,37 +231,52 @@ final class AppState: ObservableObject {
                 self.retryCount = 0
                 self.addHistory(text: text, result: fullText, provider: effectiveProvider)
             } catch {
-                // ── Fallback to non-streaming ──
+                // ── Sequential fallback: try next enabled provider ──
+                let fallbackOn = UserDefaults.standard.bool(forKey: "fallback_on_failure")
+                // Be lenient: treat any error as fallback-eligible, except auth errors
+                let errStr = error.localizedDescription.lowercased()
+                let isAuthError = errStr.contains("401") || errStr.contains("403") || errStr.contains("unauthorized") || errStr.contains("invalid api key") || errStr.contains("key 无效")
+
+                print("[Fallback] fallbackOn=\(fallbackOn) isAuth=\(isAuthError) error=\(error.localizedDescription.prefix(80))")
+
+                if fallbackOn, !isAuthError, let next = self.nextFallbackProvider(after: effectiveProvider) {
+                    print("[Fallback] Switching \(effectiveProvider.name) → \(next.name)")
+                    await MainActor.run {
+                        self.selectedProviderID = next.id
+                        ProviderStorageManager.saveSelectedProviderID(next.id)
+                    }
+                    self.doTranslate(text: text, provider: next)
+                    return
+                }
+
+                // ── Fallback to non-streaming for same provider ──
                 do {
                     let r = try await TranslationService.translate(
                         text: text, sourceLang: self.sourceLang,
                         targetLang: self.targetLang, using: effectiveProvider
                     )
-                    self.translatedText = r.text
-                    self.isTranslating = false; self.streamingFinished = true
-                    self.showSuccessPulse = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                        self.showSuccessPulse = false
+                    await MainActor.run {
+                        self.translatedText = r.text
+                        self.isTranslating = false; self.streamingFinished = true
+                        self.showSuccessPulse = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                            self.showSuccessPulse = false
+                        }
                     }
                     self.retryCount = 0
-                    self.addHistory(text: text, result: r.text, provider: effectiveProvider)
+                    await MainActor.run { self.addHistory(text: text, result: r.text, provider: effectiveProvider) }
                 } catch {
                     // ── Terminal error ──
                     let msg = effectiveProvider.kind == .macOSNative
                         ? Self.friendlyNativeError(error)
                         : error.localizedDescription
-                    self.errorMessage = msg
-                    self.isTranslating = false
-                    self.showErrorShake = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                        self.showErrorShake = false
-                    }
-                    let errMsg = error.localizedDescription.lowercased()
-                    let isNetworkError = errMsg.contains("网络") || errMsg.contains("network")
-                        || errMsg.contains("timeout") || errMsg.contains("connection")
-                    if self.retryCount < self.maxAutoRetry, isNetworkError {
-                        self.retryCount += 1
-                        self.doTranslate(text: text, provider: effectiveProvider)
+                    await MainActor.run {
+                        self.errorMessage = msg
+                        self.isTranslating = false
+                        self.showErrorShake = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                            self.showErrorShake = false
+                        }
                     }
                 }
             }

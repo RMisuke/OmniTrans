@@ -77,6 +77,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         HotkeyManager.shared.registerOCR()
 
+        HotkeyManager.shared.onReplaceHotkey = { [weak self] in
+            let text = AppState.shared.translatedText
+            guard !text.isEmpty else { return }
+            TextReplacementService.shared.replaceSelectedText(with: text)
+        }
+        HotkeyManager.shared.registerReplace()
+
         if UserDefaults.standard.bool(forKey: "clipboard_monitor") {
             ClipboardMonitor.shared.start()
         }
@@ -89,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         HotkeyManager.shared.unregister()
         HotkeyManager.shared.unregisterOCR()
+        HotkeyManager.shared.unregisterReplace()
         ClipboardMonitor.shared.stop()
         onboardingWindow?.close()
         onboardingWindow = nil
@@ -129,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.dismissOnboarding()
         }
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 540),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered, defer: false
         )

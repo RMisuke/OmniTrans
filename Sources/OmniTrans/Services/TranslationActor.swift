@@ -92,6 +92,8 @@ actor TranslationActor {
             return try await requestBingMT(text: text, tgt: tgt, provider: provider)
         case .alibabaMT:
             return try await requestAlibabaMT(text: text, tgt: tgt, provider: provider)
+        case .volcengineMT:
+            return try await requestVolcengineMT(text: text, tgt: tgt, provider: provider)
         default:
             throw TranslationService.TranslationError.apiError("mtTranslate called for non-MT provider")
         }
@@ -132,6 +134,10 @@ actor TranslationActor {
         case .alibabaMT:
             try await performMockStream(continuation) {
                 try await self.requestAlibabaMT(text: text, tgt: targetLang, provider: provider)
+            }
+        case .volcengineMT:
+            try await performMockStream(continuation) {
+                try await self.requestVolcengineMT(text: text, tgt: targetLang, provider: provider)
             }
         }
     }
@@ -424,6 +430,70 @@ actor TranslationActor {
         throw TranslationService.TranslationError.invalidResponse
     }
 
+
+    // MARK: - Volcengine MT (火山翻译)
+
+    private func requestVolcengineMT(
+        text: String,
+        tgt: TranslationLanguage,
+        provider: APIProvider
+    ) async throws -> String {
+        let key = provider.apiKey
+        let secret = provider.apiSecret
+        guard !key.isEmpty, !secret.isEmpty else {
+            throw TranslationService.TranslationError.apiError("火山翻译需要 Access Key 和 Secret Key")
+        }
+
+        let tgtCode = tgt == .auto ? "zh" : tgt.languageCode
+        let query = VolcengineSigner.signedQuery(
+            accessKey: key,
+            secretKey: secret,
+            sourceText: text,
+            sourceLanguage: "auto",
+            targetLanguage: tgtCode
+        )
+
+        guard let url = URL(string: "https://translate.volcengineapi.com/?\(query)") else {
+            throw TranslationService.TranslationError.malformedURL("https://translate.volcengineapi.com")
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 15
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw TranslationService.TranslationError.networkError("no response")
+        }
+        let body = String(data: data, encoding: .utf8) ?? ""
+        print("[VolcengineMT] body: \(body.prefix(300))")
+
+        guard http.statusCode == 200 else {
+            throw TranslationService.TranslationError.apiError("火山翻译 HTTP \(http.statusCode): \(body.prefix(200))")
+        }
+
+        // Volcengine returns JSON: {"TranslationList":[{"Translation":"..."}], ...}
+        if let data = body.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let list = json["TranslationList"] as? [[String: Any]],
+           let first = list.first,
+           let translated = first["Translation"] as? String {
+            return translated.htmlEntityDecoded()
+        }
+
+        // Check for error
+        if let data = body.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let err = json["ResponseMetadata"] as? [String: Any],
+           let errCode = err["Error"] as? [String: Any] {
+            let code = errCode["Code"] as? String ?? "Unknown"
+            let msg = errCode["Message"] as? String ?? "Unknown"
+            throw TranslationService.TranslationError.apiError("火山翻译 [\(code)] \(msg)")
+        }
+
+        throw TranslationService.TranslationError.invalidResponse
+    }
+
     // MARK: - Helpers
 
     private func buildDictionaryHint(tgt: TranslationLanguage) -> String {
@@ -450,7 +520,23 @@ List ALL common definitions. Provide at least 2 examples. Use the query word in 
     }
 
     private func buildHint(src: TranslationLanguage, tgt: TranslationLanguage) -> String {
-        // Check for custom user prompt
+        // 1st priority: Active prompt profile (read from UserDefaults to avoid actor isolation)
+        if let data = UserDefaults.standard.data(forKey: "prompt_profiles"),
+           let profiles = try? JSONDecoder().decode([PromptProfile].self, from: data),
+           let activeIDStr = UserDefaults.standard.string(forKey: "active_prompt_profile_id"),
+           let activeID = UUID(uuidString: activeIDStr),
+           let profile = profiles.first(where: { $0.id == activeID }),
+           !profile.systemPrompt.isEmpty {
+            let builtInFirst = PromptProfile.builtIn.first?.systemPrompt ?? ""
+            if profile.systemPrompt != builtInFirst {
+                var p = profile.systemPrompt
+                p = p.replacingOccurrences(of: "{sourceLang}", with: src == .auto ? "auto" : src.languageCode)
+                p = p.replacingOccurrences(of: "{targetLang}", with: tgt.languageCode)
+                return p
+            }
+        }
+
+        // 2nd priority: Custom user prompt (legacy)
         if UserDefaults.standard.bool(forKey: "custom_prompt_enabled"),
            let custom = UserDefaults.standard.string(forKey: "custom_prompt_text"),
            !custom.isEmpty {
