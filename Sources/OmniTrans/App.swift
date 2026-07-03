@@ -139,7 +139,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !didSetup {
             let p = FloatingPanel.shared
             p.setFrame(NSRect(x: 0, y: 0, width: 380, height: 380), display: false)
-            p.contentView = NSHostingView(rootView: FloatingTranslationView(state: AppState.shared))
+            p.contentView = NSHostingView(rootView: FloatingTranslationView(state: AppState.shared)
+                .environment(AppState.shared.session))
             panel = p; didSetup = true
         }
         panel?.show(nearMouse: true)

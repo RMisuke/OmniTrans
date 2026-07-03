@@ -26,6 +26,61 @@ actor TranslationActor {
         currentSession = nil
     }
 
+    // MARK: - Generic Network & SSE Helpers
+
+    /// Executes an HTTP request, validates status 200, returns response data.
+    /// Used by all traditional MT methods to eliminate boilerplate.
+    private func executeMTRequest(_ req: URLRequest, label: String) async throws -> Data {
+        try Task.checkCancellation()
+        let (data, resp) = try await makeSession().data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw TranslationService.TranslationError.networkError("\(label): 无效响应")
+        }
+        guard http.statusCode == 200 else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw TranslationService.TranslationError.apiError("\(label) HTTP \(http.statusCode): \(body.prefix(200))")
+        }
+        return data
+    }
+
+    /// Generic SSE stream parser: reads lines from `bytes`, decodes each `data:` chunk
+    /// as `T`, extracts text via `extractText`, and yields throttled tokens.
+    private func parseSSEStream<T: Decodable>(
+        bytes: URLSession.AsyncBytes,
+        throttle: ThrottledStream,
+        decoder: JSONDecoder = JSONDecoder(),
+        extractText: @escaping (T) -> String?
+    ) async throws {
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            guard line.hasPrefix("data: "), !line.contains("[DONE]") else { continue }
+            let jsonData = Data(line.utf8.dropFirst(6))
+            guard let chunk = try? decoder.decode(T.self, from: jsonData),
+                  let text = extractText(chunk), !text.isEmpty
+            else { continue }
+            throttle.yield(text)
+        }
+    }
+
+    /// Reads the error body from a failed SSE response (first 1024 bytes).
+    private func readErrorBody(from bytes: URLSession.AsyncBytes) async throws -> Data {
+        var errBody = Data()
+        for try await b in bytes { errBody.append(b); if errBody.count > 1024 { break } }
+        return errBody
+    }
+
+    /// Checks the HTTP response from an SSE stream; throws with the provider's error format.
+    private func validateSSEResponse(
+        http: HTTPURLResponse?, bytes: URLSession.AsyncBytes,
+        errorDecoder: (Data) -> String
+    ) async throws {
+        guard let http, http.statusCode == 200 else {
+            let body = try await readErrorBody(from: bytes)
+            let msg = errorDecoder(body)
+            throw TranslationService.TranslationError.apiError(msg)
+        }
+    }
+
     // MARK: - Streaming (primary path)
 
     func translateStream(
@@ -34,7 +89,6 @@ actor TranslationActor {
         targetLang: TranslationLanguage,
         provider: APIProvider
     ) -> AsyncThrowingStream<String, Error> {
-        // Cancel previous task — cooperative cancellation via URLSession.bytes
         activeStreamTask?.cancel()
 
         return AsyncThrowingStream { continuation in
@@ -54,7 +108,6 @@ actor TranslationActor {
         }
     }
 
-    
     // MARK: - Dictionary lookup (JSON Mode)
 
     func translateDictionary(
@@ -82,7 +135,7 @@ actor TranslationActor {
         }
     }
 
-// MARK: - Non-streaming (fallback)
+    // MARK: - Non-streaming (fallback)
 
     func translate(
         text: String,
@@ -104,14 +157,10 @@ actor TranslationActor {
         provider: APIProvider
     ) async throws -> String {
         switch provider.kind {
-        case .googleMT:
-            return try await requestGoogleMT(text: text, tgt: tgt, provider: provider)
-        case .bingMT:
-            return try await requestBingMT(text: text, tgt: tgt, provider: provider)
-        case .alibabaMT:
-            return try await requestAlibabaMT(text: text, tgt: tgt, provider: provider)
-        case .volcengineMT:
-            return try await requestVolcengineMT(text: text, tgt: tgt, provider: provider)
+        case .googleMT:     return try await requestGoogleMT(text: text, tgt: tgt, provider: provider)
+        case .bingMT:       return try await requestBingMT(text: text, tgt: tgt, provider: provider)
+        case .alibabaMT:    return try await requestAlibabaMT(text: text, tgt: tgt, provider: provider)
+        case .volcengineMT: return try await requestVolcengineMT(text: text, tgt: tgt, provider: provider)
         default:
             throw TranslationService.TranslationError.apiError("mtTranslate called for non-MT provider")
         }
@@ -119,7 +168,6 @@ actor TranslationActor {
 
     // MARK: - Local Ollama fallback
 
-    /// Delegates fallback resolution to FallbackRouter.
     func resolveWithFallback(_ provider: APIProvider) async -> (APIProvider, Bool) {
         await FallbackRouter.resolveWithFallback(provider)
     }
@@ -182,36 +230,20 @@ actor TranslationActor {
             "max_tokens": p.maxTokens, "stream": true,
             "messages": [["role": "system", "content": hint], ["role": "user", "content": text]]
         ]
-        if isDictionaryMode && (p.kind == .openAICompat) {
+        if isDictionaryMode && p.kind == .openAICompat {
             body["response_format"] = ["type": "json_object"]
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let session = makeSession()
         let (bytes, resp) = try await session.bytes(for: req)
-        guard let http = resp as? HTTPURLResponse else {
-            throw TranslationService.TranslationError.networkError("invalid")
-        }
-        guard http.statusCode == 200 else {
-            var errBody = Data()
-            for try await b in bytes { errBody.append(b); if errBody.count > 1024 { break } }
-            let msg = (try? JSONDecoder().decode(OAIErr.self, from: errBody))?.error.message
-                ?? "HTTP \(http.statusCode)"
-            throw TranslationService.TranslationError.apiError(msg)
+        try await validateSSEResponse(http: resp as? HTTPURLResponse, bytes: bytes) { data in
+            (try? JSONDecoder().decode(OAIErr.self, from: data))?.error.message ?? "HTTP error"
         }
 
-        let decoder = JSONDecoder()
         let t = ThrottledStream(c)
-        for try await line in bytes.lines {
-            try Task.checkCancellation()
-            guard line.hasPrefix("data: ") else { continue }
-            let jsonData = Data(line.utf8.dropFirst(6))
-            if line.contains("[DONE]") { continue }
-            guard let chunk = try? decoder.decode(OAIStreamChunk.self, from: jsonData),
-                  let content = chunk.choices?.first?.delta?.content,
-                  !content.isEmpty
-            else { continue }
-            t.yield(content)
+        try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: OAIStreamChunk) in
+            chunk.choices?.first?.delta?.content
         }
         t.flush()
         tearDownSession()
@@ -244,27 +276,13 @@ actor TranslationActor {
 
         let session = makeSession()
         let (bytes, resp) = try await session.bytes(for: req)
-        guard let http = resp as? HTTPURLResponse else {
-            throw TranslationService.TranslationError.networkError("invalid")
-        }
-        guard http.statusCode == 200 else {
-            var errBody = Data()
-            for try await b in bytes { errBody.append(b); if errBody.count > 1024 { break } }
-            let msg = (try? JSONDecoder().decode(AnthErr.self, from: errBody))?.error.message
-                ?? "HTTP \(http.statusCode)"
-            throw TranslationService.TranslationError.apiError(msg)
+        try await validateSSEResponse(http: resp as? HTTPURLResponse, bytes: bytes) { data in
+            (try? JSONDecoder().decode(AnthErr.self, from: data))?.error.message ?? "HTTP error"
         }
 
         let t = ThrottledStream(c)
-        for try await line in bytes.lines {
-            try Task.checkCancellation()
-            guard line.hasPrefix("data: ") else { continue }
-            let jsonData = Data(line.utf8.dropFirst(6))
-            guard let event = try? JSONDecoder().decode(AnthStreamEvent.self, from: jsonData),
-                  event.type == "content_block_delta",
-                  let text = event.delta?.text, !text.isEmpty
-            else { continue }
-            t.yield(text)
+        try await parseSSEStream(bytes: bytes, throttle: t) { (event: AnthStreamEvent) in
+            event.type == "content_block_delta" ? event.delta?.text : nil
         }
         t.flush()
         tearDownSession()
@@ -295,36 +313,20 @@ actor TranslationActor {
 
         let session = makeSession()
         let (bytes, resp) = try await session.bytes(for: req)
-        guard let http = resp as? HTTPURLResponse else {
-            throw TranslationService.TranslationError.networkError("invalid")
-        }
-        guard http.statusCode == 200 else {
-            var errBody = Data()
-            for try await b in bytes { errBody.append(b); if errBody.count > 1024 { break } }
-            let msg = (try? JSONDecoder().decode(GemErr.self, from: errBody))?.error.message
-                ?? "HTTP \(http.statusCode)"
-            throw TranslationService.TranslationError.apiError(msg)
+        try await validateSSEResponse(http: resp as? HTTPURLResponse, bytes: bytes) { data in
+            (try? JSONDecoder().decode(GemErr.self, from: data))?.error.message ?? "HTTP error"
         }
 
-        let decoder = JSONDecoder()
         let t = ThrottledStream(c)
-        for try await line in bytes.lines {
-            try Task.checkCancellation()
-            guard line.hasPrefix("data: ") else { continue }
-            let jsonData = Data(line.utf8.dropFirst(6))
-            guard let chunk = try? decoder.decode(GemStreamChunk.self, from: jsonData),
-                  let text = chunk.candidates?.first?.content?.parts?.first?.text,
-                  !text.isEmpty
-            else { continue }
-            t.yield(text)
+        try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: GemStreamChunk) in
+            chunk.candidates?.first?.content?.parts?.first?.text
         }
         t.flush()
+        tearDownSession()
     }
 
     // MARK: - Mock Stream (Traditional MT → single-token stream)
 
-    /// Wraps a single-shot MT result as a one‑token AsyncThrowingStream,
-    /// keeping the upper‑layer UI pipeline unchanged.
     private func performMockStream(
         _ continuation: AsyncThrowingStream<String, Error>.Continuation,
         block: () async throws -> String
@@ -348,26 +350,18 @@ actor TranslationActor {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 20
-
-        let body: [String: Any] = [
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
             "q": text,
             "target": tgt.languageCode.isEmpty ? "zh" : tgt.languageCode,
             "format": "text"
-        ]
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        ])
 
-        try Task.checkCancellation()
-        let (data, resp) = try await makeSession().data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            throw TranslationService.TranslationError.apiError("Google MT HTTP error")
-        }
+        let data = try await executeMTRequest(req, label: "Google MT")
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataDict = json["data"] as? [String: Any],
               let translations = dataDict["translations"] as? [[String: Any]],
               let first = translations.first?["translatedText"] as? String
-        else {
-            throw TranslationService.TranslationError.invalidResponse
-        }
+        else { throw TranslationService.TranslationError.invalidResponse }
         return first.htmlEntityDecoded()
     }
 
@@ -387,15 +381,9 @@ actor TranslationActor {
         req.setValue(provider.apiKey, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
         req.setValue(region, forHTTPHeaderField: "Ocp-Apim-Subscription-Region")
         req.timeoutInterval = 20
+        req.httpBody = try JSONSerialization.data(withJSONObject: [["Text": text]])
 
-        let body: [[String: String]] = [["Text": text]]
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        try Task.checkCancellation()
-        let (data, resp) = try await makeSession().data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            throw TranslationService.TranslationError.apiError("Bing MT HTTP error")
-        }
+        let data = try await executeMTRequest(req, label: "Bing MT")
         struct BingNode: Codable { let text: String }
         struct BingResponse: Codable { let translations: [BingNode] }
         let result = try JSONDecoder().decode([BingResponse].self, from: data)
@@ -414,7 +402,6 @@ actor TranslationActor {
             sourceText: text,
             targetLanguage: targetLang
         )
-        // Alibaba MT uses HTTPS with signed query string
         let urlString = "https://mt.cn-hangzhou.aliyuncs.com/?\(signedQuery)"
         print("[AlibabaMT] URL: \(urlString.prefix(200))...")
         guard let url = URL(string: urlString) else {
@@ -424,108 +411,62 @@ actor TranslationActor {
         req.httpMethod = "GET"
         req.timeoutInterval = 20
 
-        try Task.checkCancellation()
-        let (data, resp) = try await makeSession().data(for: req)
-        guard let http = resp as? HTTPURLResponse else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            print("[AlibabaMT] no HTTP response, body: \(body.prefix(300))")
-            throw TranslationService.TranslationError.networkError("无效响应")
-        }
-        print("[AlibabaMT] HTTP \(http.statusCode)")
-        guard http.statusCode == 200 else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            print("[AlibabaMT] error body: \(body.prefix(500))")
-            // Parse XML error from Alibaba Cloud
-            if body.contains("<Code>"), body.contains("<Message>") {
-                let code = body.extractXMLTag("Code") ?? "Unknown"
-                let msg = body.extractXMLTag("Message") ?? body
-                throw TranslationService.TranslationError.apiError("阿里云: [\(code)] \(msg)")
-            }
-            throw TranslationService.TranslationError.apiError("阿里云返回 HTTP \(http.statusCode)")
-        }
+        let data = try await executeMTRequest(req, label: "Aliyun MT")
         let body = String(data: data, encoding: .utf8) ?? ""
         print("[AlibabaMT] body: \(body.prefix(300))")
 
-        // Alibaba MT returns XML, not JSON
-        if let translated = body.extractXMLTag("Translated") {
-            return translated
-        }
-        // Check for error
+        if let translated = body.extractXMLTag("Translated") { return translated }
         if let code = body.extractXMLTag("Code"), let msg = body.extractXMLTag("Message") {
             throw TranslationService.TranslationError.apiError("阿里云 [\(code)] \(msg)")
         }
         throw TranslationService.TranslationError.invalidResponse
     }
 
-
-    // MARK: - Volcengine MT (火山翻译)
+    // ── Volcengine MT (火山翻译) ──
 
     private func requestVolcengineMT(
-        text: String,
-        tgt: TranslationLanguage,
-        provider: APIProvider
+        text: String, tgt: TranslationLanguage, provider: APIProvider
     ) async throws -> String {
-        let key = provider.apiKey
-        let secret = provider.apiSecret
+        let key = provider.apiKey, secret = provider.apiSecret
         guard !key.isEmpty, !secret.isEmpty else {
             throw TranslationService.TranslationError.apiError("火山翻译需要 Access Key 和 Secret Key")
         }
 
         let tgtCode = tgt == .auto ? "zh" : tgt.languageCode
         let query = VolcengineSigner.signedQuery(
-            accessKey: key,
-            secretKey: secret,
-            sourceText: text,
-            sourceLanguage: "auto",
-            targetLanguage: tgtCode
+            accessKey: key, secretKey: secret,
+            sourceText: text, sourceLanguage: "auto", targetLanguage: tgtCode
         )
-
         guard let url = URL(string: "https://translate.volcengineapi.com/?\(query)") else {
             throw TranslationService.TranslationError.malformedURL("https://translate.volcengineapi.com")
         }
-
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         req.timeoutInterval = 15
 
-        try Task.checkCancellation()
-        let (data, resp) = try await makeSession().data(for: req)
-        guard let http = resp as? HTTPURLResponse else {
-            throw TranslationService.TranslationError.networkError("no response")
-        }
+        let data = try await executeMTRequest(req, label: "Volcengine MT")
         let body = String(data: data, encoding: .utf8) ?? ""
         print("[VolcengineMT] body: \(body.prefix(300))")
 
-        guard http.statusCode == 200 else {
-            throw TranslationService.TranslationError.apiError("火山翻译 HTTP \(http.statusCode): \(body.prefix(200))")
+        if let jsonData = body.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            if let list = json["TranslationList"] as? [[String: Any]],
+               let first = list.first,
+               let translated = first["Translation"] as? String {
+                return translated.htmlEntityDecoded()
+            }
+            if let meta = json["ResponseMetadata"] as? [String: Any],
+               let err = meta["Error"] as? [String: Any] {
+                let code = err["Code"] as? String ?? "Unknown"
+                let msg = err["Message"] as? String ?? "Unknown"
+                throw TranslationService.TranslationError.apiError("火山翻译 [\(code)] \(msg)")
+            }
         }
-
-        // Volcengine returns JSON: {"TranslationList":[{"Translation":"..."}], ...}
-        if let data = body.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let list = json["TranslationList"] as? [[String: Any]],
-           let first = list.first,
-           let translated = first["Translation"] as? String {
-            return translated.htmlEntityDecoded()
-        }
-
-        // Check for error
-        if let data = body.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let err = json["ResponseMetadata"] as? [String: Any],
-           let errCode = err["Error"] as? [String: Any] {
-            let code = errCode["Code"] as? String ?? "Unknown"
-            let msg = errCode["Message"] as? String ?? "Unknown"
-            throw TranslationService.TranslationError.apiError("火山翻译 [\(code)] \(msg)")
-        }
-
         throw TranslationService.TranslationError.invalidResponse
     }
 
     // MARK: - Helpers
 
-    /// Dedicated dictionary profile — XML-tag structured for JSON Mode reliability.
-    /// Not user-configurable: dictionary output requires strict schema adherence.
     private func buildDictionaryHint(tgt: TranslationLanguage) -> String {
         let langName = tgt.rawValue
         return """
@@ -564,7 +505,6 @@ No explanations, no intro, no outro — pure JSON only.
         let sourceName = src == .auto ? "Auto-Detected" : src.rawValue
         let targetName = tgt.rawValue
 
-        // Read custom prompt from UserDefaults (avoids MainActor isolation)
         if let data = UserDefaults.standard.data(forKey: "custom_prompt"),
            let cp = try? JSONDecoder().decode(CustomPrompt.self, from: data) {
             let base = cp.enabled ? cp.text : CustomPrompt.defaultPrompt
@@ -581,7 +521,6 @@ Preserve original formatting and Markdown tags if present.
             return prompt
         }
 
-        // Fallback to built-in default
         var prompt = CustomPrompt.defaultPrompt
             .replacingOccurrences(of: "__SOURCE_LANG__", with: sourceName)
             .replacingOccurrences(of: "__TARGET_LANG__", with: targetName)
@@ -605,7 +544,8 @@ private final class ThrottledStream {
     private var buffer = ""
     private var flushTask: Task<Void, Never>?
     private let continuation: AsyncThrowingStream<String, Error>.Continuation
-    private let intervalNs: UInt64 = 80_000_000
+    private let fastIntervalNs: UInt64  = 80_000_000   // 80ms — idle
+    private let slowIntervalNs: UInt64  = 120_000_000  // 120ms — during window drag
 
     init(_ continuation: AsyncThrowingStream<String, Error>.Continuation) {
         self.continuation = continuation
@@ -628,8 +568,12 @@ private final class ThrottledStream {
     private func scheduleFlush() {
         guard flushTask == nil else { return }
         flushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: self?.intervalNs ?? 80_000_000)
-            guard let self, !Task.isCancelled, !self.buffer.isEmpty else { return }
+            guard let self else { return }
+            // Relax interval during window drag to avoid main-thread contention
+            let isDragging = await MainActor.run { AppState.isUserDraggingWindow }
+            let interval = isDragging ? self.slowIntervalNs : self.fastIntervalNs
+            try? await Task.sleep(nanoseconds: interval)
+            guard !Task.isCancelled, !self.buffer.isEmpty else { return }
             let text = self.buffer
             self.buffer = ""
             self.flushTask = nil
@@ -638,38 +582,36 @@ private final class ThrottledStream {
     }
 }
 
-// ── Inline response types (same as TranslationService) ──
+// ── Inline response types ──
 
-private struct OAIErr: Codable {
-    struct Detail: Codable { let message: String }
+private struct OAIErr: Codable, Sendable {
+    struct Detail: Codable, Sendable { let message: String }
     let error: Detail
 }
-private struct OAIStreamChunk: Codable {
-    struct Choice: Codable { struct Delta: Codable { let content: String? }; let delta: Delta? }
+private struct OAIStreamChunk: Codable, Sendable {
+    struct Choice: Codable, Sendable { struct Delta: Codable, Sendable { let content: String? }; let delta: Delta? }
     let choices: [Choice]?
 }
-private struct AnthErr: Codable {
-    struct Detail: Codable { let message: String }
+private struct AnthErr: Codable, Sendable {
+    struct Detail: Codable, Sendable { let message: String }
     let error: Detail
 }
-private struct AnthStreamEvent: Codable {
-    struct Delta: Codable { let text: String?; let type: String? }
+private struct AnthStreamEvent: Codable, Sendable {
+    struct Delta: Codable, Sendable { let text: String?; let type: String? }
     let type: String?; let delta: Delta?
 }
-private struct GemErr: Codable {
-    struct Detail: Codable { let message: String }
+private struct GemErr: Codable, Sendable {
+    struct Detail: Codable, Sendable { let message: String }
     let error: Detail
 }
-private struct GemStreamChunk: Codable {
-    struct Cand: Codable { struct Cont: Codable { struct Part: Codable { let text: String? }; let parts: [Part]? }; let content: Cont? }
+private struct GemStreamChunk: Codable, Sendable {
+    struct Cand: Codable, Sendable { struct Cont: Codable, Sendable { struct Part: Codable, Sendable { let text: String? }; let parts: [Part]? }; let content: Cont? }
     let candidates: [Cand]?
 }
 
 // MARK: - TranslationEngineProtocol conformance
 
 extension TranslationActor: TranslationEngineProtocol {
-    /// Unified entry point called by the factory.
-    /// Routes to the correct internal pipeline based on mode.
     nonisolated func execute(
         text: String,
         provider: APIProvider,
@@ -677,7 +619,6 @@ extension TranslationActor: TranslationEngineProtocol {
         sourceLang: TranslationLanguage,
         targetLang: TranslationLanguage
     ) -> AsyncThrowingStream<String, Error> {
-        // Capture shared as a local constant so the nonisolated context can reference it.
         let actor = self
         return AsyncThrowingStream { continuation in
             let task = Task {

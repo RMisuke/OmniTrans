@@ -21,9 +21,13 @@ enum ContextAwareService {
         return contextMap[bundleID]
     }
 
-    /// Builds the final prompt by injecting context if available.
+    /// Builds the final prompt by injecting context if the user has enabled
+    /// the "上下文感知翻译" toggle (stored in `UserDefaults.is_context_aware`, default `true`).
+    /// When disabled, returns `basePrompt` unchanged — no AX API interaction.
     static func buildFinalPrompt(basePrompt: String) -> String {
-        guard let ctx = currentContextPrompt() else { return basePrompt }
+        guard UserDefaults.standard.bool(forKey: "is_context_aware"),
+              let ctx = currentContextPrompt()
+        else { return basePrompt }
         return basePrompt + "\n\n[系统上下文指令: \(ctx)]"
     }
 }

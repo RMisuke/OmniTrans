@@ -1,7 +1,6 @@
 import Cocoa
 import Carbon
 import Vision
-import ScreenCaptureKit
 
 /// Full-screen transparent overlay for drag-to-select OCR capture.
 /// Activated by Opt+F hotkey — user drags a rectangle, OCR runs on release.
@@ -13,7 +12,9 @@ final class OCRSelectionOverlay {
     private var onComplete: ((String?) -> Void)?
     /// AppKit screen rect where the overlay was placed, for coordinate conversion
     private var screenFrame: CGRect = .zero
-    private var _overlayWindowID: Int32 = 0
+    private var _overlayWindowID: CGWindowID = 0
+    /// Capture service — runtime-dispatched between SCK (macOS 15+) and CGWindowList (macOS 14).
+    private let captureService: CaptureServiceProtocol = CaptureServiceFactory.makeService()
 
     private init() {}
 
@@ -49,7 +50,7 @@ final class OCRSelectionOverlay {
         overlayView = view
         window = w
         // Store window number for capture exclusion
-        _overlayWindowID = Int32(w.windowNumber)
+        _overlayWindowID = CGWindowID(w.windowNumber)
     }
 
     private func captureRegion(_ viewRect: CGRect) {
@@ -60,15 +61,15 @@ final class OCRSelectionOverlay {
             return
         }
 
-        // Convert from AppKit view coords (bottom-left origin) to CG screen coords (top-left origin).
-        let appKitX = screenFrame.origin.x + viewRect.origin.x
-        let appKitY = screenFrame.origin.y + viewRect.origin.y
-        let w = viewRect.width
-        let h = viewRect.height
-
-        let cgScreenHeight = NSScreen.screens.map { $0.frame.maxY }.max() ?? screenFrame.maxY
-        let cgY = cgScreenHeight - (appKitY + h)
-        let captureRect = CGRect(x: appKitX, y: cgY, width: w, height: h)
+        // Compute the selected region in AppKit screen coordinates (bottom-left origin).
+        // We keep everything in AppKit coords and convert to image-pixel coords
+        // inside scCapture using the actual captured image dimensions.
+        let appKitRect = CGRect(
+            x: screenFrame.origin.x + viewRect.origin.x,
+            y: screenFrame.origin.y + viewRect.origin.y,
+            width: viewRect.width,
+            height: viewRect.height
+        )
 
         let windowID = _overlayWindowID
 
@@ -76,7 +77,7 @@ final class OCRSelectionOverlay {
         // The overlay stays visible during capture — SCContentFilter erases it from
         // the pixel stream at the compositor level, eliminating the 50ms hide delay.
         Task {
-            guard let cgImage = await scCapture(rect: captureRect, excludingWindowID: windowID) else {
+            guard let cgImage = await captureService.capture(appKitRect: appKitRect, excludingWindowID: windowID) else {
                 await MainActor.run {
                     onComplete?(nil)
                     onComplete = nil
@@ -94,99 +95,66 @@ final class OCRSelectionOverlay {
         }
     }
 
-    // MARK: - ScreenCaptureKit capture
-
-    /// Captures a region of the screen using ScreenCaptureKit, automatically
-    /// excluding the overlay window from the captured image.
-    private func scCapture(rect: CGRect, excludingWindowID: Int32) async -> CGImage? {
-        do {
-            let content = try await SCShareableContent.current
-            guard let display = content.displays.first(where: {
-                $0.frame.contains(CGPoint(x: rect.midX, y: rect.midY))
-            }) ?? content.displays.first else { return nil }
-
-            // Exclude our own overlay window
-            let excluded = content.windows.filter { $0.windowID == excludingWindowID }
-            let filter = SCContentFilter(display: display, excludingWindows: excluded)
-
-            // Capture full display at native resolution, then crop to rect
-            let config = SCStreamConfiguration()
-            config.showsCursor = false
-            config.pixelFormat = kCVPixelFormatType_32BGRA
-
-            let fullImage = try await SCScreenshotManager.captureImage(
-                contentFilter: filter,
-                configuration: config
-            )
-
-            // Crop to the selection rectangle (in display-local coordinates)
-            let displayOrigin = display.frame.origin
-            let localRect = CGRect(
-                x: rect.origin.x - displayOrigin.x,
-                y: rect.origin.y - displayOrigin.y,
-                width: rect.width,
-                height: rect.height
-            )
-            return fullImage.cropping(to: localRect)
-        } catch {
-            print("[SCK] Capture failed: \(error.localizedDescription)")
-            return nil
-        }
-    }
-
     // MARK: - OCR processing
 
     /// Runs VNRecognizeTextRequest on `cgImage`, returns ordered text.
+    /// The input `cgImage` is consumed; caller should not retain it afterward.
     private func performOCR(on cgImage: CGImage) -> String? {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-        request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en", "ja", "ko", "fr", "de", "es"]
-        request.minimumTextHeight = 0.01
+        // Use autoreleasepool to eagerly reclaim Vision's internal C++ buffers
+        return autoreleasepool { () -> String? in
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en", "ja", "ko", "fr", "de", "es"]
+            request.minimumTextHeight = 0.01
 
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        do {
-            try handler.perform([request])
-        } catch {
-            return nil
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                return nil
+            }
+
+            guard let observations = request.results, !observations.isEmpty else { return nil }
+
+            // Sort spatially: top→bottom first, then left→right within each row.
+            let ordered = observations
+                .compactMap { obs -> (text: String, y: Float, x: Float)? in
+                    guard let text = obs.topCandidates(1).first?.string
+                            .trimmingCharacters(in: .whitespacesAndNewlines),
+                          !text.isEmpty else { return nil }
+                    let bb = obs.boundingBox
+                    return (text, Float(bb.origin.y), Float(bb.origin.x))
+                }
+                .sorted { a, b in
+                    if abs(a.y - b.y) > 0.02 { return a.y > b.y }
+                    return a.x < b.x
+                }
+
+            guard !ordered.isEmpty else { return nil }
+
+            // Deduplicate and join with line breaks between rows
+            var result = ""
+            var lastY: Float = -1
+            var prevText = ""
+            for item in ordered {
+                if item.text == prevText { continue }
+                prevText = item.text
+                if lastY >= 0, abs(item.y - lastY) > 0.02 {
+                    result += "\n"
+                } else if !result.isEmpty {
+                    result += " "
+                }
+                result += item.text
+                lastY = item.y
+            }
+
+            let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Vision handler and request go out of scope here; autoreleasepool
+            // ensures the backing CGImage / IOSurface / ANE buffers are released
+            // before returning to the caller.
+            return trimmed.isEmpty ? nil : trimmed
         }
-
-        guard let observations = request.results, !observations.isEmpty else { return nil }
-
-        // Sort spatially: top→bottom first, then left→right within each row.
-        let ordered = observations
-            .compactMap { obs -> (text: String, y: Float, x: Float)? in
-                guard let text = obs.topCandidates(1).first?.string
-                        .trimmingCharacters(in: .whitespacesAndNewlines),
-                      !text.isEmpty else { return nil }
-                let bb = obs.boundingBox
-                return (text, Float(bb.origin.y), Float(bb.origin.x))
-            }
-            .sorted { a, b in
-                if abs(a.y - b.y) > 0.02 { return a.y > b.y }
-                return a.x < b.x
-            }
-
-        guard !ordered.isEmpty else { return nil }
-
-        // Deduplicate and join with line breaks between rows
-        var result = ""
-        var lastY: Float = -1
-        var prevText = ""
-        for item in ordered {
-            if item.text == prevText { continue }
-            prevText = item.text
-            if lastY >= 0, abs(item.y - lastY) > 0.02 {
-                result += "\n"
-            } else if !result.isEmpty {
-                result += " "
-            }
-            result += item.text
-            lastY = item.y
-        }
-
-        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func dismiss() {
@@ -194,7 +162,14 @@ final class OCRSelectionOverlay {
         window?.orderOut(nil)
         window = nil
         overlayView = nil
-        DispatchQueue.main.async { MemoryPurgeHelper.shared.purgeBackendCache() }
+        // Aggressively reclaim Vision ANE / GPU resident memory
+        DispatchQueue.main.async {
+            MemoryPurgeHelper.shared.purgeBackendCache()
+        }
+        // Also hint to the kernel on a background queue for deeper reclaim
+        DispatchQueue.global(qos: .utility).async {
+            MemoryPurgeHelper.shared.purgeBackendCache()
+        }
     }
 }
 

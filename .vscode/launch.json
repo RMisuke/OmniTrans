@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AI Translater}",
+            "name": "Debug OmniTrans",
+            "target": "OmniTrans",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug OmniTrans"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AI Translater}",
+            "name": "Release OmniTrans",
+            "target": "OmniTrans",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release OmniTrans"
+        }
+    ]
+}

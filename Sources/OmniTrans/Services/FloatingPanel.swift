@@ -27,7 +27,13 @@ final class FloatingPanel: NSPanel {
         standardWindowButton(.miniaturizeButton)?.isHidden = true
         standardWindowButton(.zoomButton)?.isHidden = true
         NotificationCenter.default.addObserver(self, selector: #selector(didResignKey), name: NSWindow.didResignKeyNotification, object: self)
+        // Track window drag state for ThrottledStream adaptive flush
+        NotificationCenter.default.addObserver(self, selector: #selector(windowWillMove), name: NSWindow.willMoveNotification, object: self)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowDidMove), name: NSWindow.didMoveNotification, object: self)
     }
+
+    @objc private func windowWillMove() { AppState.isUserDraggingWindow = true }
+    @objc private func windowDidMove()   { AppState.isUserDraggingWindow = false }
 
     @objc private func didResignKey() {
         if UserDefaults.standard.string(forKey: "dismiss_mode") ?? "clickOutside" == "clickOutside" {

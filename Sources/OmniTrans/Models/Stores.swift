@@ -38,6 +38,20 @@ final class ConfigurationStore {
     var targetLang: TranslationLanguage = .chinese
     var translationHistory: [HistoryEntry] = []
 
+    /// Context-aware translation toggle — persisted to UserDefaults.
+    /// When enabled, the app injects frontmost-app context hints into
+    /// the LLM prompt for domain-appropriate translations (e.g. code
+    /// comments in Xcode, casual tone in WeChat).  Defaults to `true`.
+    var isContextAwareEnabled: Bool {
+        get {
+            UserDefaults.standard.register(defaults: ["is_context_aware": true])
+            return UserDefaults.standard.bool(forKey: "is_context_aware")
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "is_context_aware")
+        }
+    }
+
     /// Bridge from legacy AppState on launch / settings changes.
     @MainActor func syncFrom(_ state: AppState) {
         providers = state.providers

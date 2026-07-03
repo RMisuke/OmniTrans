@@ -7,30 +7,73 @@ let kAppVersion = "0.4-dev"
 final class AppState: ObservableObject {
     static let shared = AppState()
 
+    /// Set by `FloatingPanel` during window drag to signal `ThrottledStream`
+    /// to relax its flush interval (80→120ms), avoiding main-thread contention
+    /// between streaming renders and AppKit event tracking.
+    @MainActor static var isUserDraggingWindow = false
+
     @Published var providers: [APIProvider] = []
     @Published var selectedProviderID: UUID?
     /// Provider for word/dictionary lookups. Falls back to selectedProviderID if nil.
     @Published var dictProviderID: UUID?
     @Published var sourceLang: TranslationLanguage = .auto { didSet { ProviderStorageManager.saveSourceLang(sourceLang) } }
     @Published var targetLang: TranslationLanguage = .chinese { didSet { ProviderStorageManager.saveTargetLang(targetLang) } }
-    @Published var inputText: String = ""
-    @Published var translatedText: String = ""
-    @Published var isTranslating: Bool = false
-    @Published var errorMessage: String?
-    @Published var showPermissionHint: Bool = false
+    // ── Streaming fields — computed property proxy → session SSOT ──
+    // 20+ service consumers read/write AppState.shared.xxx unchanged,
+    // but all mutations flow directly into the @Observable session store.
+    var inputText: String {
+        get { session.inputText }
+        set { session.inputText = newValue }
+    }
+    var translatedText: String {
+        get { session.translatedText }
+        set { session.translatedText = newValue }
+    }
+    var isTranslating: Bool {
+        get { session.isTranslating }
+        set { session.isTranslating = newValue }
+    }
+    var errorMessage: String? {
+        get { session.errorMessage }
+        set { session.errorMessage = newValue }
+    }
+    var showPermissionHint: Bool {
+        get { session.showPermissionHint }
+        set { session.showPermissionHint = newValue }
+    }
     @Published var translationHistory: [HistoryEntry] = []
-    @Published var streamingFinished: Bool = false
-    @Published var showSuccessPulse: Bool = false
-    @Published var showErrorShake: Bool = false
-    @Published var showErrorPulse: Bool = false
-    @Published var dictionaryEntry: DictionaryEntry? = nil
-    @Published var isDictionaryMode: Bool = false
-    /// Auto-detected word status — updated on inputText change, drives UI hints.
-    @Published var detectedIsWord: Bool = false
+    var streamingFinished: Bool {
+        get { session.streamingFinished }
+        set { session.streamingFinished = newValue }
+    }
+    var showSuccessPulse: Bool {
+        get { session.showSuccessPulse }
+        set { session.showSuccessPulse = newValue }
+    }
+    var showErrorShake: Bool {
+        get { session.showErrorShake }
+        set { session.showErrorShake = newValue }
+    }
+    var showErrorPulse: Bool {
+        get { session.showErrorPulse }
+        set { session.showErrorPulse = newValue }
+    }
+    var dictionaryEntry: DictionaryEntry? {
+        get { session.dictionaryEntry }
+        set { session.dictionaryEntry = newValue }
+    }
+    var isDictionaryMode: Bool {
+        get { session.isDictionaryMode }
+        set { session.isDictionaryMode = newValue }
+    }
+    var detectedIsWord: Bool {
+        get { session.detectedIsWord }
+        set { session.detectedIsWord = newValue }
+    }
 
-    /// High-frequency streaming state exposed as @Observable for field-level SwiftUI observation.
-    /// Views that render translated text observe this store so that streaming updates
-    /// only trigger local recomputation, not the full AppState observer tree.
+    /// Single source of truth for all streaming state.
+    /// Views observe this via `@Environment(TranslationSessionStore.self)` for field-level
+    /// SwiftUI observation — only StreamingTextView recomputes on text changes.
     let session = TranslationSessionStore()
 
     var selectedProvider: APIProvider? { providers.first { $0.id == selectedProviderID && $0.isEnabled } }
@@ -181,7 +224,6 @@ final class AppState: ObservableObject {
 
             let isWord = WordDetector.isWord(text)
 
-            // Pick the right provider: dict config first, then fallback to current selection
             let effectiveProvider: APIProvider
             if isWord, let dictID = self.dictProviderID,
                let dictProvider = self.enabledProviders.first(where: { $0.id == dictID }) {
@@ -190,10 +232,8 @@ final class AppState: ObservableObject {
                 effectiveProvider = resolvedProvider
             }
 
-            // Dict mode only if it's a word AND the effective provider supports it
             let isDict = isWord && !effectiveProvider.kind.isTraditionalMT
 
-            // ── Route via factory (fallback handled at AppState level) ──
             let ctx = EngineRoutingContext(text: text, provider: effectiveProvider, isWord: isDict)
             let engine = TranslationEngineFactory.makeEngine(context: ctx)
             let stream = engine.execute(
@@ -216,27 +256,21 @@ final class AppState: ObservableObject {
                     let now = ContinuousClock.Instant.now
                     if !isDict, (now - lastFlush) >= flushInterval {
                         self.translatedText = fullText
-                        self.session.translatedText = fullText
                         lastFlush = now
                     }
                 }
                 if !isDict {
                     self.translatedText = fullText
-                    self.session.translatedText = fullText
                 }
                 self.isTranslating = false
                 self.streamingFinished = true
                 self.showSuccessPulse = true
                 self.isDictionaryMode = false
-                self.session.isTranslating = false
-                self.session.streamingFinished = true
-                self.session.showSuccessPulse = true
-                self.session.isDictionaryMode = false
 
-                // Parse dictionary result
                 if isDict {
                     if effectiveProvider.kind == .macOSNative {
-                        self.dictionaryEntry = await MacOSNativeProvider.lookupWord(text)
+                        let entry = await MacOSNativeProvider.lookupWord(text)
+                        self.dictionaryEntry = entry
                     } else if let entry = DictionaryEntry.parse(from: fullText, word: text) {
                         self.dictionaryEntry = entry
                     } else {
@@ -252,18 +286,14 @@ final class AppState: ObservableObject {
                 self.retryCount = 0
                 self.addHistory(text: text, result: fullText, provider: effectiveProvider)
             } catch {
-                // ── Dictionary timeout: immediate fallback to macOS native ──
                 if isDict && effectiveProvider.kind != .macOSNative {
                     print("[DictFallback] ⚡️ Dictionary mode timed out, switching to macOS native dictionary")
-                    self.dictionaryEntry = await MacOSNativeProvider.lookupWord(text)
+                    let entry = await MacOSNativeProvider.lookupWord(text)
+                    self.dictionaryEntry = entry
                     await MainActor.run {
                         self.translatedText = ""
                         self.isTranslating = false
                         self.streamingFinished = true
-                        self.session.translatedText = ""
-                        self.session.isTranslating = false
-                        self.session.streamingFinished = true
-                        // Keep isDictionaryMode = true so FloatingView shows dictionary card
                         self.showSuccessPulse = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                             self.showSuccessPulse = false
@@ -272,9 +302,7 @@ final class AppState: ObservableObject {
                     return
                 }
 
-                // ── Sequential fallback: try next enabled provider ──
                 let fallbackOn = UserDefaults.standard.bool(forKey: "fallback_on_failure")
-                // Be lenient: treat any error as fallback-eligible, except auth errors
                 let errStr = error.localizedDescription.lowercased()
                 let isAuthError = errStr.contains("401") || errStr.contains("403") || errStr.contains("unauthorized") || errStr.contains("invalid api key") || errStr.contains("key 无效")
 
@@ -290,8 +318,6 @@ final class AppState: ObservableObject {
                     return
                 }
 
-                // ── Fallback to non-streaming for same provider ──
-                // Skip macOSNative — it's handled locally, not by TranslationService
                 if effectiveProvider.kind != .macOSNative {
                     do {
                         let r = try await TranslationService.translate(
@@ -300,38 +326,26 @@ final class AppState: ObservableObject {
                         )
                         await MainActor.run {
                             self.translatedText = r.text
-                            self.session.translatedText = r.text
                             self.isTranslating = false; self.streamingFinished = true
                             self.showSuccessPulse = true
-                            self.session.isTranslating = false
-                            self.session.streamingFinished = true
-                            self.session.showSuccessPulse = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                                 self.showSuccessPulse = false
-                                self.session.showSuccessPulse = false
                             }
                         }
                         self.retryCount = 0
                         await MainActor.run { self.addHistory(text: text, result: r.text, provider: effectiveProvider) }
                     } catch {
-                        // ── Terminal error ──
                         let msg = error.localizedDescription
                         await MainActor.run {
                             self.errorMessage = msg
                             self.isTranslating = false
                             self.showErrorShake = true
-                            self.session.errorMessage = msg
-                            self.session.isTranslating = false
-                            self.session.showErrorShake = true
                             self.showErrorPulse = true
-                            self.session.showErrorPulse = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                                 self.showErrorPulse = false
-                                self.session.showErrorPulse = false
                             }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                                 self.showErrorShake = false
-                                self.session.showErrorShake = false
                             }
                         }
                     }
@@ -342,11 +356,15 @@ final class AppState: ObservableObject {
 
     func resetForNew(text: String) {
         activeStreamTask?.cancel()
-        inputText = text; translatedText = ""; errorMessage = nil; isTranslating = false; lastText = ""; dictionaryEntry = nil; isDictionaryMode = false
+        inputText = text; translatedText = ""; errorMessage = nil; isTranslating = false; lastText = ""
+        dictionaryEntry = nil; isDictionaryMode = false
         streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
-        retryCount = 0
         showPermissionHint = !HotkeyManager.isTrusted && text.isEmpty
-        syncSession()
+        retryCount = 0
+
+        // Pre-allocate translatedText buffer: translations are typically 1×–3× source length.
+        // This avoids ~log₂(N) heap reallocations during streaming token concatenation.
+        session.translatedText.reserveCapacity(max(1024, text.count * 2))
 
         // Deferred memory purge after OCR / large-text operations:
         // OCR's Vision C++ buffers can keep 60MB+ resident; delay 2s then
@@ -379,22 +397,6 @@ final class AppState: ObservableObject {
         return "原生翻译失败: \(error.localizedDescription)"
     }
 
-    /// Mirror all high-frequency streaming state into the @Observable session store
-    /// so that SwiftUI field-level observation isolates recomputation to StreamingTextView.
-    private func syncSession() {
-        self.session.translatedText = translatedText
-        self.session.isTranslating = isTranslating
-        self.session.streamingFinished = streamingFinished
-        self.session.inputText = inputText
-        self.session.showSuccessPulse = showSuccessPulse
-        self.session.errorMessage = errorMessage
-        self.session.showErrorShake = showErrorShake
-        self.session.showErrorPulse = showErrorPulse
-        self.session.isDictionaryMode = isDictionaryMode
-        self.session.dictionaryEntry = dictionaryEntry
-        self.session.detectedIsWord = detectedIsWord
-        self.session.showPermissionHint = showPermissionHint
-    }
 
     func addHistory(text: String, result: String, provider: APIProvider) {
         guard !UserDefaults.standard.bool(forKey: "history_disabled") else { return }

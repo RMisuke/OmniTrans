@@ -25,11 +25,13 @@ private let yellowPulse = Color(red: 0.980, green: 0.784, blue: 0.000)  // #fac8
 
 struct FloatingTranslationView: View {
     @ObservedObject var state: AppState
+    @Environment(TranslationSessionStore.self) private var session
     @AppStorage("panel_size") private var panelSize = "default"
     @AppStorage("animations_enabled") private var animationsEnabled = true
+    @AppStorage("is_context_aware") private var isContextAware = true
 
     // ── Derived ──
-    private var isDict: Bool { state.isDictionaryMode || state.dictionaryEntry?.isWord == true }
+    private var isDict: Bool { session.isDictionaryMode || session.dictionaryEntry?.isWord == true }
     private var isNativeDict: Bool {
         guard let id = state.dictProviderID else { return true }
         return state.enabledProviders.first(where: { $0.id == id })?.kind == .macOSNative
@@ -54,7 +56,7 @@ struct FloatingTranslationView: View {
         VStack(spacing: 0) {
             dragBar
             headerBar
-            if state.showPermissionHint { permissionBlock }
+            if session.showPermissionHint { permissionBlock }
             else { contentArea }
             bottomBar
             resizeGrip
@@ -64,7 +66,7 @@ struct FloatingTranslationView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .animationsGated()
         .onKeyPress(.escape) { FloatingPanel.shared.hide(); return .handled }
-        .onChange(of: state.inputText) { _, v in state.detectedIsWord = WordDetector.isWord(v) }
+        .onChange(of: session.inputText) { _, v in session.detectedIsWord = WordDetector.isWord(v) }
     }
 
     // MARK: - Drag bar (top) — three-color indicator, smooth transitions
@@ -72,9 +74,9 @@ struct FloatingTranslationView: View {
     private enum IndicatorMode { case none, yellow, green, red }
 
     private var indicatorMode: IndicatorMode {
-        if state.showErrorPulse       { return .red }
-        if state.isTranslating        { return .yellow }
-        if state.showSuccessPulse     { return .green }
+        if session.showErrorPulse       { return .red }
+        if session.isTranslating        { return .yellow }
+        if session.showSuccessPulse     { return .green }
         return .none
     }
 
@@ -178,6 +180,9 @@ struct FloatingTranslationView: View {
             Image(nsImage: appIcon(size: 18))
                 .resizable().frame(width: 18, height: 18)
             Text(isDict ? "查词" : "翻译").font(.subheadline).bold()
+            if isContextAware && !isDict {
+                contextBadge
+            }
             Spacer()
             providerMenu
             Text("\(state.sourceLang == .auto ? "自动" : state.sourceLang.rawValue) → \(state.targetLang.rawValue)")
@@ -187,6 +192,19 @@ struct FloatingTranslationView: View {
             }.buttonStyle(.plain)
         }
         .padding(.horizontal, 12).padding(.vertical, 6)
+    }
+
+    private var contextBadge: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "brain.head.profile")
+                .font(.system(size: 9, weight: .bold))
+            Text("Context On")
+                .font(.system(size: 8, weight: .bold))
+        }
+        .padding(.horizontal, 5).padding(.vertical, 2)
+        .background(Color.blue.opacity(0.12))
+        .foregroundColor(.blue)
+        .clipShape(Capsule())
     }
 
     private var providerMenu: some View {
@@ -253,8 +271,8 @@ struct FloatingTranslationView: View {
         if isDict {
             dictContent
         } else {
-            VStack(spacing: 0) {
-                if !state.inputText.isEmpty { sourceBlock }
+            VStack(spacing: 8) {
+                if !session.inputText.isEmpty { sourceBlock }
                 translationContent
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -265,17 +283,17 @@ struct FloatingTranslationView: View {
 
     private var sourceBlock: some View {
         VStack(spacing: 0) {
-            if state.detectedIsWord {
+            if session.detectedIsWord {
                 wordBadge
             }
             ScrollView {
-                Text(state.inputText)
+                Text(session.inputText)
                     .font(.system(size: 16)).textSelection(.enabled)
                     .padding(.horizontal, 14).padding(.vertical, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(minHeight: 52, maxHeight: 80)
-            .background(.ultraThinMaterial).cornerRadius(8).padding(.horizontal, 10)
+            .padding(.horizontal, 10)
         }
     }
 
@@ -293,28 +311,28 @@ struct FloatingTranslationView: View {
 
     @ViewBuilder
     private var translationContent: some View {
-        if state.isTranslating && state.translatedText.isEmpty {
+        if session.isTranslating && session.translatedText.isEmpty {
             VStack(spacing: 14) {
                 SkeletonShimmerView()
                 Text("正在翻译…").font(.caption).foregroundColor(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .padding(.top, 24)
-        } else if !state.translatedText.isEmpty || state.isTranslating {
+        } else if !session.translatedText.isEmpty || session.isTranslating {
             ScrollView {
                 HStack(alignment: .top, spacing: 0) {
-                    Text(state.translatedText)
+                    Text(session.translatedText)
                         .font(.system(size: 15)).textSelection(.enabled).lineSpacing(4)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .drawingGroup()
-                    if state.isTranslating {
+                    if session.isTranslating {
                         Rectangle().fill(Color.accentColor).frame(width: 2, height: 15)
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 8)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        } else if let err = state.errorMessage {
+        } else if let err = session.errorMessage {
             errorBlock(err)
         }
     }
@@ -323,9 +341,9 @@ struct FloatingTranslationView: View {
 
     @ViewBuilder
     private var dictContent: some View {
-        if state.isTranslating {
+        if session.isTranslating {
             dictLoadingBlock
-        } else if let entry = state.dictionaryEntry, entry.isWord {
+        } else if let entry = session.dictionaryEntry, entry.isWord {
             ScrollView {
                 Group {
                     if isNativeDict {
@@ -337,7 +355,7 @@ struct FloatingTranslationView: View {
                 .padding(.horizontal, 14).padding(.vertical, 8)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        } else if let err = state.errorMessage {
+        } else if let err = session.errorMessage {
             errorBlock(err)
         }
     }
@@ -358,7 +376,7 @@ struct FloatingTranslationView: View {
             Text(msg).font(.caption).foregroundColor(.red).lineLimit(4)
             Button(action: { state.retryTranslate() }) {
                 Label("重试", systemImage: "arrow.clockwise").font(.caption2)
-            }.buttonStyle(.borderedProminent).controlSize(.small).disabled(state.isTranslating)
+            }.buttonStyle(.borderedProminent).controlSize(.small).disabled(session.isTranslating)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
     }
@@ -369,8 +387,8 @@ struct FloatingTranslationView: View {
         HStack(spacing: 8) {
             langMenu
             Spacer()
-            if !state.translatedText.isEmpty, !state.isTranslating, !isDict {
-                Text("\(state.translatedText.count) 字符").font(.caption2).foregroundColor(.secondary)
+            if !session.translatedText.isEmpty, !session.isTranslating, !isDict {
+                Text("\(session.translatedText.count) 字符").font(.caption2).foregroundColor(.secondary)
             }
             actionButtons
         }
@@ -394,18 +412,18 @@ struct FloatingTranslationView: View {
 
     @ViewBuilder
     private var actionButtons: some View {
-        if !state.translatedText.isEmpty || state.dictionaryEntry != nil {
+        if !session.translatedText.isEmpty || session.dictionaryEntry != nil {
             Button(action: copyResult) {
                 Image(systemName: "doc.on.doc").font(.caption)
             }.buttonStyle(.borderless)
             Button(action: speakResult) {
                 Image(systemName: "speaker.wave.2").font(.caption)
             }.buttonStyle(.borderless)
-                .disabled(state.translatedText.isEmpty && state.dictionaryEntry == nil)
+                .disabled(session.translatedText.isEmpty && session.dictionaryEntry == nil)
         }
         Button(isDict ? "重新查词" : "翻译") { state.translate() }
             .buttonStyle(.borderedProminent).controlSize(.small)
-            .disabled(state.isTranslating || state.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(session.isTranslating || session.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
     // MARK: - Resize grip (bottom)
@@ -423,8 +441,8 @@ struct FloatingTranslationView: View {
 
     private func speakResult() {
         let text: String
-        if isDict, let entry = state.dictionaryEntry { text = entry.word }
-        else { text = state.translatedText }
+        if isDict, let entry = session.dictionaryEntry { text = entry.word }
+        else { text = session.translatedText }
         guard !text.isEmpty else { return }
         TTSManager.shared.speakNative(text: text)
     }
@@ -432,14 +450,14 @@ struct FloatingTranslationView: View {
     private func copyResult() {
         ClipboardMonitor.shared.suppressNext = true
         NSPasteboard.general.clearContents()
-        if let entry = state.dictionaryEntry, entry.isWord {
+        if let entry = session.dictionaryEntry, entry.isWord {
             let parts: [String] = [entry.word]
                 + (entry.phonetic.isEmpty ? [] : [entry.phonetic])
                 + entry.definitions.map { "[\($0.pos)] \($0.meaning)" }
                 + entry.examples.flatMap { ["• \($0.en)", "  \($0.zh)"] }
             NSPasteboard.general.setString(parts.joined(separator: "\n"), forType: .string)
         } else {
-            NSPasteboard.general.setString(state.translatedText, forType: .string)
+            NSPasteboard.general.setString(session.translatedText, forType: .string)
         }
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
     }

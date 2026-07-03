@@ -82,29 +82,37 @@ struct GeneralSettingsView: View {
                         .pickerStyle(.segmented).frame(width: 240)
                     }
                     Divider()
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle(isOn: $animationsEnabled) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text("动画效果").font(.subheadline)
+                            Text("关闭后将禁用所有界面动画，包括成功脉冲、骨架屏加载、窗口弹性缩放等")
+                                .font(.caption).foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .onChange(of: animationsEnabled) { _, _ in AnimationGate.refresh() }
-                        Text("关闭后将禁用所有界面动画，包括成功脉冲、骨架屏加载、窗口弹性缩放等")
-                            .font(.caption).foregroundColor(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Toggle("", isOn: $animationsEnabled)
+                            .toggleStyle(.switch).labelsHidden()
+                            .onChange(of: animationsEnabled) { _, _ in AnimationGate.refresh() }
                     }
                 }
 
                 // ── Behaviour ──
                 settingsCard(title: "行为", icon: "slider.horizontal.3") {
-                    Toggle(isOn: Binding(
-                        get: { clipboardMonitor },
-                        set: { v in
-                            clipboardMonitor = v
-                            UserDefaults.standard.set(v, forKey: "clipboard_monitor")
-                            v ? ClipboardMonitor.shared.start() : ClipboardMonitor.shared.stop()
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("剪贴板监听").font(.subheadline)
+                            Text("自动翻译复制的内容").font(.caption).foregroundColor(.secondary)
                         }
-                    )) {
-                        Text("剪贴板监听").font(.subheadline)
-                        Text("自动翻译复制的内容").font(.caption).foregroundColor(.secondary)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { clipboardMonitor },
+                            set: { v in
+                                clipboardMonitor = v
+                                UserDefaults.standard.set(v, forKey: "clipboard_monitor")
+                                v ? ClipboardMonitor.shared.start() : ClipboardMonitor.shared.stop()
+                            }
+                        ))
+                        .toggleStyle(.switch).labelsHidden()
                     }
 
                     Divider()

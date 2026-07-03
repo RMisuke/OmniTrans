@@ -21,11 +21,23 @@ struct SkeletonShimmerView: View {
             : nil
     }
 
+    @ViewBuilder
     var body: some View {
+        if animationsEnabled {
+            animatedBody
+        } else {
+            staticBody
+        }
+    }
+
+    // MARK: - Animated branch (full breathing pulse)
+
+    @ViewBuilder
+    private var animatedBody: some View {
         if compact {
             compactBar
                 .opacity(opacity)
-                .onAppear { if animationsEnabled { withAnimation(pulse) { opacity = 0.7 } } }
+                .onAppear { withAnimation(pulse) { opacity = 0.7 } }
                 .animation(pulse, value: opacity)
         } else {
             VStack(alignment: .leading, spacing: 10) {
@@ -35,6 +47,32 @@ struct SkeletonShimmerView: View {
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
         }
+    }
+
+    // MARK: - Static branch (zero animation overhead)
+
+    @ViewBuilder
+    private var staticBody: some View {
+        if compact {
+            compactBar.opacity(0.5)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                staticBar(widthRatio: 1.0)
+                staticBar(widthRatio: 0.72)
+                staticBar(widthRatio: 0.88)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 12)
+        }
+    }
+
+    private func staticBar(widthRatio: CGFloat) -> some View {
+        GeometryReader { geo in
+            RoundedRectangle(cornerRadius: 5)
+                .fill(.quaternary)
+                .frame(width: geo.size.width * widthRatio, height: 13)
+                .opacity(0.45)
+        }
+        .frame(height: 13)
     }
 
     // MARK: - Compact single bar

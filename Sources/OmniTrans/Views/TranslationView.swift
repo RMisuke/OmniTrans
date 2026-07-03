@@ -68,7 +68,16 @@ struct TranslationView: View {
         .animation(fadeAnim, value: state.isTranslating)
         .animation(fadeAnim, value: state.showSuccessPulse)
         .onChange(of: state.isTranslating) { _, translating in
-            if translating { startCursor() } else { stopCursor() }
+            if translating {
+                startCursor()
+                // Clear NSTextView undo stack to prevent unbounded memory growth
+                // from long-lived text editing history.
+                if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+                    editor.undoManager?.removeAllActions()
+                }
+            } else {
+                stopCursor()
+            }
         }
         .onChange(of: state.streamingFinished) { _, _ in stopCursor() }
     }
@@ -232,6 +241,7 @@ struct TranslationView: View {
                 .font(.system(size: 15))
                 .frame(minHeight: 72, maxHeight: 120)
                 .scrollContentBackground(.hidden)
+                .padding(.horizontal, 12).padding(.vertical, 8)
                 .padding(.horizontal, 8)
         }
     }

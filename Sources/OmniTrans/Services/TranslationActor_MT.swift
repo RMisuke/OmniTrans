@@ -1,10 +1,10 @@
 import Foundation
 import CryptoKit
 
-// MARK: - HTML Entity Decoder
+// MARK: - String Extensions
 
 extension String {
-    /// Decodes HTML entities like `&quot;` → `"`, `&#39;` → `'`, etc.
+    /// Decodes HTML entities like `"` → `"`, `'` → `'`, etc.
     func htmlEntityDecoded() -> String {
         guard let data = self.data(using: .utf8) else { return self }
         let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
@@ -23,15 +23,18 @@ extension String {
     }
 }
 
-// MARK: - Alibaba Cloud HMAC-SHA1 Signer
+// MARK: - Shared Signer Utilities
 
-enum AlibabaCloudSigner {
+private enum SignerUtilities {
     /// RFC 3986 unreserved characters — NOT percent-encoded.
-    private static let unreservedRFC3986 = CharacterSet(charactersIn:
+    static let unreservedChars = CharacterSet(charactersIn:
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~")
 
-    /// ISO 8601 timestamp WITHOUT fractional seconds — Alibaba Cloud requirement.
-    private static func aliyunTimestamp() -> String {
+    static func percentEncode(_ string: String) -> String {
+        string.addingPercentEncoding(withAllowedCharacters: unreservedChars) ?? string
+    }
+
+    static func iso8601Timestamp() -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone(identifier: "UTC")!
@@ -39,8 +42,82 @@ enum AlibabaCloudSigner {
         return f.string(from: Date())
     }
 
-    /// Generates a signed query string for the Alibaba Cloud MT API (TranslateGeneral).
-    /// Uses HTTPS via `mt.cn-hangzhou.aliyuncs.com` (the official V3 HTTPS endpoint).
+    static func hmacSign(hash: any HashFunction.Type, key: String, message: String) -> String {
+        guard let keyData = key.data(using: .utf8),
+              let msgData = message.data(using: .utf8)
+        else { return "" }
+        let symmetricKey = SymmetricKey(data: keyData)
+        // Use runtime hash dispatch via the protocol
+        if hash == Insecure.SHA1.self {
+            let code = HMAC<Insecure.SHA1>.authenticationCode(for: msgData, using: symmetricKey)
+            return Data(code).base64EncodedString()
+        } else {
+            let code = HMAC<SHA256>.authenticationCode(for: msgData, using: symmetricKey)
+            return Data(code).base64EncodedString()
+        }
+    }
+
+    /// Builds a canonical signed query string: sorts params, builds canonical query,
+    /// signs with HMAC, appends Signature param.
+    static func buildSignedQuery(
+        params: [(String, String)],
+        secretKey: String,
+        hash: any HashFunction.Type
+    ) -> String {
+        var sorted = params
+        sorted.sort { $0.0 < $1.0 }
+
+        let canonicalQuery = sorted.map { k, v in
+            percentEncode(k) + "=" + percentEncode(v)
+        }.joined(separator: "&")
+
+        let stringToSign = "GET&" + percentEncode("/") + "&" + percentEncode(canonicalQuery)
+        let signature = hmacSign(hash: hash, key: secretKey + "&", message: stringToSign)
+
+        return canonicalQuery + "&Signature=" + percentEncode(signature)
+    }
+
+    /// Shared connectivity test: builds a signed query, GETs the URL, checks HTTP 200.
+    static func testConnectivity(
+        endpoint: String,
+        accessKey: String,
+        secretKey: String,
+        params: [(String, String)],
+        hash: any HashFunction.Type,
+        label: String,
+        parseOK: @escaping (String) -> Void
+    ) async throws {
+        let query = buildSignedQuery(params: params, secretKey: secretKey, hash: hash)
+        guard let url = URL(string: "\(endpoint)?\(query)") else {
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效地址"])
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 15
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无响应"])
+        }
+
+        let body = String(data: data, encoding: .utf8) ?? ""
+
+        guard http.statusCode == 200 else {
+            let code = body.extractXMLTag("Code") ?? "Unknown"
+            let msg = body.extractXMLTag("Message") ?? body
+            print("[\(label)Test] ❌ [\(code)] \(msg)")
+            throw NSError(domain: "", code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "\(label) [\(code)] \(msg)"])
+        }
+
+        print("[\(label)Test] HTTP 200")
+        parseOK(body)
+    }
+}
+
+// MARK: - Alibaba Cloud HMAC-SHA1 Signer
+
+enum AlibabaCloudSigner {
     static func signedQuery(
         accessKeyId: String,
         accessKeySecret: String,
@@ -48,10 +125,10 @@ enum AlibabaCloudSigner {
         sourceLanguage: String = "auto",
         targetLanguage: String = "zh"
     ) -> String {
-        let timestamp = aliyunTimestamp()
+        let timestamp = SignerUtilities.iso8601Timestamp()
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
-        var params: [(String, String)] = [
+        let params: [(String, String)] = [
             ("AccessKeyId", accessKeyId),
             ("Action", "TranslateGeneral"),
             ("FormatType", "text"),
@@ -66,88 +143,43 @@ enum AlibabaCloudSigner {
             ("Version", "2018-10-12"),
         ]
 
-        // Sort by key (ASCII)
-        params.sort { $0.0 < $1.0 }
-
-        // Build canonical query string
-        let canonicalQuery = params.map { key, value in
-            percentEncode(key) + "=" + percentEncode(value)
-        }.joined(separator: "&")
-
-        // String to sign: GET&%2F&<encoded canonical query>
-        let stringToSign = "GET&" + percentEncode("/") + "&" + percentEncode(canonicalQuery)
-
-        // HMAC-SHA1 with key = AccessKeySecret + "&" using CryptoKit
-        let signature = hmacSHA1Base64(key: accessKeySecret + "&", message: stringToSign)
-
-        // Final query
-        let finalQuery = canonicalQuery + "&Signature=" + percentEncode(signature)
-        return finalQuery
-    }
-
-    /// Test connectivity with a minimal signed request via HTTPS.
-    static func testConnectivity(accessKeyId: String, accessKeySecret: String) async throws {
-        let query = signedQuery(
-            accessKeyId: accessKeyId,
-            accessKeySecret: accessKeySecret,
-            sourceText: "hello",
-            sourceLanguage: "en",
-            targetLanguage: "zh"
+        return SignerUtilities.buildSignedQuery(
+            params: params, secretKey: accessKeySecret, hash: Insecure.SHA1.self
         )
-        guard let url = URL(string: "https://mt.cn-hangzhou.aliyuncs.com/?\(query)") else {
-            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效地址"])
-        }
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.timeoutInterval = 15
-
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse else {
-            throw NSError(domain: "", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "无响应"])
-        }
-
-        let body = String(data: data, encoding: .utf8) ?? ""
-
-        guard http.statusCode == 200 else {
-            let code = body.extractXMLTag("Code") ?? "Unknown"
-            let msg = body.extractXMLTag("Message") ?? body
-            print("[AlibabaTest] ❌ [\(code)] \(msg)")
-            throw NSError(domain: "", code: http.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "阿里云 [\(code)] \(msg)"])
-        }
-
-        print("[AlibabaTest] HTTP 200")
-        if let translated = body.extractXMLTag("Translated") {
-            print("[AlibabaTest] ✅ hello → \(translated)")
-        }
     }
 
-    // MARK: - Private helpers
-
-    private static func percentEncode(_ string: String) -> String {
-        string.addingPercentEncoding(withAllowedCharacters: unreservedRFC3986) ?? string
-    }
-
-    private static func hmacSHA1Base64(key: String, message: String) -> String {
-        guard let keyData = key.data(using: .utf8),
-              let msgData = message.data(using: .utf8)
-        else { return "" }
-        let symmetricKey = SymmetricKey(data: keyData)
-        let authCode = HMAC<Insecure.SHA1>.authenticationCode(for: msgData, using: symmetricKey)
-        return Data(authCode).base64EncodedString()
+    static func testConnectivity(accessKeyId: String, accessKeySecret: String) async throws {
+        let timestamp = SignerUtilities.iso8601Timestamp()
+        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let params: [(String, String)] = [
+            ("AccessKeyId", accessKeyId),
+            ("Action", "TranslateGeneral"),
+            ("FormatType", "text"),
+            ("Scene", "general"),
+            ("SignatureMethod", "HMAC-SHA1"),
+            ("SignatureNonce", nonce),
+            ("SignatureVersion", "1.0"),
+            ("SourceLanguage", "en"),
+            ("SourceText", "hello"),
+            ("TargetLanguage", "zh"),
+            ("Timestamp", timestamp),
+            ("Version", "2018-10-12"),
+        ]
+        try await SignerUtilities.testConnectivity(
+            endpoint: "https://mt.cn-hangzhou.aliyuncs.com",
+            accessKey: accessKeyId, secretKey: accessKeySecret,
+            params: params, hash: Insecure.SHA1.self, label: "Alibaba"
+        ) { body in
+            if let translated = body.extractXMLTag("Translated") {
+                print("[AlibabaTest] ✅ hello → \(translated)")
+            }
+        }
     }
 }
 
 // MARK: - Volcengine (火山翻译) HMAC-SHA256 Signer
 
 enum VolcengineSigner {
-    private static let unreservedChars = CharacterSet(charactersIn:
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~")
-
-    /// Volcengine TranslateText API.
-    /// Docs: https://www.volcengine.com/docs/4640/130872
-    /// Uses query-parameter based HMAC-SHA256 signing (similar to Alibaba Cloud).
     static func signedQuery(
         accessKey: String,
         secretKey: String,
@@ -155,10 +187,10 @@ enum VolcengineSigner {
         sourceLanguage: String = "auto",
         targetLanguage: String = "zh"
     ) -> String {
-        let timestamp = iso8601Timestamp()
+        let timestamp = SignerUtilities.iso8601Timestamp()
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
-        var params: [(String, String)] = [
+        let params: [(String, String)] = [
             ("AccessKeyId", accessKey),
             ("Action", "TranslateText"),
             ("Version", "2020-06-01"),
@@ -171,71 +203,34 @@ enum VolcengineSigner {
             ("Timestamp", timestamp),
         ]
 
-        params.sort { $0.0 < $1.0 }
-
-        let canonicalQuery = params.map { key, value in
-            percentEncode(key) + "=" + percentEncode(value)
-        }.joined(separator: "&")
-
-        let stringToSign = "GET&" + percentEncode("/") + "&" + percentEncode(canonicalQuery)
-        let signature = hmacSHA256Base64(key: secretKey + "&", message: stringToSign)
-
-        return canonicalQuery + "&Signature=" + percentEncode(signature)
+        return SignerUtilities.buildSignedQuery(
+            params: params, secretKey: secretKey, hash: SHA256.self
+        )
     }
 
     static func testConnectivity(accessKey: String, secretKey: String) async throws {
-        let query = signedQuery(
-            accessKey: accessKey,
-            secretKey: secretKey,
-            sourceText: "hello",
-            sourceLanguage: "en",
-            targetLanguage: "zh"
-        )
-        guard let url = URL(string: "https://translate.volcengineapi.com/?\(query)") else {
-            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效地址"])
+        let timestamp = SignerUtilities.iso8601Timestamp()
+        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let params: [(String, String)] = [
+            ("AccessKeyId", accessKey),
+            ("Action", "TranslateText"),
+            ("Version", "2020-06-01"),
+            ("SourceLanguage", "en"),
+            ("TargetLanguage", "zh"),
+            ("TextList", "[hello]"),
+            ("SignatureMethod", "HMAC-SHA256"),
+            ("SignatureNonce", nonce),
+            ("SignatureVersion", "1.0"),
+            ("Timestamp", timestamp),
+        ]
+        try await SignerUtilities.testConnectivity(
+            endpoint: "https://translate.volcengineapi.com",
+            accessKey: accessKey, secretKey: secretKey,
+            params: params, hash: SHA256.self, label: "Volcengine"
+        ) { body in
+            if body.contains("TranslationList") {
+                print("[VolcengineTest] ✅ hello translated")
+            }
         }
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.timeoutInterval = 15
-
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse else {
-            throw NSError(domain: "", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "无响应"])
-        }
-        let body = String(data: data, encoding: .utf8) ?? ""
-        guard http.statusCode == 200 else {
-            print("[VolcengineTest] ❌ HTTP \(http.statusCode): \(body.prefix(200))")
-            throw NSError(domain: "", code: http.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "火山翻译认证失败: \(body.prefix(100))"])
-        }
-        print("[VolcengineTest] ✅ HTTP 200")
-        // Try to parse TranslationList
-        if body.contains("TranslationList") {
-            print("[VolcengineTest] ✅ hello translated")
-        }
-    }
-
-    // MARK: - Private helpers
-
-    private static func iso8601Timestamp() -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")!
-        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
-        return f.string(from: Date())
-    }
-
-    private static func percentEncode(_ string: String) -> String {
-        string.addingPercentEncoding(withAllowedCharacters: unreservedChars) ?? string
-    }
-
-    private static func hmacSHA256Base64(key: String, message: String) -> String {
-        guard let keyData = key.data(using: .utf8),
-              let msgData = message.data(using: .utf8)
-        else { return "" }
-        let symmetricKey = SymmetricKey(data: keyData)
-        let authCode = HMAC<SHA256>.authenticationCode(for: msgData, using: symmetricKey)
-        return Data(authCode).base64EncodedString()
     }
 }

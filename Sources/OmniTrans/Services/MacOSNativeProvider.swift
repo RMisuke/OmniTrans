@@ -8,6 +8,22 @@ import CoreServices
 /// via `MacOSNativeEngineAdapter` — not this provider.
 enum MacOSNativeProvider {
 
+    // MARK: - LRU Cache
+
+    /// Thread-safe LRU cache for frequently looked-up words.
+    /// `NSCache` auto-evicts under memory pressure; `countLimit = 120` keeps ~120 entries.
+    private static let cache: NSCache<NSString, DictEntryBox> = {
+        let c = NSCache<NSString, DictEntryBox>()
+        c.countLimit = 120
+        return c
+    }()
+
+    /// Reference-type box for `NSCache` (which requires class values).
+    private final class DictEntryBox {
+        let entry: DictionaryEntry
+        init(_ entry: DictionaryEntry) { self.entry = entry }
+    }
+
     // MARK: - Word lookup (all macOS versions)
 
     /// Look up a word in the macOS built-in dictionary.
@@ -16,30 +32,44 @@ enum MacOSNativeProvider {
     /// milliseconds under disk I/O pressure.  This wrapper offloads the call to a
     /// dedicated background thread via `Task.detached` so the main run loop is never
     /// stalled, regardless of system load.
+    ///
+    /// Results are cached in a thread-safe LRU cache (countLimit: 120) so repeated
+    /// lookups of the same word avoid the IPC → disk round-trip.
     static func lookupWord(_ word: String) async -> DictionaryEntry {
+        let key = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() as NSString
+
+        // Cache hit — O(1), no disk I/O
+        if let box = cache.object(forKey: key) {
+            return box.entry
+        }
+
         let cfWord = word as CFString
         let length = CFStringGetLength(cfWord)
         let range = CFRange(location: 0, length: length)
 
-        return await Task.detached(priority: .userInitiated) {
+        return await Task.detached(priority: .userInitiated) { [key] in
             guard let raw = DCSCopyTextDefinition(nil, cfWord, range)?.takeRetainedValue() as String?,
                   !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else {
-                return DictionaryEntry(
+                let missing = DictionaryEntry(
                     word: word, isWord: false, phonetic: "",
                     definitions: [.init(pos: "—", meaning: "系统词典未收录该词")],
                     examples: []
                 )
+                MacOSNativeProvider.cache.setObject(DictEntryBox(missing), forKey: key)
+                return missing
             }
 
             let definitions = parseDefinitions(from: raw)
-            return DictionaryEntry(
+            let entry = DictionaryEntry(
                 word: word, isWord: true, phonetic: "",
                 definitions: definitions.isEmpty
                     ? [.init(pos: "释义", meaning: raw.trimmingCharacters(in: .whitespacesAndNewlines))]
                     : definitions,
                 examples: []
             )
+            MacOSNativeProvider.cache.setObject(DictEntryBox(entry), forKey: key)
+            return entry
         }.value
     }
 

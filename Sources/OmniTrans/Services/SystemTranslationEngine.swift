@@ -90,11 +90,9 @@ actor SystemTranslationEngine {
 
             let task = Task {
                 do {
-                    let session = TranslationSession(installedSource: source, target: target)
-                    try await session.prepareTranslation()
-                    let response = try await session.translate(text)
+                    let response = try await translateText(text, source: source, target: target)
                     lock.lock()
-                    if !resumed { resumed = true; lock.unlock(); cont.resume(returning: response.targetText) }
+                    if !resumed { resumed = true; lock.unlock(); cont.resume(returning: response) }
                     else { lock.unlock() }
                 } catch {
                     lock.lock()
@@ -116,6 +114,21 @@ actor SystemTranslationEngine {
                 } else { lock.unlock() }
             }
         }
+    }
+
+    /// Stub — `TranslationSession` has no public initializers in the current SDK.
+    /// When the Translation framework API stabilises, restore the implementation:
+    ///   let session = TranslationSession(...)
+    ///   try await session.prepareTranslation()
+    ///   return try await session.translate(text).targetText
+    private static func translateText(
+        _ text: String,
+        source: Locale.Language,
+        target: Locale.Language
+    ) async throws -> String {
+        throw TranslationService.TranslationError.apiError(
+            "系统原生翻译暂不可用（TranslationSession API 已变更）。请切换至云端 API。"
+        )
     }
 
     // MARK: - Language availability

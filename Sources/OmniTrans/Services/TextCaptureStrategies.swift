@@ -67,11 +67,19 @@ struct VisionOCRCaptureStrategy: TextCaptureStrategy {
     func tryCapture() -> String? {
         return autoreleasepool {
             let mouse = NSEvent.mouseLocation
+            // NSEvent.mouseLocation uses AppKit coords (bottom-left origin),
+            // but CGWindowListCreateImage expects CG coords (top-left origin).
+            // Convert the mouse Y to the CG coordinate system.
+            let cgScreenHeight = NSScreen.screens.map { $0.frame.maxY }.max()
+                ?? NSScreen.main?.frame.maxY
+                ?? 0
+            let cgMouseY = cgScreenHeight - mouse.y
+
             let passes: [(width: CGFloat, height: CGFloat, minConfidence: Float)] = [
                 (240, 50,  0.35), (400, 90, 0.25), (560, 140, 0.15),
             ]
             for (w, h, minConf) in passes {
-                let rect = CGRect(x: mouse.x - w/2, y: mouse.y - h/2, width: w, height: h)
+                let rect = CGRect(x: mouse.x - w/2, y: cgMouseY - h/2, width: w, height: h)
                 guard let rawCGImage = CGWindowListCreateImage(rect, .optionOnScreenOnly, kCGNullWindowID, .bestResolution)
                 else { continue }
 

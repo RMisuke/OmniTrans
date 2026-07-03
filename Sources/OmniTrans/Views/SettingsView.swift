@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage("history_disabled") private var historyDisabled = false
     @AppStorage("custom_prompt_enabled") private var customPromptEnabled = false
     @AppStorage("custom_prompt_text") private var customPromptText = ""
+    @AppStorage("is_context_aware") private var isContextAware = true
     @State private var maxHistoryText: String = "100"
 
     private let tabItems = [
@@ -171,6 +172,19 @@ struct SettingsView: View {
                             set: { UserDefaults.standard.set($0, forKey: "fallback_on_failure") }
                         ))
                         .toggleStyle(.switch).controlSize(.small)
+                    }
+                }
+
+                card(title: "上下文感知翻译", icon: "text.viewfinder") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("开启后根据当前应用（浏览器/IDE/聊天等）自动优化翻译语气，可提升大模型翻译准确性，但会增加 Token 消耗")
+                                .font(.caption).foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $isContextAware)
+                            .toggleStyle(.switch).controlSize(.small)
                     }
                 }
 
