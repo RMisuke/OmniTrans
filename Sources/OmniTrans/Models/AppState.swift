@@ -22,10 +22,16 @@ final class AppState: ObservableObject {
     @Published var streamingFinished: Bool = false
     @Published var showSuccessPulse: Bool = false
     @Published var showErrorShake: Bool = false
+    @Published var showErrorPulse: Bool = false
     @Published var dictionaryEntry: DictionaryEntry? = nil
     @Published var isDictionaryMode: Bool = false
     /// Auto-detected word status — updated on inputText change, drives UI hints.
     @Published var detectedIsWord: Bool = false
+
+    /// High-frequency streaming state exposed as @Observable for field-level SwiftUI observation.
+    /// Views that render translated text observe this store so that streaming updates
+    /// only trigger local recomputation, not the full AppState observer tree.
+    let session = TranslationSessionStore()
 
     var selectedProvider: APIProvider? { providers.first { $0.id == selectedProviderID && $0.isEnabled } }
     var enabledProviders: [APIProvider] { providers.filter(\.isEnabled) }
@@ -46,6 +52,9 @@ final class AppState: ObservableObject {
         if UserDefaults.standard.integer(forKey: "ocr_hotkey_carbonKey") == 0 {
             UserDefaults.standard.set(Int(kVK_ANSI_F), forKey: "ocr_hotkey_carbonKey")
             UserDefaults.standard.set(Int(optionKey), forKey: "ocr_hotkey_carbonMods")
+        }
+        if UserDefaults.standard.object(forKey: "animations_enabled") == nil {
+            UserDefaults.standard.set(true, forKey: "animations_enabled")
         }
     }
 
@@ -116,11 +125,13 @@ final class AppState: ObservableObject {
     /// Returns the next enabled provider after `current` in list order (wraps around).
     /// Returns nil if no other enabled provider exists.
     func nextFallbackProvider(after current: APIProvider) -> APIProvider? {
-        let enabled = enabledProviders
+        // Reorder: non-native first, macOSNative last (ultimate fallback)
+        var enabled = enabledProviders
         guard enabled.count > 1 else { return nil }
-        guard let idx = enabled.firstIndex(where: { $0.id == current.id }) else {
-            return enabled.first
-        }
+        var nativeItems: [APIProvider] = []
+        enabled.removeAll(where: { if $0.kind == .macOSNative { nativeItems.append($0); return true }; return false })
+        enabled.append(contentsOf: nativeItems)
+        guard let idx = enabled.firstIndex(where: { $0.id == current.id }) else { return enabled.first }
         let next = (idx + 1) % enabled.count
         if next == idx { return nil }
         return enabled[next]
@@ -128,8 +139,12 @@ final class AppState: ObservableObject {
 
     /// Returns full ordered fallback chain starting from `provider`.
     func fallbackChain(from provider: APIProvider) -> [APIProvider] {
-        let enabled = enabledProviders
+        var enabled = enabledProviders
         guard !enabled.isEmpty else { return [provider] }
+        // Reorder: non-native first, macOSNative last
+        var nativeItems: [APIProvider] = []
+        enabled.removeAll(where: { if $0.kind == .macOSNative { nativeItems.append($0); return true }; return false })
+        enabled.append(contentsOf: nativeItems)
         guard let idx = enabled.firstIndex(where: { $0.id == provider.id }) else { return enabled }
         var chain: [APIProvider] = []
         for i in idx..<enabled.count { chain.append(enabled[i]) }
@@ -156,12 +171,12 @@ final class AppState: ObservableObject {
     private func doTranslate(text: String, provider: APIProvider) {
         activeStreamTask?.cancel()
         isTranslating = true; errorMessage = nil; translatedText = ""
-        streamingFinished = false; showSuccessPulse = false; showErrorShake = false
+        streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
         lastText = text; lastTarget = targetLang; lastProviderID = selectedProviderID
 
         activeStreamTask = Task { [weak self] in
             guard let self else { return }
-            let (resolvedProvider, usingFallback) = await TranslationActor.shared.resolveWithFallback(provider)
+            let (resolvedProvider, usingFallback) = await FallbackRouter.resolveWithFallback(provider)
             if usingFallback { print("[OmniTrans] Falling back to local Ollama") }
 
             let isWord = WordDetector.isWord(text)
@@ -201,21 +216,27 @@ final class AppState: ObservableObject {
                     let now = ContinuousClock.Instant.now
                     if !isDict, (now - lastFlush) >= flushInterval {
                         self.translatedText = fullText
+                        self.session.translatedText = fullText
                         lastFlush = now
                     }
                 }
                 if !isDict {
                     self.translatedText = fullText
+                    self.session.translatedText = fullText
                 }
                 self.isTranslating = false
                 self.streamingFinished = true
                 self.showSuccessPulse = true
                 self.isDictionaryMode = false
+                self.session.isTranslating = false
+                self.session.streamingFinished = true
+                self.session.showSuccessPulse = true
+                self.session.isDictionaryMode = false
 
                 // Parse dictionary result
                 if isDict {
                     if effectiveProvider.kind == .macOSNative {
-                        self.dictionaryEntry = MacOSNativeProvider.lookupWord(text)
+                        self.dictionaryEntry = await MacOSNativeProvider.lookupWord(text)
                     } else if let entry = DictionaryEntry.parse(from: fullText, word: text) {
                         self.dictionaryEntry = entry
                     } else {
@@ -225,12 +246,32 @@ final class AppState: ObservableObject {
                     self.dictionaryEntry = nil
                 }
 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                     self.showSuccessPulse = false
                 }
                 self.retryCount = 0
                 self.addHistory(text: text, result: fullText, provider: effectiveProvider)
             } catch {
+                // ── Dictionary timeout: immediate fallback to macOS native ──
+                if isDict && effectiveProvider.kind != .macOSNative {
+                    print("[DictFallback] ⚡️ Dictionary mode timed out, switching to macOS native dictionary")
+                    self.dictionaryEntry = await MacOSNativeProvider.lookupWord(text)
+                    await MainActor.run {
+                        self.translatedText = ""
+                        self.isTranslating = false
+                        self.streamingFinished = true
+                        self.session.translatedText = ""
+                        self.session.isTranslating = false
+                        self.session.streamingFinished = true
+                        // Keep isDictionaryMode = true so FloatingView shows dictionary card
+                        self.showSuccessPulse = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                            self.showSuccessPulse = false
+                        }
+                    }
+                    return
+                }
+
                 // ── Sequential fallback: try next enabled provider ──
                 let fallbackOn = UserDefaults.standard.bool(forKey: "fallback_on_failure")
                 // Be lenient: treat any error as fallback-eligible, except auth errors
@@ -250,32 +291,48 @@ final class AppState: ObservableObject {
                 }
 
                 // ── Fallback to non-streaming for same provider ──
-                do {
-                    let r = try await TranslationService.translate(
-                        text: text, sourceLang: self.sourceLang,
-                        targetLang: self.targetLang, using: effectiveProvider
-                    )
-                    await MainActor.run {
-                        self.translatedText = r.text
-                        self.isTranslating = false; self.streamingFinished = true
-                        self.showSuccessPulse = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                            self.showSuccessPulse = false
+                // Skip macOSNative — it's handled locally, not by TranslationService
+                if effectiveProvider.kind != .macOSNative {
+                    do {
+                        let r = try await TranslationService.translate(
+                            text: text, sourceLang: self.sourceLang,
+                            targetLang: self.targetLang, using: effectiveProvider
+                        )
+                        await MainActor.run {
+                            self.translatedText = r.text
+                            self.session.translatedText = r.text
+                            self.isTranslating = false; self.streamingFinished = true
+                            self.showSuccessPulse = true
+                            self.session.isTranslating = false
+                            self.session.streamingFinished = true
+                            self.session.showSuccessPulse = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                                self.showSuccessPulse = false
+                                self.session.showSuccessPulse = false
+                            }
                         }
-                    }
-                    self.retryCount = 0
-                    await MainActor.run { self.addHistory(text: text, result: r.text, provider: effectiveProvider) }
-                } catch {
-                    // ── Terminal error ──
-                    let msg = effectiveProvider.kind == .macOSNative
-                        ? Self.friendlyNativeError(error)
-                        : error.localizedDescription
-                    await MainActor.run {
-                        self.errorMessage = msg
-                        self.isTranslating = false
-                        self.showErrorShake = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                            self.showErrorShake = false
+                        self.retryCount = 0
+                        await MainActor.run { self.addHistory(text: text, result: r.text, provider: effectiveProvider) }
+                    } catch {
+                        // ── Terminal error ──
+                        let msg = error.localizedDescription
+                        await MainActor.run {
+                            self.errorMessage = msg
+                            self.isTranslating = false
+                            self.showErrorShake = true
+                            self.session.errorMessage = msg
+                            self.session.isTranslating = false
+                            self.session.showErrorShake = true
+                            self.showErrorPulse = true
+                            self.session.showErrorPulse = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                                self.showErrorPulse = false
+                                self.session.showErrorPulse = false
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                                self.showErrorShake = false
+                                self.session.showErrorShake = false
+                            }
                         }
                     }
                 }
@@ -286,9 +343,19 @@ final class AppState: ObservableObject {
     func resetForNew(text: String) {
         activeStreamTask?.cancel()
         inputText = text; translatedText = ""; errorMessage = nil; isTranslating = false; lastText = ""; dictionaryEntry = nil; isDictionaryMode = false
-        streamingFinished = false; showSuccessPulse = false; showErrorShake = false
+        streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
         retryCount = 0
         showPermissionHint = !HotkeyManager.isTrusted && text.isEmpty
+        syncSession()
+
+        // Deferred memory purge after OCR / large-text operations:
+        // OCR's Vision C++ buffers can keep 60MB+ resident; delay 2s then
+        // tell kernel to reclaim free pages back to baseline (~60MB).
+        if text.count > 500 || !isDictionaryMode {
+            DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 2.0) {
+                MemoryPurgeHelper.shared.purgeBackendCache()
+            }
+        }
     }
 
         /// Maps Translation framework errors (and other native errors) to user-friendly Chinese messages.
@@ -312,19 +379,49 @@ final class AppState: ObservableObject {
         return "原生翻译失败: \(error.localizedDescription)"
     }
 
+    /// Mirror all high-frequency streaming state into the @Observable session store
+    /// so that SwiftUI field-level observation isolates recomputation to StreamingTextView.
+    private func syncSession() {
+        self.session.translatedText = translatedText
+        self.session.isTranslating = isTranslating
+        self.session.streamingFinished = streamingFinished
+        self.session.inputText = inputText
+        self.session.showSuccessPulse = showSuccessPulse
+        self.session.errorMessage = errorMessage
+        self.session.showErrorShake = showErrorShake
+        self.session.showErrorPulse = showErrorPulse
+        self.session.isDictionaryMode = isDictionaryMode
+        self.session.dictionaryEntry = dictionaryEntry
+        self.session.detectedIsWord = detectedIsWord
+        self.session.showPermissionHint = showPermissionHint
+    }
+
     func addHistory(text: String, result: String, provider: APIProvider) {
         guard !UserDefaults.standard.bool(forKey: "history_disabled") else { return }
         let entry = HistoryEntry(input: text, output: result, sourceLang: sourceLang, targetLang: targetLang, providerName: provider.name, model: provider.modelName)
+        Task { await HistoryActor.shared.add(entry) }
         translationHistory.insert(entry, at: 0)
         let maxCount = UserDefaults.standard.integer(forKey: "max_history_count")
         let limit = maxCount > 0 ? maxCount : 100
         if translationHistory.count > limit { translationHistory = Array(translationHistory.prefix(limit)) }
-        ProviderStorageManager.saveHistory(translationHistory)
     }
 
     func clearHistory() {
         translationHistory.removeAll()
-        ProviderStorageManager.clearHistory()
+        Task { await HistoryActor.shared.clear() }
+    }
+
+    /// Load full history on demand (called when user opens History tab)
+    func loadFullHistory() {
+        Task { await HistoryActor.shared.loadFromDisk() }
+        translationHistory = ProviderStorageManager.loadHistory()
+    }
+
+    /// Trim history back to recent entries when leaving history tab
+    func trimHistory() {
+        if translationHistory.count > 20 {
+            translationHistory = Array(translationHistory.prefix(20))
+        }
     }
 }
 

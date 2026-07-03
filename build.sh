@@ -5,10 +5,10 @@ cd "$(dirname "$0")"
 
 echo "=== Cleaning old build ==="
 rm -rf .build/OmniTrans.app .build/release/OmniTrans .build/release/OmniTrans.dSYM 2>/dev/null || true
-echo "=== Building OmniTrans (release, arm64) ==="
-swift build -c release --arch arm64 2>&1
+echo "=== Building OmniTrans (universal: arm64 + x86_64) ==="
+swift build -c release --arch arm64 --arch x86_64 2>&1
 
-BIN=".build/release/OmniTrans"
+BIN=".build/apple/Products/Release/OmniTrans"
 APP_DIR=".build/OmniTrans.app"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN" "$APP_DIR/Contents/MacOS/OmniTrans"
@@ -26,8 +26,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key><string>com.omnitrans.app</string>
     <key>CFBundleName</key><string>OmniTrans</string>
     <key>CFBundleDisplayName</key><string>OmniTrans</string>
-    <key>CFBundleVersion</key><string>0.2</string>
-    <key>CFBundleShortVersionString</key><string>0.2</string>
+    <key>CFBundleVersion</key><string>0.4-dev</string>
+    <key>CFBundleShortVersionString</key><string>0.4-dev</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>CFBundleIconFile</key><string>icon.icns</string>

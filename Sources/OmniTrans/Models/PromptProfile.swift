@@ -1,88 +1,76 @@
 import Foundation
 
-// MARK: - Prompt Profile Model
+// MARK: - Custom Prompt Model
 
-struct PromptProfile: Identifiable, Codable, Hashable {
-    var id = UUID()
-    var name: String
-    var systemPrompt: String
-    var iconName: String
+/// Simple single custom prompt — replaces the multi-preset system from earlier v0.4 dev.
+/// Stored in UserDefaults; toggled on/off via Settings → Prompt tab.
+struct CustomPrompt: Codable {
+    var enabled: Bool = false
+    var text: String = defaultPrompt
 
-    static let builtIn: [PromptProfile] = [
-        PromptProfile(
-            name: "默认翻译",
-            systemPrompt: "You are a professional translator. Translate the following text from {sourceLang} to {targetLang} accurately and naturally. Preserve the original meaning, tone, and formatting. Output ONLY the translation without any explanations or notes.",
-            iconName: "globe"
-        ),
-        PromptProfile(
-            name: "学术论文",
-            systemPrompt: "You are an academic translator specializing in scholarly papers. Translate the following text from {sourceLang} to {targetLang} using formal, precise academic language suitable for publication. Maintain technical terminology accuracy and formal register. Output ONLY the translation.",
-            iconName: "graduationcap"
-        ),
-        PromptProfile(
-            name: "口语对话",
-            systemPrompt: "You are a conversational translator. Translate the following text from {sourceLang} to {targetLang} using natural, colloquial everyday language that sounds like a native speaker talking casually. Output ONLY the translation.",
-            iconName: "message.fill"
-        ),
-        PromptProfile(
-            name: "技术文档",
-            systemPrompt: "You are a technical documentation translator. Translate the following text from {sourceLang} to {targetLang} preserving all technical terms, code snippets, and formatting. Use concise, precise technical language. Output ONLY the translation.",
-            iconName: "chevron.left.forwardslash.chevron.right"
-        ),
-        PromptProfile(
-            name: "文学美译",
-            systemPrompt: "You are a literary translator specializing in elegant prose. Translate the following text from {sourceLang} to {targetLang} preserving the author's style, emotion, and literary quality. Use refined, expressive language appropriate for literary works. Output ONLY the translation.",
-            iconName: "sparkles"
-        ),
-    ]
+    static let defaultPrompt = """
+You are a professional, high-quality translator fluent in all languages.
+Translate the provided text from __SOURCE_LANG__ into __TARGET_LANG__.
+
+Guidelines:
+- Maintain the original tone, style, and nuance.
+- Match the register (formal, casual, technical) precisely.
+- Do NOT add explanations or meta-commentary.
+"""
 }
 
-// MARK: - Profile Store
+// MARK: - Prompt Store
 
 @MainActor
 final class ProfileStore: ObservableObject {
     static let shared = ProfileStore()
 
-    @Published var profiles: [PromptProfile] = PromptProfile.builtIn
-    @Published var activeProfileID: UUID
+    @Published var customPrompt = CustomPrompt()
 
-    private init() {
-        activeProfileID = UUID()
-        load()
-    }
-
-    var activeProfile: PromptProfile? {
-        profiles.first { $0.id == activeProfileID }
-    }
-
-    func getActivePrompt() -> String {
-        return activeProfile?.systemPrompt ?? profiles.first?.systemPrompt ?? ""
-    }
+    private init() { load() }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: "prompt_profiles"),
-              let saved = try? JSONDecoder().decode([PromptProfile].self, from: data),
-              !saved.isEmpty
+        guard let data = UserDefaults.standard.data(forKey: "custom_prompt"),
+              let saved = try? JSONDecoder().decode(CustomPrompt.self, from: data)
         else { return }
-        profiles = saved
-        if let savedIDStr = UserDefaults.standard.string(forKey: "active_prompt_profile_id"),
-           let savedID = UUID(uuidString: savedIDStr),
-           profiles.contains(where: { $0.id == savedID }) {
-            activeProfileID = savedID
-        } else {
-            activeProfileID = UUID()
-        }
+        customPrompt = saved
     }
 
     func save() {
-        if let data = try? JSONEncoder().encode(profiles) {
-            UserDefaults.standard.set(data, forKey: "prompt_profiles")
+        if let data = try? JSONEncoder().encode(customPrompt) {
+            UserDefaults.standard.set(data, forKey: "custom_prompt")
         }
-        UserDefaults.standard.set(activeProfileID.uuidString, forKey: "active_prompt_profile_id")
     }
 
-    func selectProfile(_ id: UUID) {
-        activeProfileID = id
+    /// Builds the final system prompt: uses custom prompt if enabled,
+    /// otherwise falls back to the built-in default.
+    func buildSystemPrompt(sourceLang: String, targetLang: String, isDictionaryMode: Bool) -> String {
+        let base = customPrompt.enabled ? customPrompt.text : CustomPrompt.defaultPrompt
+        var prompt = base
+            .replacingOccurrences(of: "__SOURCE_LANG__", with: sourceLang)
+            .replacingOccurrences(of: "__TARGET_LANG__", with: targetLang)
+
+        if isDictionaryMode {
+            prompt += """
+
+
+[CRITICAL FORMAT CONSTRAINT]
+Respond ONLY with valid JSON. No Markdown code blocks. No explanations.
+"""
+        } else {
+            prompt += """
+
+
+[CRITICAL FORMAT CONSTRAINT]
+Translate directly. No introduction, no meta-commentary.
+Preserve original formatting and Markdown tags if present.
+"""
+        }
+        return prompt
+    }
+
+    func resetToDefault() {
+        customPrompt = CustomPrompt()
         save()
     }
 }

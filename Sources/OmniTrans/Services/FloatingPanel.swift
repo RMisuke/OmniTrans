@@ -35,8 +35,6 @@ final class FloatingPanel: NSPanel {
         }
     }
 
-    /// Current panel size mode from settings.
-
     /// Map size mode to a concrete height.
     func heightForMode(_ mode: String) -> CGFloat {
         switch mode {
@@ -46,7 +44,13 @@ final class FloatingPanel: NSPanel {
         }
     }
 
-    /// Elastic bubble pop-in: scale from 0.92 + fade in with spring curve.
+    /// Show the floating panel near the mouse cursor.
+    ///
+    /// **Instant-first strategy**: `makeKeyAndOrderFront` is called immediately
+    /// with full opacity and identity transform so the window appears with zero
+    /// perceived latency.  A lightweight spring scale animation runs
+    /// asynchronously on the Core Animation render server — it never blocks
+    /// the main thread and does not delay the first paint.
     func show(nearMouse: Bool = true) {
         let h = heightForMode(UserDefaults.standard.string(forKey: "panel_size") ?? "default")
 
@@ -62,28 +66,22 @@ final class FloatingPanel: NSPanel {
             setFrame(NSRect(x: frame.origin.x, y: frame.origin.y, width: 380, height: h), display: false)
         }
 
-        alphaValue = 0
+        // Show immediately — no alpha fade, no pre-scale transform
         contentView?.wantsLayer = true
-        if let cv = contentView {
-            cv.layer?.transform = CATransform3DMakeScale(0.92, 0.92, 1)
-        }
-
+        contentView?.layer?.transform = CATransform3DIdentity
+        alphaValue = 1.0
         makeKeyAndOrderFront(nil)
 
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.28
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
-            animator().alphaValue = 1
-        }
-
-        if let cv = contentView {
+        // Lightweight spring scale (render-server, non-blocking)
+        // Gate: skip when user disables animations
+        if AnimationGate.isEnabled, let cv = contentView {
             let spring = CASpringAnimation(keyPath: "transform.scale")
-            spring.fromValue = 0.92
+            spring.fromValue = 0.96
             spring.toValue = 1.0
-            spring.mass = 1.2
-            spring.stiffness = 280
-            spring.damping = 20
-            spring.initialVelocity = 0.5
+            spring.mass = 0.8
+            spring.stiffness = 400
+            spring.damping = 18
+            spring.initialVelocity = 0.3
             spring.duration = spring.settlingDuration
             spring.fillMode = .forwards
             spring.isRemovedOnCompletion = false
@@ -91,10 +89,10 @@ final class FloatingPanel: NSPanel {
         }
     }
 
-
-    /// Smooth fade-out, then order out.
+    /// Smooth fade-out, then physically unload SwiftUI view tree to release memory.
     func hide() {
         TTSManager.shared.stop()
+        MemoryPurgeHelper.shared.purgeBackendCache()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)

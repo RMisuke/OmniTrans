@@ -3,10 +3,46 @@ import SwiftUI
 struct TranslationView: View {
     @ObservedObject var state: AppState
     @Binding var showSettings: Bool
+    @AppStorage("animations_enabled") private var animationsEnabled = true
     @State private var showCopyToast = false
     @State private var swapTrigger = false
     @State private var showCursor = true
     @State private var cursorTimer: Timer?
+
+    private let fadeAnim: Animation? = .easeInOut(duration: 0.55)
+
+    /// Lazy-loaded app icon, resized for header use.
+    private var headerIcon: NSImage {
+        if let path = Bundle.main.path(forResource: "icon", ofType: "icns"),
+           let icon = NSImage(contentsOfFile: path) {
+            let resized = NSImage(size: NSSize(width: 20, height: 20))
+            resized.lockFocus()
+            icon.draw(in: NSRect(x: 0, y: 0, width: 20, height: 20),
+                      from: .zero, operation: .copy, fraction: 1.0)
+            resized.unlockFocus()
+            return resized
+        }
+        return NSImage(systemSymbolName: "character.bubble.fill", accessibilityDescription: nil)!
+    }
+
+    /// Smooth animated indicator: red error / yellow loading / green success.
+    @ViewBuilder
+    private var headerIndicator: some View {
+        if state.showErrorPulse {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundColor(Color(red: 1.000, green: 0.361, blue: 0.376))
+                .transition(.opacity)
+        } else if state.isTranslating {
+            Image(systemName: "circle.fill")
+                .foregroundColor(Color(red: 0.980, green: 0.784, blue: 0.000))
+                .scaleEffect(0.65)
+                .transition(.opacity)
+        } else if state.showSuccessPulse {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(Color(red: 0.204, green: 0.831, blue: 0.600))
+                .transition(.opacity)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,7 +63,10 @@ struct TranslationView: View {
                     .zIndex(10)
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: showCopyToast)
+        .animationsGated()
+        .animation(fadeAnim, value: state.showErrorPulse)
+        .animation(fadeAnim, value: state.isTranslating)
+        .animation(fadeAnim, value: state.showSuccessPulse)
         .onChange(of: state.isTranslating) { _, translating in
             if translating { startCursor() } else { stopCursor() }
         }
@@ -42,8 +81,8 @@ struct TranslationView: View {
             Text("已拷贝到剪贴板").font(.caption)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
-        .background(.ultraThinMaterial)
-        .cornerRadius(20)
+        .background(AdaptiveGlassBackground())
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(radius: 4)
         .padding(.top, 6)
     }
@@ -52,49 +91,16 @@ struct TranslationView: View {
 
     private var headerBar: some View {
         HStack {
-            Image(systemName: "character.bubble")
-                .foregroundColor(.accentColor)
+            Image(nsImage: headerIcon)
+                .resizable().frame(width: 20, height: 20)
             Text("OmniTrans").font(.headline)
 
             if state.isTranslating {
                 ProgressView().scaleEffect(0.5).padding(.leading, 4)
             }
-            if state.showSuccessPulse {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                    .scaleEffect(state.showSuccessPulse ? 1.3 : 1.0)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.5), value: state.showSuccessPulse)
-            }
+            headerIndicator
 
             Spacer()
-
-            // Prompt profile picker
-            Menu {
-                ForEach(ProfileStore.shared.profiles) { profile in
-                    Button(action: { ProfileStore.shared.selectProfile(profile.id) }) {
-                        HStack {
-                            Image(systemName: profile.iconName).font(.caption)
-                            Text(profile.name)
-                            if profile.id == ProfileStore.shared.activeProfileID {
-                                Image(systemName: "checkmark").font(.caption).foregroundColor(.accentColor)
-                            }
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "text.bubble").font(.system(size: 9))
-                    Text(ProfileStore.shared.activeProfile?.name ?? "默认")
-                        .font(.caption2).lineLimit(1)
-                    Image(systemName: "chevron.down").font(.system(size: 7))
-                }
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 5).padding(.vertical, 2)
-                .background(Color.primary.opacity(0.06))
-                .cornerRadius(4)
-            }
-            .menuStyle(.borderlessButton)
-            .frame(width: 90)
 
             providerMenu
             Button(action: { showSettings = true }) {
@@ -166,17 +172,19 @@ struct TranslationView: View {
             .frame(width: 120)
 
             Button(action: {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                    swapLanguages()
+                withAnimationGated(.spring(response: 0.3, dampingFraction: 0.6)) {
                     swapTrigger.toggle()
                 }
+                swapLanguages()
             }) {
                 Image(systemName: "arrow.left.arrow.right")
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.accentColor)
+                    .rotationEffect(.degrees(swapTrigger ? 180 : 0))
             }
             .buttonStyle(.borderless)
-            .help("交换语言")
+            .disabled(state.sourceLang == .auto)
+            .help(state.sourceLang == .auto ? "自动检测语言时无法交换" : "交换语言方向")
 
             Picker("目标语言", selection: $state.targetLang) {
                 ForEach(TranslationLanguage.allCases.filter { $0 != .auto }) { l in Text(l.rawValue).tag(l) }
@@ -186,45 +194,27 @@ struct TranslationView: View {
 
             Spacer()
 
-            // ── Clear button ──
             if !state.inputText.isEmpty {
                 Button(action: clearAll) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "xmark.circle").font(.caption)
-                        Text("清空").font(.caption)
-                    }
+                    Image(systemName: "xmark.circle").font(.caption)
                 }
-                .buttonStyle(.borderless)
-                .foregroundColor(.secondary)
-                .help("清空输入和翻译结果")
-            }
+                .buttonStyle(.borderless).help("清空")
 
-            // ── Translate button ──
-            Button(action: { state.translate() }) {
-                HStack(spacing: 2) {
-                    Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 11))
-                    Text("翻译").font(.system(size: 11))
+                Button(action: { state.translate() }) {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .font(.system(size: 22)).foregroundColor(.accentColor)
                 }
-                .padding(.horizontal, 6).padding(.vertical, 3)
+                .buttonStyle(.plain)
+                .disabled(state.isTranslating)
+                .help("翻译 (⌘⏎)")
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .disabled(state.isTranslating || state.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .keyboardShortcut(.return, modifiers: [])
         }
     }
 
     // MARK: - Input
 
     private var inputArea: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("输入文本").font(.caption).foregroundColor(.secondary)
-                Spacer()
-                Text("\(state.inputText.count) 字符").font(.caption2).foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 12).padding(.top, 6)
-
+        VStack(spacing: 0) {
             if state.detectedIsWord {
                 HStack(spacing: 4) {
                     Image(systemName: "character.book.closed.fill")
@@ -300,7 +290,6 @@ struct TranslationView: View {
                 }
                 .padding(.horizontal, 12).padding(.top, 4)
             }
-            .animation(.easeOut(duration: 0.2), value: state.translatedText)
             .padding(.bottom, 8)
         }
     }
@@ -351,7 +340,7 @@ struct TranslationView: View {
         showCursor = true
         cursorTimer?.invalidate()
         cursorTimer = Timer.scheduledTimer(withTimeInterval: 0.53, repeats: true) { _ in
-            showCursor.toggle()
+            self.showCursor.toggle()
         }
     }
 

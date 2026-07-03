@@ -4,6 +4,7 @@ import Carbon
 struct ContentView: View {
     @ObservedObject var state: AppState
     @State private var showSettings = false
+    @AppStorage("animations_enabled") private var animationsEnabled = true
 
     var body: some View {
         ZStack {
@@ -19,9 +20,11 @@ struct ContentView: View {
                 .transition(.move(edge: .leading).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: showSettings)
         .frame(minWidth: 480, idealWidth: 480, minHeight: 500, idealHeight: 500)
-        .onDisappear { TTSManager.shared.stop() }
+        .transaction { t in
+            if !animationsEnabled { t.disablesAnimations = true; t.animation = nil }
+        }
+        .onDisappear { TTSManager.shared.stop(); MemoryPurgeHelper.shared.purgeBackendCache() }
     }
 
     private var bottomBar: some View {

@@ -18,6 +18,7 @@ struct OmniTransApp: App {
 
 /// Breathing animated menubar icon — subtly pulses when translating.
 private struct MenubarIconView: View {
+    @AppStorage("animations_enabled") private var animationsEnabled = true
     let isTranslating: Bool
     @State private var breathing = false
 
@@ -40,13 +41,13 @@ private struct MenubarIconView: View {
                     .stroke(Color.accentColor.opacity(0.5), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
                     .rotationEffect(.degrees(breathing ? 360 : 0))
                     .frame(width: 22, height: 22)
-                    .animation(.linear(duration: 1.8).repeatForever(autoreverses: false), value: breathing)
+                    .animation(animationsEnabled ? .linear(duration: 1.8).repeatForever(autoreverses: false) : nil, value: breathing)
                     .onAppear { breathing = true }
                     .onDisappear { breathing = false }
             }
             Image(nsImage: nsImage)
                 .opacity(isTranslating ? (breathing ? 0.6 : 0.9) : 1.0)
-                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: breathing)
+                .animation(animationsEnabled ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : nil, value: breathing)
         }
         .onChange(of: isTranslating) { _, translating in
             breathing = translating
@@ -70,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotkeyManager.shared.onHotkey = { [weak self] text in
             self?.fire(text: text)
         }
+        AnimationGate.refresh()
         HotkeyManager.shared.register()
 
         HotkeyManager.shared.onOCRHotkey = { [weak self] in
@@ -90,6 +92,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             self?.showOnboardingIfNeeded()
+        }
+
+        // Right-click on menu bar icon also opens the popover
+        NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown]) { event in
+            if let w = event.window, String(describing: type(of: w)).contains("StatusBar") {
+                // Post a leftMouseDown to trigger MenuBarExtra's normal action
+                if let btn = w.contentView?.hitTest(event.locationInWindow) {
+                    btn.mouseDown(with: NSEvent.mouseEvent(
+                        with: .leftMouseDown,
+                        location: event.locationInWindow,
+                        modifierFlags: [], timestamp: 0,
+                        windowNumber: event.windowNumber,
+                        context: nil, eventNumber: 0,
+                        clickCount: 1, pressure: 1
+                    ) ?? event)
+                }
+                return nil // consume right-click
+            }
+            return event
         }
     }
 

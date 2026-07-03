@@ -18,7 +18,6 @@ struct SettingsView: View {
         (title: "API 配置",   icon: "server.rack"),
         (title: "翻译",       icon: "arrow.triangle.2.circlepath"),
         (title: "通用",       icon: "gearshape"),
-        (title: "Prompt",    icon: "text.bubble"),
         (title: "历史",       icon: "clock.arrow.circlepath"),
         (title: "关于",       icon: "info.circle"),
     ]
@@ -39,14 +38,17 @@ struct SettingsView: View {
 
     private var headerBar: some View {
         HStack(spacing: 0) {
-            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { isPresented = false } }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
-                    Text("返回").font(.caption)
+            Button(action: { withAnimationGated(.easeInOut(duration: 0.2)) { isPresented = false } }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left").font(.system(size: 13, weight: .semibold))
+                    Text("返回").font(.system(size: 13))
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.leading, 16)
+            .padding(.leading, 8)
 
             Spacer()
 
@@ -68,7 +70,7 @@ struct SettingsView: View {
     private func tabButton(idx: Int, item: (title: String, icon: String)) -> some View {
         Button(action: {
             previousTab = selectedTab
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) { selectedTab = idx }
+            withAnimationGated(.spring(response: 0.28, dampingFraction: 0.8)) { selectedTab = idx }
         }) {
             HStack(spacing: 4) {
                 Image(systemName: item.icon).font(.system(size: 10))
@@ -76,8 +78,9 @@ struct SettingsView: View {
                     .font(.system(size: 11, weight: selectedTab == idx ? .medium : .regular))
             }
             .foregroundColor(selectedTab == idx ? .white : Color(NSColor.controlTextColor))
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 10)
             .padding(.vertical, 6)
+            .contentShape(Capsule())
             .background(
                 ZStack {
                     if selectedTab == idx {
@@ -99,9 +102,8 @@ struct SettingsView: View {
             case 0: APISettingsView(state: state)
             case 1: translateSettingsTab
             case 2: GeneralSettingsView(state: state)
-            case 3: PromptSettingsView()
-            case 4: historySettingsTab
-            case 5: aboutSettingsTab
+            case 3: historySettingsTab
+            case 4: aboutSettingsTab
             default: EmptyView()
             }
         }
@@ -149,7 +151,7 @@ struct SettingsView: View {
                         }
                         Image(systemName: "arrow.right").foregroundColor(.secondary).padding(.top, 12)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("目标语言").font(.caption2).foregroundColor(.secondary)
+                            Text("目标语言").font(.caption).foregroundColor(.secondary)
                             Picker("", selection: $state.targetLang) {
                                 ForEach(TranslationLanguage.allCases.filter { $0 != .auto }) { l in Text(l.rawValue).tag(l) }
                             }.pickerStyle(.menu).frame(width: 110)
@@ -254,7 +256,7 @@ struct SettingsView: View {
                                     Text(item.timestamp, style: .relative).font(.caption2).foregroundColor(.secondary)
                                 }
                                 Text(item.input).font(.caption).lineLimit(1).foregroundColor(.primary)
-                                Text(item.output).font(.caption2).lineLimit(1).foregroundColor(.secondary)
+                                Text(item.output).font(.caption).lineLimit(1).foregroundColor(.secondary)
                             }
                             .padding(10)
                             .background(Color.primary.opacity(0.03)).cornerRadius(8)
@@ -265,6 +267,8 @@ struct SettingsView: View {
             }
             .padding()
         }
+        .onAppear { state.loadFullHistory() }
+        .onDisappear { state.trimHistory() }
     }
 
     // MARK: - About Tab
@@ -283,25 +287,26 @@ struct SettingsView: View {
 
                 Text("OmniTrans").font(.title2).bold()
                 Text("v\(kAppVersion)").font(.subheadline).foregroundColor(.secondary)
-                Text("AI 驱动的菜单栏翻译与查词工具")
+                Text("菜单栏翻译 · 划词 · OCR · 词典 · TTS · 多引擎")
                     .font(.caption).foregroundColor(.secondary)
 
                 Divider()
 
                 VStack(alignment: .leading, spacing: 5) {
-                                        FeatureRow(icon: "text.bubble", text: "划词翻译 — \(HotkeyManager.hotkeyLabel()) 选中即译")
-                    FeatureRow(icon: "rectangle.dashed", text: "框选 OCR — \(HotkeyManager.ocrHotkeyLabel()) 截屏取字")
+                    FeatureRow(icon: "text.bubble", text: "划词翻译 — \(HotkeyManager.hotkeyLabel()) 选中即译")
+                    FeatureRow(icon: "rectangle.dashed", text: "OCR 框选 — \(HotkeyManager.ocrHotkeyLabel()) 框选屏幕取字")
                     FeatureRow(icon: "arrow.triangle.swap", text: "原位替换 — \(HotkeyManager.replaceHotkeyLabel()) 直接粘贴译文")
-                    FeatureRow(icon: "character.book.closed", text: "智能词典 — 自动检测单词，结构化释义")
-                    FeatureRow(icon: "speaker.wave.2", text: "TTS 朗读 — 翻译与查词结果一键朗读")
-                    FeatureRow(icon: "globe", text: "多引擎 — OpenAI · Claude · Gemini · Qwen · DeepSeek · 火山翻译")
-                    FeatureRow(icon: "arrow.triangle.branch", text: "三级降级 — AI → MT → 原生引擎逐级回退")
-                    FeatureRow(icon: "cpu", text: "离线 — macOS 原生词典 + ANE 翻译引擎")
-                    FeatureRow(icon: "text.quote", text: "场景预设 — 翻译/润色/口语/代码/文案 5 种 prompt 模板")
-                    FeatureRow(icon: "rectangle.expand.vertical", text: "动态窗口 — 四种尺寸 + 自动适配内容高度")
-                    FeatureRow(icon: "lock.shield", text: "隐私 — 密钥 AES-256-GCM 本地加密存储")
+                    FeatureRow(icon: "character.book.closed", text: "智能词典 — 自动检测单词，结构化释义 + 音标 + 例句")
+                    FeatureRow(icon: "speaker.wave.2", text: "TTS 朗读 — 翻译结果与词典词汇一键朗读")
+                    FeatureRow(icon: "globe", text: "9 个引擎 — OpenAI · Claude · Gemini · 通义 · DeepSeek · 火山 · Google · Bing · 阿里")
+                    FeatureRow(icon: "arrow.triangle.branch", text: "智能降级 — AI → MT → 原生引擎逐级回退，按 Provider 列表顺序重试")
+                    FeatureRow(icon: "cpu", text: "原生引擎 — macOS 内置词典 + Translation API，零网络零 Token")
+                    FeatureRow(icon: "text.quote", text: "场景预设 — 翻译 / 润色 / 口语 / 代码 / 文案 5 种 Prompt")
+                    FeatureRow(icon: "rectangle.expand.vertical", text: "动态窗口 — 小 / 默认 / 大 / 动态 四种尺寸")
+                    FeatureRow(icon: "rectangle.on.rectangle", text: "剪贴板监听 — 后台 0% CPU · NSWorkspace 通知驱动")
+                    FeatureRow(icon: "arrow.up.arrow.down", text: "拖动排序 — API 配置卡片自由重排，持久化保存")
+                    FeatureRow(icon: "lock.shield", text: "隐私 — AES-256-GCM 文件加密，密钥绑定 IOPlatformUUID")
                 }
-
                 Divider()
 
                 Text("OmniTrans · SwiftUI · 零第三方依赖 · 2026")

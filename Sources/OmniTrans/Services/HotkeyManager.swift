@@ -1,24 +1,7 @@
 import Carbon
-import Vision
 import Cocoa
 
 /// 划词取词: CGEvent 模拟 Cmd+C (需辅助功能权限) → AX fallback
-
-/// Dedicated low-priority queue for OCR computation
-let ocrQueue = DispatchQueue(label: "com.omnitrans.ocr", qos: .userInitiated)
-
-/// Thread-safe reusable VNRecognizeTextRequest singleton — avoids per-capture allocation
-let sharedOCRRequest: VNRecognizeTextRequest = {
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .accurate
-    request.usesLanguageCorrection = true
-    request.recognitionLanguages = [
-        "zh-Hans", "zh-Hant", "en",
-        "ja", "ko", "fr", "de", "es"
-    ]
-    request.minimumTextHeight = 0.02
-    return request
-}()
 
 final class HotkeyManager {
     static let shared = HotkeyManager()
@@ -68,8 +51,10 @@ final class HotkeyManager {
 
     /// 当前原位替换快捷键的显示字符串 e.g. "⌥R"
     static func replaceHotkeyLabel() -> String {
-        let key  = UInt32(kVK_ANSI_R)
-        let mods = UInt32(optionKey)
+        let m = UserDefaults.standard.integer(forKey: "replace_hotkey_carbonMods")
+        let k = UserDefaults.standard.integer(forKey: "replace_hotkey_carbonKey")
+        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
+        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_R)
         var s = ""
         if mods & UInt32(controlKey) != 0 { s += "⌃" }
         if mods & UInt32(optionKey)  != 0 { s += "⌥" }
@@ -222,6 +207,8 @@ final class HotkeyManager {
     /// Re-register replace hotkey (called after user customization)
     func reregisterReplace(carbonKey: Int, carbonMods: Int) {
         unregisterReplace()
+        UserDefaults.standard.set(carbonKey, forKey: "replace_hotkey_carbonKey")
+        UserDefaults.standard.set(carbonMods, forKey: "replace_hotkey_carbonMods")
         registerReplace()
     }
 

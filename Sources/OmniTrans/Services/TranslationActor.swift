@@ -3,10 +3,28 @@ import Foundation
 /// Isolated actor for all network I/O, SSE parsing, and JSON decoding.
 /// Guarantees thread safety without locks; cooperatively cancels stale tasks.
 actor TranslationActor {
-    static let shared = TranslationActor()
 
     /// Active translation task — cancelled on new request.
     private var activeStreamTask: Task<Void, Never>?
+
+    /// Per-request URLSession — invalidated after each stream to break C-level retain cycles.
+    private var currentSession: URLSession?
+
+    /// Create a disposable URLSession with zero caching.
+    private func makeSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let s = URLSession(configuration: config)
+        currentSession = s
+        return s
+    }
+
+    /// Destroy the current session to release all internal buffers.
+    private func tearDownSession() {
+        currentSession?.invalidateAndCancel()
+        currentSession = nil
+    }
 
     // MARK: - Streaming (primary path)
 
@@ -169,7 +187,8 @@ actor TranslationActor {
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let session = makeSession()
+        let (bytes, resp) = try await session.bytes(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw TranslationService.TranslationError.networkError("invalid")
         }
@@ -184,7 +203,7 @@ actor TranslationActor {
         let decoder = JSONDecoder()
         let t = ThrottledStream(c)
         for try await line in bytes.lines {
-            guard !Task.isCancelled else { break }
+            try Task.checkCancellation()
             guard line.hasPrefix("data: ") else { continue }
             let jsonData = Data(line.utf8.dropFirst(6))
             if line.contains("[DONE]") { continue }
@@ -195,6 +214,7 @@ actor TranslationActor {
             t.yield(content)
         }
         t.flush()
+        tearDownSession()
     }
 
     // ── Anthropic SSE ──
@@ -222,7 +242,8 @@ actor TranslationActor {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let session = makeSession()
+        let (bytes, resp) = try await session.bytes(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw TranslationService.TranslationError.networkError("invalid")
         }
@@ -236,7 +257,7 @@ actor TranslationActor {
 
         let t = ThrottledStream(c)
         for try await line in bytes.lines {
-            guard !Task.isCancelled else { break }
+            try Task.checkCancellation()
             guard line.hasPrefix("data: ") else { continue }
             let jsonData = Data(line.utf8.dropFirst(6))
             guard let event = try? JSONDecoder().decode(AnthStreamEvent.self, from: jsonData),
@@ -246,6 +267,7 @@ actor TranslationActor {
             t.yield(text)
         }
         t.flush()
+        tearDownSession()
     }
 
     // ── Gemini SSE ──
@@ -271,7 +293,8 @@ actor TranslationActor {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let session = makeSession()
+        let (bytes, resp) = try await session.bytes(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw TranslationService.TranslationError.networkError("invalid")
         }
@@ -286,7 +309,7 @@ actor TranslationActor {
         let decoder = JSONDecoder()
         let t = ThrottledStream(c)
         for try await line in bytes.lines {
-            guard !Task.isCancelled else { break }
+            try Task.checkCancellation()
             guard line.hasPrefix("data: ") else { continue }
             let jsonData = Data(line.utf8.dropFirst(6))
             guard let chunk = try? decoder.decode(GemStreamChunk.self, from: jsonData),
@@ -306,6 +329,7 @@ actor TranslationActor {
         _ continuation: AsyncThrowingStream<String, Error>.Continuation,
         block: () async throws -> String
     ) async throws {
+        try Task.checkCancellation()
         let result = try await block()
         continuation.yield(result)
     }
@@ -332,7 +356,8 @@ actor TranslationActor {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        try Task.checkCancellation()
+        let (data, resp) = try await makeSession().data(for: req)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
             throw TranslationService.TranslationError.apiError("Google MT HTTP error")
         }
@@ -366,7 +391,8 @@ actor TranslationActor {
         let body: [[String: String]] = [["Text": text]]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        try Task.checkCancellation()
+        let (data, resp) = try await makeSession().data(for: req)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
             throw TranslationService.TranslationError.apiError("Bing MT HTTP error")
         }
@@ -398,7 +424,8 @@ actor TranslationActor {
         req.httpMethod = "GET"
         req.timeoutInterval = 20
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        try Task.checkCancellation()
+        let (data, resp) = try await makeSession().data(for: req)
         guard let http = resp as? HTTPURLResponse else {
             let body = String(data: data, encoding: .utf8) ?? ""
             print("[AlibabaMT] no HTTP response, body: \(body.prefix(300))")
@@ -461,7 +488,8 @@ actor TranslationActor {
         req.httpMethod = "GET"
         req.timeoutInterval = 15
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        try Task.checkCancellation()
+        let (data, resp) = try await makeSession().data(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw TranslationService.TranslationError.networkError("no response")
         }
@@ -496,61 +524,75 @@ actor TranslationActor {
 
     // MARK: - Helpers
 
+    /// Dedicated dictionary profile — XML-tag structured for JSON Mode reliability.
+    /// Not user-configurable: dictionary output requires strict schema adherence.
     private func buildDictionaryHint(tgt: TranslationLanguage) -> String {
         let langName = tgt.rawValue
         return """
-You are a bilingual dictionary whose ONLY output language is \(langName).
-CRITICAL RULES:
-- ALL "meaning" values MUST be written in \(langName). Never use any other language for meanings.
-- ALL "zh" example translations MUST be in \(langName).
-- "phonetic" must use IPA notation (e.g. /ˈɛksəˌsaɪz/).
-- "pos" values must be English abbreviations only: noun, verb, adj, adv, prep, conj, pron, interj.
-- Output ONLY valid JSON. Do NOT include markdown fences, code blocks, or any text outside the JSON.
+You are an expert lexicographer and dictionary assistant.
+Analyze the following __SOURCE_LANG__ word and provide a detailed dictionary entry in __TARGET_LANG__.
 
-JSON structure:
+Expected JSON schema (fill precisely):
 {
   "is_word": true,
-  "phonetic": "/IPA/",
-  "definitions": [{"pos": "noun", "meaning": "释义必须用\(langName)"}],
-  "examples": [{"en": "English example sentence", "zh": "例句翻译必须用\(langName)"}]
+  "phonetic": "/IPA notation/",
+  "definitions": [
+    {"pos": "n.", "meaning": "definition in \(langName)"}
+  ],
+  "examples": [
+    {"en": "example sentence in source language", "zh": "translation in \(langName)"}
+  ]
 }
 
-List ALL common definitions. Provide at least 2 examples. Use the query word in each example sentence.
+<Rules>
+- ALL "meaning" values MUST be written in \(langName).
+- ALL "zh" example translations MUST be in \(langName).
+- "pos" values: use standard English abbreviations (n., v., adj., adv., prep., conj., pron.).
+- "phonetic": use IPA notation or empty string if not applicable.
+- List ALL common definitions. Provide at least 2 examples.
+- Use the query word in each example sentence.
+</Rules>
+
+
+[CRITICAL FORMAT CONSTRAINT]
+You must respond ONLY with a valid JSON object. Do NOT wrap in Markdown code blocks (no ```json).
+No explanations, no intro, no outro — pure JSON only.
 """
     }
 
     private func buildHint(src: TranslationLanguage, tgt: TranslationLanguage) -> String {
-        // 1st priority: Active prompt profile (read from UserDefaults to avoid actor isolation)
-        if let data = UserDefaults.standard.data(forKey: "prompt_profiles"),
-           let profiles = try? JSONDecoder().decode([PromptProfile].self, from: data),
-           let activeIDStr = UserDefaults.standard.string(forKey: "active_prompt_profile_id"),
-           let activeID = UUID(uuidString: activeIDStr),
-           let profile = profiles.first(where: { $0.id == activeID }),
-           !profile.systemPrompt.isEmpty {
-            let builtInFirst = PromptProfile.builtIn.first?.systemPrompt ?? ""
-            if profile.systemPrompt != builtInFirst {
-                var p = profile.systemPrompt
-                p = p.replacingOccurrences(of: "{sourceLang}", with: src == .auto ? "auto" : src.languageCode)
-                p = p.replacingOccurrences(of: "{targetLang}", with: tgt.languageCode)
-                return p
-            }
-        }
+        let sourceName = src == .auto ? "Auto-Detected" : src.rawValue
+        let targetName = tgt.rawValue
 
-        // 2nd priority: Custom user prompt (legacy)
-        if UserDefaults.standard.bool(forKey: "custom_prompt_enabled"),
-           let custom = UserDefaults.standard.string(forKey: "custom_prompt_text"),
-           !custom.isEmpty {
-            var prompt = custom
-            prompt = prompt.replacingOccurrences(of: "{sourceLang}", with: src == .auto ? "auto" : src.languageCode)
-            prompt = prompt.replacingOccurrences(of: "{targetLang}", with: tgt.languageCode)
+        // Read custom prompt from UserDefaults (avoids MainActor isolation)
+        if let data = UserDefaults.standard.data(forKey: "custom_prompt"),
+           let cp = try? JSONDecoder().decode(CustomPrompt.self, from: data) {
+            let base = cp.enabled ? cp.text : CustomPrompt.defaultPrompt
+            var prompt = base
+                .replacingOccurrences(of: "__SOURCE_LANG__", with: sourceName)
+                .replacingOccurrences(of: "__TARGET_LANG__", with: targetName)
+            prompt += """
+
+
+[CRITICAL FORMAT CONSTRAINT]
+Translate directly. No introduction, no meta-commentary.
+Preserve original formatting and Markdown tags if present.
+"""
             return prompt
         }
-        // Optimized default prompt — higher quality, lower token waste
-        if src == .auto {
-            return "You are a professional translator. Translate the following text to \(tgt.languageCode) accurately and concisely. Preserve the original meaning, tone, and formatting. Output only the translation without any explanations or notes."
-        } else {
-            return "You are a professional translator. Translate the following text from \(src.languageCode) to \(tgt.languageCode) accurately and concisely. Preserve the original meaning, tone, and formatting. Output only the translation without any explanations or notes."
-        }
+
+        // Fallback to built-in default
+        var prompt = CustomPrompt.defaultPrompt
+            .replacingOccurrences(of: "__SOURCE_LANG__", with: sourceName)
+            .replacingOccurrences(of: "__TARGET_LANG__", with: targetName)
+        prompt += """
+
+
+[CRITICAL FORMAT CONSTRAINT]
+Translate directly. No introduction, no meta-commentary.
+Preserve original formatting and Markdown tags if present.
+"""
+        return prompt
     }
 }
 
@@ -636,7 +678,7 @@ extension TranslationActor: TranslationEngineProtocol {
         targetLang: TranslationLanguage
     ) -> AsyncThrowingStream<String, Error> {
         // Capture shared as a local constant so the nonisolated context can reference it.
-        let actor = Self.shared
+        let actor = self
         return AsyncThrowingStream { continuation in
             let task = Task {
                 let stream: AsyncThrowingStream<String, Error>

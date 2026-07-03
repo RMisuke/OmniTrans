@@ -45,7 +45,7 @@ struct ProviderCardView: View {
     private var displayView: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Toggle(isOn: Binding(get: { editEnabled }, set: { v in editEnabled = v; updateEnabledOnly(v) })) { EmptyView() }.toggleStyle(.switch).controlSize(.small)
+                Toggle(isOn: Binding(get: { editEnabled }, set: { v in editEnabled = v; updateEnabledOnly(v) })) { EmptyView() }.toggleStyle(.switch).controlSize(.small).disabled(provider.kind == .macOSNative)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 4) {
                         Text(editName.isEmpty ? "未命名" : editName).font(.headline).foregroundColor(AppTheme.textPrimary)
@@ -74,7 +74,7 @@ struct ProviderCardView: View {
     private var editView: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Toggle(isOn: $editEnabled) { EmptyView() }.toggleStyle(.switch).controlSize(.small)
+                Toggle(isOn: $editEnabled) { EmptyView() }.toggleStyle(.switch).controlSize(.small).disabled(provider.kind == .macOSNative)
                 TextField("名称", text: $editName).textFieldStyle(.roundedBorder).frame(width: 150).onChange(of: editName) { markDirty() }
                 Spacer()
                 Button("取消") { resetEditFields(); isEditing = false }.buttonStyle(.borderless).controlSize(.small)

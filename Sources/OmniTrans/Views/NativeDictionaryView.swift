@@ -1,11 +1,20 @@
 import SwiftUI
 
 /// Apple Dictionary.app‑style layout with staggered entrance animation.
+/// All staggered animations are gated by the global "动画效果" toggle.
 struct NativeDictionaryView: View {
     let entry: DictionaryEntry
+    @AppStorage("animations_enabled") private var animationsEnabled = true
 
     @State private var showHeader = false
     @State private var showDefs = false
+
+    private var springFast: Animation? {
+        animationsEnabled ? .spring(response: 0.3, dampingFraction: 0.78) : nil
+    }
+    private var springMedium: Animation? {
+        animationsEnabled ? .spring(response: 0.28, dampingFraction: 0.75) : nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -41,14 +50,14 @@ struct NativeDictionaryView: View {
         .padding(.horizontal, 4)
         .onAppear { animateIn() }
         .onChange(of: entry.word) { _ in animateIn() }
-        .animation(.spring(response: 0.3, dampingFraction: 0.78), value: showHeader)
-        .animation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.06), value: showDefs)
+        .animation(springFast, value: showHeader)
+        .animation(springMedium?.delay(0.06), value: showDefs)
     }
 
     private func animateIn() {
         showHeader = false; showDefs = false
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { showHeader = true }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.75).delay(0.06)) { showDefs = true }
+        withAnimationGated(.spring(response: 0.3, dampingFraction: 0.75)) { showHeader = true }
+        withAnimationGated(.spring(response: 0.28, dampingFraction: 0.75).delay(0.06)) { showDefs = true }
     }
 
     private var emptyState: some View {

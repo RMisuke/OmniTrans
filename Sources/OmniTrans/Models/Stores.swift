@@ -1,44 +1,36 @@
 import SwiftUI
 import Observation
 
-// MARK: - UI State Store
+// MARK: - Translation Session Store
 
-/// Reactive UI-level state: input, panel visibility, animations, word detection.
+/// High-frequency streaming state — isolated into a dedicated @Observable
+/// store so that SwiftUI field-level observation only triggers local body
+/// recomputation inside views that actually render translated text.
+///
+/// Views that only need config / providers should observe `ConfigurationStore`
+/// (or legacy `AppState`), not this store.
 @Observable
-final class UIStateStore {
-    var inputText: String = ""
+final class TranslationSessionStore {
     var translatedText: String = ""
     var isTranslating: Bool = false
     var streamingFinished: Bool = false
-    var detectedIsWord: Bool = false
+    var inputText: String = ""
+    var showSuccessPulse: Bool = false
+    var errorMessage: String? = nil
+    var showErrorShake: Bool = false
+    var showErrorPulse: Bool = false
     var isDictionaryMode: Bool = false
     var dictionaryEntry: DictionaryEntry? = nil
-    var errorMessage: String? = nil
+    var detectedIsWord: Bool = false
     var showPermissionHint: Bool = false
-    var showSuccessPulse: Bool = false
-    var showErrorShake: Bool = false
-
-    /// Bridge to legacy AppState — reads are synced on access.
-    @MainActor func syncFrom(_ state: AppState) {
-        inputText = state.inputText
-        translatedText = state.translatedText
-        isTranslating = state.isTranslating
-        streamingFinished = state.streamingFinished
-        detectedIsWord = state.detectedIsWord
-        isDictionaryMode = state.isDictionaryMode
-        dictionaryEntry = state.dictionaryEntry
-        errorMessage = state.errorMessage
-        showPermissionHint = state.showPermissionHint
-        showSuccessPulse = state.showSuccessPulse
-        showErrorShake = state.showErrorShake
-    }
 }
 
-// MARK: - Settings Store
+// MARK: - Configuration Store
 
-/// Provider config, language preferences, history management.
+/// Provider config, language preferences, history — low-frequency state
+/// that does NOT change during streaming translation.
 @Observable
-final class SettingsStore {
+final class ConfigurationStore {
     var providers: [APIProvider] = []
     var selectedProviderID: UUID? = nil
     var dictProviderID: UUID? = nil
@@ -46,6 +38,7 @@ final class SettingsStore {
     var targetLang: TranslationLanguage = .chinese
     var translationHistory: [HistoryEntry] = []
 
+    /// Bridge from legacy AppState on launch / settings changes.
     @MainActor func syncFrom(_ state: AppState) {
         providers = state.providers
         selectedProviderID = state.selectedProviderID
@@ -56,21 +49,10 @@ final class SettingsStore {
     }
 }
 
-// MARK: - Translation Store
+// MARK: - Legacy aliases (kept for existing @Observable usage)
 
-/// Orchestrates translation execution through the pipeline.
-@Observable
-final class TranslationStore {
-    var translatedText: String = ""
-    var dictionaryEntry: DictionaryEntry? = nil
-    var translationHistory: [HistoryEntry] = []
+/// Previously `UIStateStore` — kept as typealias for source compatibility.
+typealias UIStateStore = TranslationSessionStore
 
-    @ObservationIgnored
-    private let pipeline = TranslationPipeline()
-
-    @MainActor func syncFrom(_ state: AppState) {
-        translatedText = state.translatedText
-        dictionaryEntry = state.dictionaryEntry
-        translationHistory = state.translationHistory
-    }
-}
+/// Previously `SettingsStore` — kept as typealias for source compatibility.
+typealias SettingsStore = ConfigurationStore

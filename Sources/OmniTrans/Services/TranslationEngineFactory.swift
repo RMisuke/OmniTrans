@@ -20,6 +20,6 @@ enum TranslationEngineFactory {
         //           AND traditional MT (Google, Bing, Alibaba)
         // Both are handled by TranslationActor — its internal performStream
         // dispatches SSE for AI and performMockStream for MT.
-        return TranslationActor.shared
+        return TranslationActor()
     }
 }

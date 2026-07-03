@@ -158,6 +158,12 @@ enum ProviderStorageManager {
 
     // MARK: - History
 
+    static func loadRecentHistory(limit: Int = 20) -> [HistoryEntry] {
+        guard let d = UserDefaults.standard.data(forKey: Key.history) else { return [] }
+        let all = (try? JSONDecoder().decode([HistoryEntry].self, from: d)) ?? []
+        return Array(all.prefix(limit))
+    }
+
     static func loadHistory() -> [HistoryEntry] {
         guard let data = UserDefaults.standard.data(forKey: Key.history),
               let decoded = try? JSONDecoder().decode([HistoryEntry].self, from: data) else { return [] }

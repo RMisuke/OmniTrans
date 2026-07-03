@@ -54,6 +54,13 @@ actor TranslationPipeline {
             chain = all
         }
 
+        // .macOSNative always goes last (ultimate fallback)
+        var nativeItems: [APIProvider] = []
+        chain.removeAll(where: { 
+            if $0.kind == .macOSNative { nativeItems.append($0); return true }
+            return false
+        })
+        chain.append(contentsOf: nativeItems)
         return chain
     }
 

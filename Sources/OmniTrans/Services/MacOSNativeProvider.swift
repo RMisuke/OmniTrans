@@ -1,35 +1,46 @@
 import Foundation
 import CoreServices
 
-/// macOS built‑in offline dictionary + translation, zero API key required.
-/// - Word lookup: `DCSCopyTextDefinition` — all macOS versions
-/// - Paragraph: System Translation framework (ANE) — macOS 15+
+/// macOS built‑in offline dictionary, zero API key required.
+/// Word lookup: `DCSCopyTextDefinition` — all macOS versions.
+///
+/// Paragraph translation is handled by `SystemTranslationEngine` (macOS 15+)
+/// via `MacOSNativeEngineAdapter` — not this provider.
 enum MacOSNativeProvider {
 
     // MARK: - Word lookup (all macOS versions)
 
-    static func lookupWord(_ word: String) -> DictionaryEntry {
+    /// Look up a word in the macOS built-in dictionary.
+    ///
+    /// `DCSCopyTextDefinition` is a synchronous C API that can block for tens of
+    /// milliseconds under disk I/O pressure.  This wrapper offloads the call to a
+    /// dedicated background thread via `Task.detached` so the main run loop is never
+    /// stalled, regardless of system load.
+    static func lookupWord(_ word: String) async -> DictionaryEntry {
         let cfWord = word as CFString
-        let range = CFRange(location: 0, length: CFStringGetLength(cfWord))
+        let length = CFStringGetLength(cfWord)
+        let range = CFRange(location: 0, length: length)
 
-        guard let raw = DCSCopyTextDefinition(nil, cfWord, range)?.takeRetainedValue() as String?,
-              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
+        return await Task.detached(priority: .userInitiated) {
+            guard let raw = DCSCopyTextDefinition(nil, cfWord, range)?.takeRetainedValue() as String?,
+                  !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                return DictionaryEntry(
+                    word: word, isWord: false, phonetic: "",
+                    definitions: [.init(pos: "—", meaning: "系统词典未收录该词")],
+                    examples: []
+                )
+            }
+
+            let definitions = parseDefinitions(from: raw)
             return DictionaryEntry(
-                word: word, isWord: false, phonetic: "",
-                definitions: [.init(pos: "—", meaning: "系统词典未收录该词")],
+                word: word, isWord: true, phonetic: "",
+                definitions: definitions.isEmpty
+                    ? [.init(pos: "释义", meaning: raw.trimmingCharacters(in: .whitespacesAndNewlines))]
+                    : definitions,
                 examples: []
             )
-        }
-
-        let definitions = parseDefinitions(from: raw)
-        return DictionaryEntry(
-            word: word, isWord: true, phonetic: "",
-            definitions: definitions.isEmpty
-                ? [.init(pos: "释义", meaning: raw.trimmingCharacters(in: .whitespacesAndNewlines))]
-                : definitions,
-            examples: []
-        )
+        }.value
     }
 
     private static func parseDefinitions(from raw: String) -> [DictionaryEntry.Definition] {
@@ -54,58 +65,5 @@ enum MacOSNativeProvider {
             }
         }
         return results
-    }
-
-    // MARK: - Paragraph translation (macOS 15+)
-
-    /// On-device Neural Engine translation.
-    /// macOS 15+: full ANE-powered offline translation via SystemTranslationEngine.
-    static func translate(
-        _ text: String,
-        sourceLang: TranslationLanguage,
-        targetLang: TranslationLanguage
-    ) async throws -> String {
-        if #available(macOS 15.0, *) {
-            let target = targetLang.systemLocaleLanguage
-            let source: Locale.Language? = sourceLang == .auto ? nil : sourceLang.systemLocaleLanguage
-            return try await SystemTranslationEngine.shared.translateSingle(
-                text, source: source, target: target
-            )
-        } else {
-            throw TranslationService.TranslationError.apiError(
-                "原生离线翻译需要 macOS 15 (Sequoia) 或更高版本。"
-            )
-        }
-    }
-
-    /// Streaming variant — yields incremental full-text results.
-    static func translateStream(
-        _ text: String,
-        sourceLang: TranslationLanguage,
-        targetLang: TranslationLanguage
-    ) -> AsyncThrowingStream<String, Error> {
-        guard #available(macOS 15.0, *) else {
-            return AsyncThrowingStream { $0.finish(
-                throwing: TranslationService.TranslationError.apiError(
-                    "原生离线翻译需要 macOS 15 (Sequoia) 或更高版本。"
-                )
-            )}
-        }
-        let target = targetLang.systemLocaleLanguage
-        let source: Locale.Language? = sourceLang == .auto ? nil : sourceLang.systemLocaleLanguage
-        let engine = SystemTranslationEngine.shared
-        return AsyncThrowingStream { continuation in
-            Task {
-                let inner = await engine.translateStream(text, source: source, target: target)
-                do {
-                    for try await chunk in inner {
-                        continuation.yield(chunk)
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-        }
     }
 }

@@ -33,7 +33,7 @@ struct APISettingsView: View {
                     } else {
                         HStack(spacing: 4) {
                             Image(systemName: "arrow.up.arrow.down").font(.caption2).foregroundColor(.secondary)
-                            Text("顺序决定失败降级时的调用优先级，使用 ↑↓ 调整").font(.caption2).foregroundColor(.secondary)
+                            Text("顺序决定失败降级时的调用优先级，使用 ↑↓ 调整").font(.caption).foregroundColor(.secondary)
                         }.padding(.top, 4)
 
                         ForEach(Array(state.providers.enumerated()), id: \.element.id) { idx, provider in
@@ -42,7 +42,7 @@ struct APISettingsView: View {
                                 VStack(spacing: 2) {
                                     Button(action: { moveProvider(from: idx, to: idx - 1) }) {
                                         Image(systemName: "chevron.up")
-                                            .font(.caption2).frame(width: 20, height: 18)
+                                            .font(.caption).frame(width: 20, height: 18)
                                     }
                                     .buttonStyle(.borderless)
                                     .disabled(idx == 0)
@@ -50,7 +50,7 @@ struct APISettingsView: View {
 
                                     Button(action: { moveProvider(from: idx, to: idx + 1) }) {
                                         Image(systemName: "chevron.down")
-                                            .font(.caption2).frame(width: 20, height: 18)
+                                            .font(.caption).frame(width: 20, height: 18)
                                     }
                                     .buttonStyle(.borderless)
                                     .disabled(idx == state.providers.count - 1)
@@ -106,7 +106,7 @@ struct APISettingsView: View {
 
     private func moveProvider(from: Int, to: Int) {
         guard to >= 0, to < state.providers.count else { return }
-        withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+        withAnimationGated(.spring(response: 0.25, dampingFraction: 0.7)) {
             state.providers.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
             state.save()
         }

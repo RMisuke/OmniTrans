@@ -1,4 +1,4 @@
-import AVFAudio
+@preconcurrency import AVFAudio
 import AppKit
 
 // MARK: - TTS Protocol
@@ -10,15 +10,50 @@ protocol TTSEngine {
 
 // MARK: - Native offline TTS
 
-final class NativeTTSEngine: TTSEngine {
-    private let synth = NSSpeechSynthesizer()
+/// Modern offline TTS using AVSpeechSynthesizer (macOS 14+).
+/// Replaces the deprecated NSSpeechSynthesizer with AVFoundation's
+/// fully asynchronous audio pipeline.
+@MainActor
+final class NativeTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate {
+    private let synth = AVSpeechSynthesizer()
+    private var continuation: CheckedContinuation<Void, Error>?
 
-    func speak(text: String) {
-        if synth.isSpeaking { synth.stopSpeaking() }
-        synth.startSpeaking(text)
+    override init() {
+        super.init()
+        synth.delegate = self
     }
 
-    func stop() { synth.stopSpeaking() }
+    func speak(text: String) async throws {
+        if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+        return try await withCheckedThrowingContinuation { cont in
+            self.continuation = cont
+            let utterance = AVSpeechUtterance(string: text)
+            // Prefer system enhanced voice for the current locale
+            if let voice = AVSpeechSynthesisVoice(language: "zh-CN") {
+                utterance.voice = voice
+            }
+            utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+            synth.speak(utterance)
+        }
+    }
+
+    func stop() {
+        synth.stopSpeaking(at: .immediate)
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
+
+    // MARK: - AVSpeechSynthesizerDelegate
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
 }
 
 // MARK: - OpenAI TTS (requires API key from provider config)
@@ -68,7 +103,7 @@ final class TTSManager {
 
     /// Speak using native macOS TTS (always available, offline).
     func speakNative(text: String) {
-        native.speak(text: text)
+        Task { try? await native.speak(text: text) }
     }
 
     /// Speak using OpenAI TTS — requires a valid API key.

@@ -9,6 +9,7 @@ struct GeneralSettingsView: View {
     @AppStorage("clipboard_monitor") private var clipboardMonitor = false
     @AppStorage("panel_size")        private var panelSize        = "default"
     @AppStorage("app_appearance")    private var appAppearance    = "system"
+    @AppStorage("animations_enabled") private var animationsEnabled = true
 
     // Shortcut recording state
     @State private var recTranslate = false
@@ -80,6 +81,16 @@ struct GeneralSettingsView: View {
                         }
                         .pickerStyle(.segmented).frame(width: 240)
                     }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(isOn: $animationsEnabled) {
+                            Text("动画效果").font(.subheadline)
+                        }
+                        .onChange(of: animationsEnabled) { _, _ in AnimationGate.refresh() }
+                        Text("关闭后将禁用所有界面动画，包括成功脉冲、骨架屏加载、窗口弹性缩放等")
+                            .font(.caption).foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 // ── Behaviour ──
@@ -99,11 +110,12 @@ struct GeneralSettingsView: View {
                     Divider()
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("悬浮窗关闭方式").font(.subheadline)
+                        Text("关闭窗口").font(.subheadline)
                         Picker("", selection: $dismissMode) {
-                            Text("点击外部关闭").tag("clickOutside")
-                            Text("仅 Esc 关闭").tag("escOnly")
-                        }.pickerStyle(.radioGroup)
+                            Text("点击窗口外").tag("clickOutside")
+                            Text("手动关闭").tag("manual")
+                        }
+                        .pickerStyle(.segmented).frame(width: 200)
                     }
 
                     Divider()
@@ -111,29 +123,34 @@ struct GeneralSettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("悬浮窗尺寸").font(.subheadline)
                         Picker("", selection: $panelSize) {
-                            Text("小 (320px)").tag("small")
-                            Text("默认 (460px)").tag("default")
-                            Text("大 (620px)").tag("large")
-                        }.pickerStyle(.radioGroup)
+                            Text("小").tag("small")
+                            Text("默认").tag("default")
+                            Text("大").tag("large")
+                            Text("动态").tag("dynamic")
+                        }
+                        .pickerStyle(.segmented).frame(width: 300)
                     }
                 }
-
             }
-            .padding()
+            .padding(16)
         }
     }
 
-    // MARK: - Card helper
+    // MARK: - Card wrapper
 
-    @ViewBuilder
-    private func settingsCard<C: View>(title: String, icon: String, @ViewBuilder content: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: icon).font(.subheadline).bold()
-            content()
+    private func settingsCard<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).foregroundColor(.secondary)
+                Text(title).font(.headline).foregroundColor(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                content()
+            }
+            .padding(14)
+            .background(Color.primary.opacity(0.04))
+            .cornerRadius(10)
         }
-        .padding(14)
-        .background(Color.primary.opacity(0.04))
-        .cornerRadius(10)
     }
 
     // MARK: - Shortcut row

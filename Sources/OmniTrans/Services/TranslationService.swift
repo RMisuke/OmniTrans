@@ -42,7 +42,7 @@ enum TranslationService {
         _ text: String, _ src: TranslationLanguage, _ tgt: TranslationLanguage,
         _ p: APIProvider, kind: ProviderKind
     ) async throws -> TranslationResult {
-        let result = try await TranslationActor.shared.mtTranslate(
+        let result = try await TranslationActor().mtTranslate(
             text: text, tgt: tgt, provider: p
         )
         return TranslationResult(
