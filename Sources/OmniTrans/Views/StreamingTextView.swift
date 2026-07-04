@@ -55,7 +55,7 @@ struct StreamingTextView: View {
                 HStack(alignment: .top, spacing: 0) {
                     // ── Text block: Metal-accelerated, field-level observed ──
                     Text(session.translatedText)
-                        .font(.system(size: 15))
+                        .font(.system(size: AppTheme.fontSizeBody))
                         .textSelection(.enabled)
                         .lineSpacing(4)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -74,7 +74,7 @@ struct StreamingTextView: View {
     private var finalContent: some View {
         ScrollView {
             Text(session.translatedText)
-                .font(.system(size: 15))
+                .font(.system(size: AppTheme.fontSizeBody))
                 .textSelection(.enabled)
                 .lineSpacing(4)
                 .padding(.horizontal, 14).padding(.vertical, 8)

@@ -16,8 +16,8 @@ enum ProviderStorageManager {
     }
 
     // ── In-memory secret cache ──
-    private static var secretCache: [UUID: KeychainFields] = [:]
-    private static var cacheLoaded = false
+    nonisolated(unsafe) private static var secretCache: [UUID: KeychainFields] = [:]
+    nonisolated(unsafe) private static var cacheLoaded = false
 
     // MARK: - Cache
 

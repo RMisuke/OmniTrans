@@ -1,7 +1,7 @@
 import Foundation
 import Carbon
 
-let kAppVersion = "0.5"
+let kAppVersion = "0.6"
 
 @MainActor
 final class AppState: ObservableObject {

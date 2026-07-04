@@ -17,9 +17,10 @@ enum AppTheme {
 
     // MARK: - Apple Design System Colors
 
-    /// Action Blue — the single brand accent (#0066cc).  All links,
-    /// primary buttons, and focus signals use this colour.
-    static let accentAction = Color(red: 0x00/255, green: 0x66/255, blue: 0xCC/255)
+    /// System accent colour — reads directly from AppKit's `controlAccentColor`
+    /// so it always matches the user's Appearance setting, even in custom
+    /// `NSHostingView`-backed windows.
+    static var accentAction: Color { Color(nsColor: .controlAccentColor) }
 
     /// Near-black ink for headlines and body on light surfaces (#1d1d1f).
     static let ink = Color(red: 0x1D/255, green: 0x1D/255, blue: 0x1F/255)

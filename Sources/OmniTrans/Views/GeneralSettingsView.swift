@@ -71,7 +71,12 @@ struct GeneralSettingsView: View {
                 if let desc { Text(desc).font(.caption).foregroundColor(AppTheme.textSecondary).fixedSize(horizontal: false, vertical: true) }
             }
             Spacer()
-            Toggle("", isOn: isOn).elegantToggle().labelsHidden().onChange(of: isOn.wrappedValue) { onChange?() }
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .tint(AppTheme.accentAction)
+                .labelsHidden()
+                .onChange(of: isOn.wrappedValue) { onChange?() }
         }
     }
 
@@ -142,7 +147,9 @@ private struct LaunchAtLoginRow: View {
                 get: { isEnabled },
                 set: { newValue in updateStatus(newValue) }
             ))
-            .elegantToggle()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .tint(AppTheme.accentAction)
             .labelsHidden()
         }
         .onAppear {

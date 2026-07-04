@@ -88,7 +88,7 @@ struct ScreenCaptureOCRCaptureStrategy: TextCaptureStrategy {
                 guard let processedImage = grayImage else { continue }
 
                 let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .fast
+                request.recognitionLevel = .accurate
                 request.usesLanguageCorrection = false
                 request.recognitionLanguages = ["zh-Hans","zh-Hant","en","ja","ko","fr","de","es"]
                 request.minimumTextHeight = 0.02

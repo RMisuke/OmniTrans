@@ -4,7 +4,7 @@ import Cocoa
 /// 划词取词: CGEvent 模拟 Cmd+C (需辅助功能权限) → AX fallback
 
 final class HotkeyManager {
-    static let shared = HotkeyManager()
+    nonisolated(unsafe) static let shared = HotkeyManager()
 
     private var hotkeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
@@ -276,9 +276,9 @@ final class HotkeyManager {
 }
 
 // ── C callback ──
-private var _debounce = Date.distantPast
-private var _ocrDebounce = Date.distantPast
-private var _replaceDebounce = Date.distantPast
+nonisolated(unsafe) private var _debounce = Date.distantPast
+nonisolated(unsafe) private var _ocrDebounce = Date.distantPast
+nonisolated(unsafe) private var _replaceDebounce = Date.distantPast
 
 private func unifiedHotkeyCallback(_: EventHandlerCallRef?, _ event: EventRef?, _ userData: UnsafeMutableRawPointer?) -> OSStatus {
     guard let ptr = userData, let event else { return -1 }

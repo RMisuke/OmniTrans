@@ -24,7 +24,7 @@ import SwiftUI
 enum AnimationGate {
     /// 静态缓存，避免每一帧引发 UserDefaults 磁盘 I/O 开销。
     /// UserDefaults 读取本身是线程安全的，因此此缓存故意不加 `@MainActor`。
-    private static var _enabled: Bool = {
+    nonisolated(unsafe) private static var _enabled: Bool = {
         UserDefaults.standard.bool(forKey: "animations_enabled")
     }()
 

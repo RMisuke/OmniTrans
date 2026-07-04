@@ -19,12 +19,7 @@ enum IndicatorMode: Sendable {
 ///
 /// ## 性能架构
 ///
-/// 旧实现中 `breathPhase` 和 `displayOpacity` 作为 `@State` 驻留在
-/// `FloatingTranslationView` 内部，导致每次动画帧（60/120 Hz）都会触发
-/// 整个 `FloatingTranslationView.body` 重计算，连带 `AdaptiveGlassBackground`
-/// 的 Liquid Glass 合成器重绘。
-///
-/// 新实现将全部动画状态下沉到此独立视图中：
+/// 所有动画状态下沉到此独立视图中：
 /// - `@State private var breathPhase` — 仅此视图可见
 /// - `@State private var displayOpacity` — 仅此视图可见
 /// - 动画 tick 仅无效化此叶节点，父容器布局零开销
@@ -33,6 +28,13 @@ enum IndicatorMode: Sendable {
 ///
 /// 所有动画均使用 `AppTheme.Motion.*.gated` 链式门控。
 /// 当用户关闭「动画效果」时，颜色切换为瞬时硬切，呼吸脉冲不启动。
+///
+/// ## 动画冲突解决 (V0.6)
+///
+/// 移除了视图级 `.animation(.slow, value: mode)` 修饰符，避免与
+/// `withAnimation(AppTheme.Motion.breathe)` 产生隐式动画覆盖。
+/// 所有动画现在仅通过 `transition(from:to:)` 中的显式 `withAnimation`
+/// 触发，确保呼吸脉冲不被 `.slow` 曲线干扰。
 struct IsolatedIndicatorView: View {
     /// 当前模式，由父视图传入。
     let mode: IndicatorMode
@@ -66,14 +68,14 @@ struct IsolatedIndicatorView: View {
                     .fill(.quaternary)
                     .frame(width: 36, height: 5)
 
-                // Inner glow — tight to the capsule
+                // Inner glow
                 Capsule()
                     .fill(indicatorColor)
                     .frame(width: 36, height: 5)
                     .blur(radius: 3)
                     .opacity(displayOpacity * 0.9)
 
-                // Outer halo — elliptical, matches capsule shape
+                // Outer halo
                 Capsule()
                     .fill(indicatorColor.opacity(0.35))
                     .frame(width: 38, height: 6)
@@ -93,19 +95,17 @@ struct IsolatedIndicatorView: View {
         .frame(height: dragBarHeight)
         .padding(.top, 12)
         .padding(.bottom, 6)
-        .animation(AppTheme.Motion.slow.gated, value: mode)
         .onChange(of: mode) { oldMode, newMode in
             transition(from: oldMode, to: newMode)
         }
         .onAppear {
             displayOpacity = mode == .none ? 0 : breathOpacity()
+            if mode == .yellow { startBreathing() }
         }
     }
 
     // MARK: - Transition Logic
 
-    /// 处理模式切换时的动画过渡。逻辑与原实现完全一致，
-    /// 但动画曲线已替换为语义化 token。
     private func transition(from old: IndicatorMode, to new: IndicatorMode) {
         if new == .none {
             withAnimation(AppTheme.Motion.slow.gated) { displayOpacity = 0 }
@@ -117,7 +117,7 @@ struct IsolatedIndicatorView: View {
             stopBreathing()
             withAnimation(AppTheme.Motion.slow.gated) { displayOpacity = 1.0 }
         } else if old != .yellow && new == .yellow {
-            withAnimation(AppTheme.Motion.slow.gated) { displayOpacity = breathOpacity() }
+            displayOpacity = breathOpacity()
             startBreathing()
         } else {
             withAnimation(AppTheme.Motion.slow.gated) { displayOpacity = 1.0 }
@@ -132,11 +132,13 @@ struct IsolatedIndicatorView: View {
         0.5 + 0.5 * breathPhase
     }
 
-    /// 启动呼吸循环动画。使用 `AppTheme.Motion.breathe`，
-    /// 经 `.gated` 门控后若动画关闭则自动跳过。
+    /// 启动呼吸循环动画。使用 `withTransaction` 强制启用动画，
+    /// 绕过父视图 `.animationsGated()` 施加的全局动画禁用事务。
     private func startBreathing() {
         breathPhase = 0
-        withAnimation(AppTheme.Motion.breathe.gated) {
+        var transaction = Transaction(animation: AppTheme.Motion.breathe.gated)
+        transaction.disablesAnimations = false
+        withTransaction(transaction) {
             breathPhase = 1.0
         }
     }

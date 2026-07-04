@@ -257,7 +257,7 @@ enum NativeDictionaryParser {
     private static func extractMeaningAfterSense(_ line: String, number: Int, labels: [String]) -> String {
         var text = line
         // Strip number prefix
-        if let numStr = "\(number)".first {
+        if "\(number)".first != nil {
             text = text.replacingOccurrences(of: "\(number) ", with: "")
             text = text.replacingOccurrences(of: "\(number). ", with: "")
         }

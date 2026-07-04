@@ -4,6 +4,7 @@ import Vision
 
 /// Full-screen transparent overlay for drag-to-select OCR capture.
 /// Activated by Opt+F hotkey — user drags a rectangle, OCR runs on release.
+@MainActor
 final class OCRSelectionOverlay {
     static let shared = OCRSelectionOverlay()
 
@@ -107,7 +108,7 @@ final class OCRSelectionOverlay {
         return autoreleasepool { () -> String? in
             let request = VNRecognizeTextRequest()
             // .fast delivers ~3× speedup over .accurate — sufficient for lookup & single-sentence OCR
-            request.recognitionLevel = .fast
+            request.recognitionLevel = .accurate
             // Disable language correction — LLM engines provide superior correction downstream
             request.usesLanguageCorrection = false
             request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en", "ja", "ko", "fr", "de", "es"]

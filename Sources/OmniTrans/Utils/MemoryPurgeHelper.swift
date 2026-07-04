@@ -7,6 +7,7 @@ import Foundation
 /// - On system memory warnings, evicts HistoryActor's in-memory cache
 ///   and forces a UserDefaults flush (≤50 entries).
 /// - Called at key lifecycle points (panel hide, OCR completion, app background)
+@MainActor
 final class MemoryPurgeHelper {
     static let shared = MemoryPurgeHelper()
 

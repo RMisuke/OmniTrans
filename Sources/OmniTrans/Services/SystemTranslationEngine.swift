@@ -20,7 +20,7 @@ actor SystemTranslationEngine {
     // MARK: - Language pack cache
 
     /// In-memory mirror of `UserDefaults` bool per language-pair key.
-    private static var installedCache: [String: Bool] = [:]
+    nonisolated(unsafe) private static var installedCache: [String: Bool] = [:]
 
     private static func isPackKnownInstalled(source: Locale.Language, target: Locale.Language) -> Bool {
         let key = "nlp_\(source.languageCode?.identifier ?? "?")_\(target.languageCode?.identifier ?? "?")"

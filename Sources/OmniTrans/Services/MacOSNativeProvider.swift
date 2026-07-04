@@ -6,7 +6,7 @@ import CoreServices
 /// structured `DictionaryEntry` output matching the AI/LLM JSON schema.
 enum MacOSNativeProvider {
 
-    private static let cache: NSCache<NSString, DictEntryBox> = {
+    nonisolated(unsafe) private static let cache: NSCache<NSString, DictEntryBox> = {
         let c = NSCache<NSString, DictEntryBox>()
         c.countLimit = 200
         return c

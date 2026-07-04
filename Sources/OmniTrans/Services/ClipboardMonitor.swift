@@ -6,6 +6,7 @@ import Cocoa
 ///
 /// When the AX accessibility path fails to capture text on hotkey, the HotkeyManager
 /// can call `checkNow()` to force a single atomic changeCount comparison — no Timer needed.
+@MainActor
 final class ClipboardMonitor {
     static let shared = ClipboardMonitor()
 
