@@ -1,100 +1,72 @@
 import SwiftUI
 import Carbon
 
+/// Root view — "Solid Bottom Bar, Thick Content Canvas".
+///
+/// - **Solid Bottom**: opaque `windowBackgroundColor` with crisp 0.5pt
+///   top hairline for hotkey labels.
+/// - **Thick Canvas**: `TranslationView` uses the native thick material
+///   background for a premium desktop feel.
 struct ContentView: View {
     @ObservedObject var state: AppState
     @State private var showSettings = false
-    @AppStorage("animations_enabled") private var animationsEnabled = true
 
     var body: some View {
         ZStack {
             if showSettings {
                 SettingsView(state: state, isPresented: $showSettings)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
             } else {
                 VStack(spacing: 0) {
                     TranslationView(state: state, showSettings: $showSettings)
-                    Divider()
+                        .environment(AppState.shared.session)
                     bottomBar
                 }
-                .transition(.move(edge: .leading).combined(with: .opacity))
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
         .frame(minWidth: 480, idealWidth: 480, minHeight: 500, idealHeight: 500)
+        .background(AppTheme.bgSolid)
+        .animation(AppTheme.Motion.fluid.gated, value: showSettings)
         .transaction { t in
-            if !animationsEnabled { t.disablesAnimations = true; t.animation = nil }
+            if !AnimationGate.isEnabled { t.disablesAnimations = true; t.animation = nil }
         }
-        .onDisappear { TTSManager.shared.stop(); MemoryPurgeHelper.shared.purgeBackendCache() }
+        .onAppear { AnimationGate.refresh() }
+        .onDisappear { Task { await TTSManager.shared.stop() }; MemoryPurgeHelper.shared.purgeBackendCache() }
     }
+
+    // MARK: - Solid Bottom Bar
 
     private var bottomBar: some View {
         HStack {
             HStack(spacing: 6) {
-                Image(systemName: "keyboard").font(.caption2).foregroundColor(.accentColor)
-                keycapView
-                Text("划词翻译").font(.caption2).foregroundColor(.secondary)
-                Text("·").font(.caption2).foregroundColor(.secondary)
-                ocrKeycapView
-                Text("框选 OCR").font(.caption2).foregroundColor(.secondary)
-                Text("·").font(.caption2).foregroundColor(.secondary)
-                replaceKeycapView
-                Text("原位替换").font(.caption2).foregroundColor(.secondary)
+                Image(systemName: "keyboard").font(.caption2).foregroundColor(AppTheme.accentAction)
+                keycapView(HotkeyManager.hotkeyLabel())
+                Text("划词翻译").font(.caption2).foregroundColor(AppTheme.textPrimary)
+                Text("·").font(.caption2).foregroundColor(AppTheme.textSecondary)
+                keycapView(HotkeyManager.ocrHotkeyLabel())
+                Text("框选 OCR").font(.caption2).foregroundColor(AppTheme.textPrimary)
+                Text("·").font(.caption2).foregroundColor(AppTheme.textSecondary)
+                keycapView(HotkeyManager.replaceHotkeyLabel())
+                Text("原位替换").font(.caption2).foregroundColor(AppTheme.textPrimary)
             }
-            .help("翻译: \(HotkeyManager.hotkeyLabel())  |  OCR 框选: \(HotkeyManager.ocrHotkeyLabel())  |  原位替换: \(HotkeyManager.replaceHotkeyLabel())")
+            .help("翻译: \(HotkeyManager.hotkeyLabel())  |  OCR: \(HotkeyManager.ocrHotkeyLabel())  |  替换: \(HotkeyManager.replaceHotkeyLabel())")
             Spacer()
             Button(action: { NSApplication.shared.terminate(nil) }) {
-                HStack(spacing: 2) { Image(systemName: "power"); Text("退出") }.font(.caption2)
+                HStack(spacing: 2) { Image(systemName: "power"); Text("退出") }.font(.caption2).foregroundColor(AppTheme.textSecondary)
             }.buttonStyle(.borderless).help("退出 OmniTrans").keyboardShortcut("q", modifiers: .command)
-        }.padding(.horizontal, 12).padding(.vertical, 5)
-    }
-
-    private var keycapView: some View {
-        let label = HotkeyManager.hotkeyLabel()
-        return HStack(spacing: 1) {
-            ForEach(Array(label.enumerated()), id: \.offset) { _, ch in
-                Text(String(ch))
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(.primary)
-                    .padding(.horizontal, 3).padding(.vertical, 1)
-                    .background(
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(.quaternary)
-                            .shadow(color: .black.opacity(0.15), radius: 0.5, y: 0.5)
-                    )
-            }
+        }
+        .padding(.horizontal, AppTheme.spaceSM).padding(.vertical, 5)
+        .background(AppTheme.bgSolid)
+        .overlay(alignment: .top) {
+            Rectangle().fill(AppTheme.hairline).frame(height: 0.5)
         }
     }
 
-    private var ocrKeycapView: some View {
-        let label = HotkeyManager.ocrHotkeyLabel()
-        return HStack(spacing: 1) {
+    private func keycapView(_ label: String) -> some View {
+        HStack(spacing: 1) {
             ForEach(Array(label.enumerated()), id: \.offset) { _, ch in
-                Text(String(ch))
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(.primary)
-                    .padding(.horizontal, 3).padding(.vertical, 1)
-                    .background(
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(.quaternary)
-                            .shadow(color: .black.opacity(0.15), radius: 0.5, y: 0.5)
-                    )
-            }
-        }
-    }
-
-    private var replaceKeycapView: some View {
-        let label = HotkeyManager.replaceHotkeyLabel()
-        return HStack(spacing: 1) {
-            ForEach(Array(label.enumerated()), id: \.offset) { _, ch in
-                Text(String(ch))
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(.primary)
-                    .padding(.horizontal, 3).padding(.vertical, 1)
-                    .background(
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(.quaternary)
-                            .shadow(color: .black.opacity(0.15), radius: 0.5, y: 0.5)
-                    )
+                Text(String(ch)).keycapStyle()
             }
         }
     }

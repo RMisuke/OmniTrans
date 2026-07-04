@@ -1,16 +1,34 @@
 import Foundation
 
-/// Structured dictionary lookup result — decoded from JSON Mode LLM output.
+/// Structured dictionary lookup result — unified schema for both AI/LLM and
+/// macOS native dictionary (`DCSCopyTextDefinition`) data sources.
+///
+/// All optional fields are populated only when the source data provides them;
+/// empty strings and placeholder values are never emitted.
 struct DictionaryEntry: Codable, Equatable {
-    let word: String
     let isWord: Bool
+    let word: String
     let phonetic: String
+    /// BrE / AmE variants when available from native dictionary.
+    let phoneticVariants: [PhoneticVariant]?
     let definitions: [Definition]
     let examples: [Example]
+    let inflections: [Inflection]
+
+    struct PhoneticVariant: Codable, Equatable {
+        let type: String  // "BrE" or "AmE"
+        let value: String
+    }
 
     struct Definition: Codable, Equatable, Identifiable {
-        var id: String { pos + meaning }
+        var id: String { "\(pos)_\(senseNumber ?? 0)_\(meaning.prefix(20))" }
         let pos: String
+        /// Full POS label (e.g. "intransitive verb") — native dictionary only.
+        let posLabel: String?
+        /// Sense number (1, 2, 3…) — native dictionary only.
+        let senseNumber: Int?
+        /// Domain / register labels (e.g. ["Computer", "formal"]).
+        let labels: [String]?
         let meaning: String
     }
 
@@ -20,32 +38,35 @@ struct DictionaryEntry: Codable, Equatable {
         let zh: String
     }
 
+    struct Inflection: Codable, Equatable, Identifiable {
+        var id: String { form }
+        let form: String
+        let label: String
+    }
+
     var isEmpty: Bool { !isWord && definitions.isEmpty && examples.isEmpty }
 
     static func empty(for word: String) -> DictionaryEntry {
-        DictionaryEntry(word: word, isWord: false, phonetic: "", definitions: [], examples: [])
+        DictionaryEntry(isWord: false, word: word, phonetic: "",
+            phoneticVariants: nil, definitions: [], examples: [], inflections: [])
     }
 
-    // MARK: - Robust parsing
+    // MARK: - Robust LLM JSON parsing
 
     static func parse(from jsonString: String, word: String) -> DictionaryEntry? {
         var cleaned = jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
-
         print("[DictParse] raw length: \(cleaned.count), preview: \(String(cleaned.prefix(120)))")
 
-        // Strategy 1: Strip markdown fences
         cleaned = cleaned
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Strategy 2: Extract JSON object — find first { and last }
         if let braceOpen = cleaned.firstIndex(of: "{"),
            let braceClose = cleaned.lastIndex(of: "}") {
             cleaned = String(cleaned[braceOpen...braceClose])
         }
 
-        // Strategy 3: Fix common LLM JSON mistakes
         let sanitized = cleaned
             .replacingOccurrences(of: ",\n]", with: "\n]")
             .replacingOccurrences(of: ",\n}", with: "\n}")
@@ -58,16 +79,16 @@ struct DictionaryEntry: Codable, Equatable {
             return nil
         }
 
-        // Decode WITHOUT word field first (LLM doesn't include it)
         let decoder = JSONDecoder()
         do {
             let raw = try decoder.decode(RawDict.self, from: data)
             let entry = DictionaryEntry(
-                word: word,
-                isWord: raw.isWord ?? true,
+                isWord: raw.isWord ?? true, word: word,
                 phonetic: raw.phonetic ?? "",
+                phoneticVariants: raw.phoneticVariants,
                 definitions: raw.definitions ?? [],
-                examples: raw.examples ?? []
+                examples: raw.examples ?? [],
+                inflections: raw.inflections ?? []
             )
             print("[DictParse] ✅ parsed: \(entry.definitions.count) defs, \(entry.examples.count) exs")
             return entry
@@ -78,22 +99,22 @@ struct DictionaryEntry: Codable, Equatable {
     }
 }
 
-/// Intermediate decodable that matches LLM output (no `word` field).
+/// Intermediate decodable for LLM JSON output (no `word` field).
 private struct RawDict: Codable {
     let isWord: Bool?
     let phonetic: String?
+    let phoneticVariants: [DictionaryEntry.PhoneticVariant]?
     let definitions: [DictionaryEntry.Definition]?
     let examples: [DictionaryEntry.Example]?
+    let inflections: [DictionaryEntry.Inflection]?
 }
 
 /// Detects whether a query string is a single‑word lookup.
 enum WordDetector {
     static func isWord(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              trimmed.count < 30,
-              !trimmed.contains(" "),
-              !trimmed.contains("\n"),
+        guard !trimmed.isEmpty, trimmed.count < 30,
+              !trimmed.contains(" "), !trimmed.contains("\n"),
               trimmed.rangeOfCharacter(from: .letters) != nil
         else { return false }
         return true

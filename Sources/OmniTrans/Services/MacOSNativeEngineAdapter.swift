@@ -13,7 +13,8 @@ struct MacOSNativeEngineAdapter: TranslationEngineProtocol {
         provider: APIProvider,
         isDictionaryMode: Bool,
         sourceLang: TranslationLanguage,
-        targetLang: TranslationLanguage
+        targetLang: TranslationLanguage,
+        context: CapturedContext? = nil
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {

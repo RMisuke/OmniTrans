@@ -1,5 +1,10 @@
 import SwiftUI
 
+/// API provider card with native macOS card styling.
+///
+/// - Uses `nativeCardStyle()` (high-opacity solid + hairline ring)
+///   instead of low-opacity web-tile backgrounds.
+/// - Accent actions use Action Blue (#0066cc).
 struct ProviderCardView: View {
     let provider: APIProvider
     let allEnabled: [APIProvider]
@@ -30,22 +35,23 @@ struct ProviderCardView: View {
         VStack(alignment: .leading, spacing: 0) {
             if isEditing { editView } else { displayView }
         }
-        .padding(12)
-        .background(AppTheme.bgSubtle.opacity(0.4))
-        .cornerRadius(10)
-        .overlay(RoundedRectangle(cornerRadius: 10)
-            .stroke(deleteConfirming ? AppTheme.error : (editEnabled ? Color.clear : AppTheme.warning.opacity(0.4)), lineWidth: deleteConfirming ? 2 : 1))
-        .animation(.easeInOut(duration: 0.2), value: deleteConfirming)
+        .padding(.horizontal, AppTheme.spaceSM).padding(.vertical, 8)
+        .nativeCardStyle()
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.radiusLG)
+                .stroke(deleteConfirming ? AppTheme.error : (editEnabled ? Color.clear : AppTheme.warning.opacity(0.4)), lineWidth: deleteConfirming ? 2 : 1)
+        )
+        .animation(AppTheme.Motion.snip.gated, value: deleteConfirming)
         .onAppear { resetEditFields() }
         .onChange(of: isEditing) { _, editing in if editing { deleteConfirming = false } }
     }
 
-    // MARK: - Display
-
     private var displayView: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Toggle(isOn: Binding(get: { editEnabled }, set: { v in editEnabled = v; updateEnabledOnly(v) })) { EmptyView() }.toggleStyle(.switch).controlSize(.small).disabled(provider.kind == .macOSNative)
+                Toggle(isOn: Binding(get: { editEnabled }, set: { v in editEnabled = v; updateEnabledOnly(v) })) { EmptyView() }
+                    .toggleStyle(.switch).controlSize(.small).tint(AppTheme.toggleTint)
+                    .disabled(provider.kind == .macOSNative)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 4) {
                         Text(editName.isEmpty ? "未命名" : editName).font(.headline).foregroundColor(AppTheme.textPrimary)
@@ -60,25 +66,22 @@ struct ProviderCardView: View {
                     }
                 }
                 .contentShape(Rectangle())
-                .onTapGesture {
-                    if provider.isBuiltIn { return }
-                    deleteConfirming ? (deleteConfirming = false) : enterEdit()
-                }
+                .onTapGesture { if provider.isBuiltIn { return }; deleteConfirming ? (deleteConfirming = false) : enterEdit() }
                 Spacer(); actionButtons
             }
         }
     }
 
-    // MARK: - Edit
-
     private var editView: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Toggle(isOn: $editEnabled) { EmptyView() }.toggleStyle(.switch).controlSize(.small).disabled(provider.kind == .macOSNative)
+                Toggle(isOn: $editEnabled) { EmptyView() }.toggleStyle(.switch).controlSize(.small).tint(AppTheme.toggleTint).disabled(provider.kind == .macOSNative)
                 TextField("名称", text: $editName).textFieldStyle(.roundedBorder).frame(width: 150).onChange(of: editName) { markDirty() }
                 Spacer()
                 Button("取消") { resetEditFields(); isEditing = false }.buttonStyle(.borderless).controlSize(.small)
-                Button("保存") { commit(); isEditing = false }.buttonStyle(.borderedProminent).controlSize(.small).keyboardShortcut(.return, modifiers: .command)
+                Button("保存") { commit(); isEditing = false }
+                    .buttonStyle(.borderedProminent).controlSize(.small).tint(AppTheme.accentAction)
+                    .keyboardShortcut(.return, modifiers: .command)
             }
             HStack {
                 Picker("类型", selection: $editKind) {
@@ -115,8 +118,8 @@ struct ProviderCardView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("可用模型").font(.caption).foregroundColor(AppTheme.textSecondary)
                         ForEach(modelList, id: \.self) { m in
-                            HStack { Text(m).font(.caption).foregroundColor(m == editModel ? AppTheme.textAccent : AppTheme.textPrimary); if m == editModel { Image(systemName: "checkmark").font(.caption2).foregroundColor(AppTheme.textAccent) }; Spacer() }
-                            .padding(.horizontal, 6).padding(.vertical, 2).background(m == editModel ? AppTheme.textAccent.opacity(0.1) : Color.clear).cornerRadius(4).contentShape(Rectangle()).onTapGesture { editModel = m; markDirty() }
+                            HStack { Text(m).font(.caption).foregroundColor(m == editModel ? AppTheme.accentAction : AppTheme.textPrimary); if m == editModel { Image(systemName: "checkmark").font(.caption2).foregroundColor(AppTheme.accentAction) }; Spacer() }
+                                .padding(.horizontal, 6).padding(.vertical, 2).background(m == editModel ? AppTheme.accentAction.opacity(0.1) : Color.clear).cornerRadius(4).contentShape(Rectangle()).onTapGesture { editModel = m; markDirty() }
                         }
                     }
                 }
@@ -125,12 +128,9 @@ struct ProviderCardView: View {
         }
     }
 
-    // MARK: - Subviews
-
     private func kindBadge(_ kind: ProviderKind) -> some View {
-        Text(kind.rawValue).font(.caption2).foregroundColor(AppTheme.textAccent).padding(.horizontal, 6).padding(.vertical, 1).background(AppTheme.textAccent.opacity(0.1)).cornerRadius(4)
+        Text(kind.rawValue).font(.caption2).foregroundColor(AppTheme.accentAction).padding(.horizontal, 6).padding(.vertical, 1).background(AppTheme.accentAction.opacity(0.1)).cornerRadius(4)
     }
-
     private var keyLabel: String { switch editKind { case .alibabaMT, .volcengineMT: "Key ID"; case .bingMT: "Key"; default: "API Key" } }
     private var keyPlaceholder: String { switch editKind { case .alibabaMT, .volcengineMT: "Access Key"; default: "sk-..." } }
     private var secretLabel: String { switch editKind { case .alibabaMT, .volcengineMT: "Secret"; case .bingMT: "Secret"; default: "Secret" } }
@@ -150,19 +150,15 @@ struct ProviderCardView: View {
             if !provider.isBuiltIn { Button(action: enterEdit) { Image(systemName: "pencil").font(.caption) }.buttonStyle(.borderless).help("编辑") }
         }
     }
-
     private var testButton: some View {
         Group { if testing { ProgressView().scaleEffect(0.5).frame(width: 16, height: 16) } else { Button(action: testConnection) { HStack(spacing: 2) { Image(systemName: "arrow.trianglehead.capsulepath.clockwise").font(.caption2); Text("测试").font(.caption2) } }.buttonStyle(.borderless).help("测试 API 连接") } }
     }
-
-    // MARK: - Actions
 
     private func markDirty() { if !hasUnsavedEdits { hasUnsavedEdits = true } }
     private func resetEditFields() {
         editName = provider.name; editKind = provider.kind; editURL = provider.baseURL; editKey = provider.apiKey
         editModel = provider.modelName; editTemp = provider.temperature; editMaxTokens = provider.maxTokens
-        editEnabled = provider.isEnabled; editSecret = provider.apiSecret; editRegion = provider.customRegion
-        hasUnsavedEdits = false
+        editEnabled = provider.isEnabled; editSecret = provider.apiSecret; editRegion = provider.customRegion; hasUnsavedEdits = false
     }
     private func enterEdit() {
         deleteConfirming = false; resetEditFields()
@@ -177,9 +173,7 @@ struct ProviderCardView: View {
         var p = provider
         p.name = editName; p.kind = editKind; p.baseURL = editURL; p.apiKey = editKey; p.modelName = editModel
         p.temperature = editTemp; p.maxTokens = editMaxTokens; p.isEnabled = editEnabled
-        p.apiSecret = editSecret; p.customRegion = editRegion
-        hasUnsavedEdits = false
-        // Direct Keychain save — most reliable path, bypasses AppState chain
+        p.apiSecret = editSecret; p.customRegion = editRegion; hasUnsavedEdits = false
         let kf = KeychainFields(apiKey: editKey, apiSecret: editSecret, customRegion: editRegion)
         if !kf.isEmpty { KeychainManager.saveFields(kf, for: p.id) }
         onUpdate(p)

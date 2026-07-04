@@ -62,14 +62,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Register memory warning observer early — evicts history cache under pressure
+        MemoryPurgeHelper.shared.registerMemoryWarningObserver()
+        // Pre-warm native dictionary cache on background thread
+        MacOSNativeProvider.prewarmCache()
+
         let mode = UserDefaults.standard.string(forKey: "app_appearance") ?? "system"
         switch mode {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
         case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
         default:      NSApp.appearance = nil
         }
-        HotkeyManager.shared.onHotkey = { [weak self] text in
-            self?.fire(text: text)
+        HotkeyManager.shared.onHotkey = { [weak self] text, context in
+            self?.fire(text: text, context: context)
         }
         AnimationGate.refresh()
         HotkeyManager.shared.register()
@@ -79,7 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         HotkeyManager.shared.registerOCR()
 
-        HotkeyManager.shared.onReplaceHotkey = { [weak self] in
+        HotkeyManager.shared.onReplaceHotkey = {
             let text = AppState.shared.translatedText
             guard !text.isEmpty else { return }
             TextReplacementService.shared.replaceSelectedText(with: text)
@@ -121,6 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ClipboardMonitor.shared.stop()
         onboardingWindow?.close()
         onboardingWindow = nil
+        // Flush pending history to disk before exit
+        Task { await HistoryActor.shared.flushNow() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -146,11 +153,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel?.show(nearMouse: true)
     }
 
-    private func fire(text: String?) {
+    private func fire(text: String?, context: CapturedContext? = nil) {
         let s = AppState.shared
         s.resetForNew(text: text ?? "")
         showFloatingPanel()
-        if let text, !text.isEmpty { s.translate() }
+        if let text, !text.isEmpty { s.translate(context: context) }
     }
 
     private func showOnboardingIfNeeded() {

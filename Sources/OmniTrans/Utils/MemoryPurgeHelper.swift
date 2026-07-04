@@ -4,10 +4,49 @@ import Foundation
 /// Aggressive memory pressure reducer.
 /// - Drains CoreAnimation offscreen caches
 /// - Tells malloc to return free pages to the kernel
+/// - On system memory warnings, evicts HistoryActor's in-memory cache
+///   and forces a UserDefaults flush (≤50 entries).
 /// - Called at key lifecycle points (panel hide, OCR completion, app background)
 final class MemoryPurgeHelper {
     static let shared = MemoryPurgeHelper()
+
+    /// Whether the system memory pressure monitor has been registered.
+    private var warningObserverRegistered = false
+
+    /// DispatchSource for system-level memory pressure events.
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+
     private init() {}
+
+    // MARK: - Memory Pressure Registration
+
+    /// Register a `DispatchSource.memoryPressure` monitor that fires on
+    /// critical / warning events.  Evicts `HistoryActor`'s in-memory cache
+    /// and triggers a full backend purge.
+    ///
+    /// Should be called once during app launch (e.g. from `AppDelegate`).
+    func registerMemoryWarningObserver() {
+        guard !warningObserverRegistered else { return }
+        warningObserverRegistered = true
+
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .global(qos: .utility)
+        )
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            let event = source.data
+            if event == .warning || event == .critical {
+                print("[MemoryPurge] ⚠️ System memory pressure (\(event)) — evicting caches")
+                Task { await HistoryActor.shared.evictMemoryCache() }
+                self.purgeBackendCache()
+            }
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    // MARK: - Backend Cache Purge
 
     /// Full purge: off-screen render caches + malloc zone pressure relief.
     func purgeBackendCache() {

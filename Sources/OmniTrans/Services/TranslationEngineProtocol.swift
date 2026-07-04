@@ -18,7 +18,8 @@ protocol TranslationEngineProtocol {
         provider: APIProvider,
         isDictionaryMode: Bool,
         sourceLang: TranslationLanguage,
-        targetLang: TranslationLanguage
+        targetLang: TranslationLanguage,
+        context: CapturedContext?
     ) -> AsyncThrowingStream<String, Error>
 }
 

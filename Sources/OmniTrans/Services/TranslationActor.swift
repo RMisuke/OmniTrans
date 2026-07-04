@@ -1,5 +1,32 @@
 import Foundation
 
+// MARK: - Shared URLSession (HTTP/2 Pipelining + Connection Reuse)
+
+/// Global singleton `URLSession` configured for HTTP/2 multiplexing and
+/// connection reuse.  All translation engines (AI streaming, MT single-shot)
+/// share this session to eliminate per-request TCP/TLS handshake overhead.
+///
+/// ## Configuration
+/// - `httpShouldUsePipelining = true` — enables HTTP/2 multiplexing
+/// - `httpMaximumConnectionsPerHost = 10` — allows concurrent streams
+/// - No URL cache — SSE streaming is incompatible with caching
+/// Module-internal shared `URLSession` singleton — used by `TranslationActor`
+/// and `TranslationService` for all HTTP requests.  HTTP/2 multiplexing
+/// eliminates per-request TCP/TLS handshake overhead.
+let sharedURLSession: URLSession = {
+    let config = URLSessionConfiguration.default
+    config.httpShouldUsePipelining = true
+    config.httpMaximumConnectionsPerHost = 10
+    config.urlCache = nil
+    config.requestCachePolicy = .reloadIgnoringLocalCacheData
+    // Keep-Alive is enabled by default for HTTP/1.1+ with default config
+    config.timeoutIntervalForRequest = 30
+    config.timeoutIntervalForResource = 60
+    return URLSession(configuration: config)
+}()
+
+// MARK: - Translation Actor
+
 /// Isolated actor for all network I/O, SSE parsing, and JSON decoding.
 /// Guarantees thread safety without locks; cooperatively cancels stale tasks.
 actor TranslationActor {
@@ -7,23 +34,11 @@ actor TranslationActor {
     /// Active translation task — cancelled on new request.
     private var activeStreamTask: Task<Void, Never>?
 
-    /// Per-request URLSession — invalidated after each stream to break C-level retain cycles.
-    private var currentSession: URLSession?
-
-    /// Create a disposable URLSession with zero caching.
+    /// Returns the shared `URLSession` with HTTP/2 pipelining enabled.
+    /// No per-request session creation — all requests reuse the same
+    /// connection pool for zero additional TCP/TLS handshake latency.
     private func makeSession() -> URLSession {
-        let config = URLSessionConfiguration.default
-        config.urlCache = nil
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let s = URLSession(configuration: config)
-        currentSession = s
-        return s
-    }
-
-    /// Destroy the current session to release all internal buffers.
-    private func tearDownSession() {
-        currentSession?.invalidateAndCancel()
-        currentSession = nil
+        sharedURLSession
     }
 
     // MARK: - Generic Network & SSE Helpers
@@ -87,7 +102,8 @@ actor TranslationActor {
         text: String,
         sourceLang: TranslationLanguage,
         targetLang: TranslationLanguage,
-        provider: APIProvider
+        provider: APIProvider,
+        context: CapturedContext? = nil
     ) -> AsyncThrowingStream<String, Error> {
         activeStreamTask?.cancel()
 
@@ -97,7 +113,7 @@ actor TranslationActor {
                     try await self.performStream(
                         text: text, sourceLang: sourceLang,
                         targetLang: targetLang, provider: provider,
-                        continuation: continuation
+                        continuation: continuation, context: context
                     )
                     continuation.finish()
                 } catch {
@@ -114,7 +130,8 @@ actor TranslationActor {
         text: String,
         sourceLang: TranslationLanguage,
         targetLang: TranslationLanguage,
-        provider: APIProvider
+        provider: APIProvider,
+        context: CapturedContext? = nil
     ) -> AsyncThrowingStream<String, Error> {
         activeStreamTask?.cancel()
 
@@ -124,7 +141,7 @@ actor TranslationActor {
                     try await self.performStream(
                         text: text, sourceLang: sourceLang,
                         targetLang: targetLang, provider: provider,
-                        continuation: continuation, isDictionaryMode: true
+                        continuation: continuation, isDictionaryMode: true, context: context
                     )
                     continuation.finish()
                 } catch {
@@ -178,15 +195,16 @@ actor TranslationActor {
         text: String, sourceLang: TranslationLanguage,
         targetLang: TranslationLanguage, provider: APIProvider,
         continuation: AsyncThrowingStream<String, Error>.Continuation,
-        isDictionaryMode: Bool = false
+        isDictionaryMode: Bool = false,
+        context: CapturedContext? = nil
     ) async throws {
         switch provider.kind {
         case .openAI, .openAICompat:
-            try await openAIStream(text, sourceLang, targetLang, provider, continuation, isDictionaryMode: isDictionaryMode)
+            try await openAIStream(text, sourceLang, targetLang, provider, continuation, isDictionaryMode: isDictionaryMode, context: context)
         case .anthropic:
-            try await anthropicStream(text, sourceLang, targetLang, provider, continuation, isDictionaryMode: isDictionaryMode)
+            try await anthropicStream(text, sourceLang, targetLang, provider, continuation, isDictionaryMode: isDictionaryMode, context: context)
         case .gemini:
-            try await geminiStream(text, sourceLang, targetLang, provider, continuation, isDictionaryMode: isDictionaryMode)
+            try await geminiStream(text, sourceLang, targetLang, provider, continuation, isDictionaryMode: isDictionaryMode, context: context)
         case .macOSNative:
             throw TranslationService.TranslationError.apiError("macOS Native handled outside actor")
         case .googleMT:
@@ -213,9 +231,9 @@ actor TranslationActor {
     private func openAIStream(
         _ text: String, _ src: TranslationLanguage, _ tgt: TranslationLanguage,
         _ p: APIProvider, _ c: AsyncThrowingStream<String, Error>.Continuation,
-        isDictionaryMode: Bool = false
+        isDictionaryMode: Bool = false, context: CapturedContext? = nil
     ) async throws {
-        let hint = isDictionaryMode ? buildDictionaryHint(tgt: tgt) : buildHint(src: src, tgt: tgt)
+        let hint = isDictionaryMode ? buildDictionaryHint(tgt: tgt, context: context) : buildHint(src: src, tgt: tgt, context: context)
         guard let url = URL(string: "\(p.baseURL)/chat/completions") else {
             throw TranslationService.TranslationError.malformedURL("\(p.baseURL)/chat/completions")
         }
@@ -246,7 +264,6 @@ actor TranslationActor {
             chunk.choices?.first?.delta?.content
         }
         t.flush()
-        tearDownSession()
     }
 
     // ── Anthropic SSE ──
@@ -254,9 +271,9 @@ actor TranslationActor {
     private func anthropicStream(
         _ text: String, _ src: TranslationLanguage, _ tgt: TranslationLanguage,
         _ p: APIProvider, _ c: AsyncThrowingStream<String, Error>.Continuation,
-        isDictionaryMode: Bool = false
+        isDictionaryMode: Bool = false, context: CapturedContext? = nil
     ) async throws {
-        let hint = isDictionaryMode ? buildDictionaryHint(tgt: tgt) : buildHint(src: src, tgt: tgt)
+        let hint = isDictionaryMode ? buildDictionaryHint(tgt: tgt, context: context) : buildHint(src: src, tgt: tgt, context: context)
         guard let url = URL(string: "\(p.baseURL)/v1/messages") else {
             throw TranslationService.TranslationError.malformedURL("\(p.baseURL)/v1/messages")
         }
@@ -285,7 +302,6 @@ actor TranslationActor {
             event.type == "content_block_delta" ? event.delta?.text : nil
         }
         t.flush()
-        tearDownSession()
     }
 
     // ── Gemini SSE ──
@@ -293,9 +309,9 @@ actor TranslationActor {
     private func geminiStream(
         _ text: String, _ src: TranslationLanguage, _ tgt: TranslationLanguage,
         _ p: APIProvider, _ c: AsyncThrowingStream<String, Error>.Continuation,
-        isDictionaryMode: Bool = false
+        isDictionaryMode: Bool = false, context: CapturedContext? = nil
     ) async throws {
-        let hint = isDictionaryMode ? buildDictionaryHint(tgt: tgt) : buildHint(src: src, tgt: tgt)
+        let hint = isDictionaryMode ? buildDictionaryHint(tgt: tgt, context: context) : buildHint(src: src, tgt: tgt, context: context)
         guard let url = URL(string: "\(p.baseURL)/models/\(p.modelName):streamGenerateContent?alt=sse") else {
             throw TranslationService.TranslationError.malformedURL("\(p.baseURL)/models/\(p.modelName):streamGenerateContent?alt=sse")
         }
@@ -322,7 +338,6 @@ actor TranslationActor {
             chunk.candidates?.first?.content?.parts?.first?.text
         }
         t.flush()
-        tearDownSession()
     }
 
     // MARK: - Mock Stream (Traditional MT → single-token stream)
@@ -467,9 +482,11 @@ actor TranslationActor {
 
     // MARK: - Helpers
 
-    private func buildDictionaryHint(tgt: TranslationLanguage) -> String {
+    private func buildDictionaryHint(tgt: TranslationLanguage,
+                                      context: CapturedContext? = nil) -> String {
         let langName = tgt.rawValue
-        return """
+
+        let baseHint = """
 You are an expert lexicographer and dictionary assistant.
 Analyze the following __SOURCE_LANG__ word and provide a detailed dictionary entry in __TARGET_LANG__.
 
@@ -499,39 +516,63 @@ Expected JSON schema (fill precisely):
 You must respond ONLY with a valid JSON object. Do NOT wrap in Markdown code blocks (no ```json).
 No explanations, no intro, no outro — pure JSON only.
 """
+
+        // ── Dictionary context: force 300 chars regardless of intensity setting ──
+        let ctxOn = UserDefaults.standard.bool(forKey: "is_context_aware")
+        guard ctxOn, let ctx = context, ctx.hasContext else { return baseHint }
+
+        let cap = 300
+        let leading = String(ctx.leadingContext.suffix(cap))
+        let trailing = String(ctx.trailingContext.prefix(cap))
+
+        let contextInstruction = """
+
+
+【重要语境优化指令】：
+当前用户正在查阅词典，并提供了该单词/短语前后的上下文：
+【上文】：\(leading)
+【目标词汇】：\(ctx.selectedText)
+【下文】：\(trailing)
+
+请在生成的词典 JSON 响应中执行以下优化：
+1. 审视上下文，判断当前语境下该词最精确的语义。
+2. 在 "definitions"（释义列表）中，必须将最符合当前语境的解释与词性置于首位（Index 0），其他常规释义依次排在后面。
+3. 在 "examples"（例句列表）中，第一条例句（Index 0）必须直接利用或高度契合当前的实际语境进行造句，以便用户快速理解该词在此处的用法。
+"""
+
+        return baseHint + contextInstruction
     }
 
-    private func buildHint(src: TranslationLanguage, tgt: TranslationLanguage) -> String {
+    private func buildHint(src: TranslationLanguage, tgt: TranslationLanguage,
+                           context: CapturedContext? = nil) -> String {
         let sourceName = src == .auto ? "Auto-Detected" : src.rawValue
         let targetName = tgt.rawValue
 
+        let basePrompt: String
         if let data = UserDefaults.standard.data(forKey: "custom_prompt"),
            let cp = try? JSONDecoder().decode(CustomPrompt.self, from: data) {
-            let base = cp.enabled ? cp.text : CustomPrompt.defaultPrompt
-            var prompt = base
+            let raw = cp.enabled ? cp.text : CustomPrompt.defaultPrompt
+            basePrompt = raw
                 .replacingOccurrences(of: "__SOURCE_LANG__", with: sourceName)
                 .replacingOccurrences(of: "__TARGET_LANG__", with: targetName)
-            prompt += """
-
-
-[CRITICAL FORMAT CONSTRAINT]
-Translate directly. No introduction, no meta-commentary.
-Preserve original formatting and Markdown tags if present.
-"""
-            return prompt
+        } else {
+            basePrompt = CustomPrompt.defaultPrompt
+                .replacingOccurrences(of: "__SOURCE_LANG__", with: sourceName)
+                .replacingOccurrences(of: "__TARGET_LANG__", with: targetName)
         }
 
-        var prompt = CustomPrompt.defaultPrompt
-            .replacingOccurrences(of: "__SOURCE_LANG__", with: sourceName)
-            .replacingOccurrences(of: "__TARGET_LANG__", with: targetName)
-        prompt += """
+        // ── Inject bidirectional sliding-window context if available ──
+        let augmentedPrompt = ContextAwareService.buildFinalPrompt(
+            basePrompt: basePrompt, context: context
+        )
+
+        return augmentedPrompt + """
 
 
 [CRITICAL FORMAT CONSTRAINT]
 Translate directly. No introduction, no meta-commentary.
 Preserve original formatting and Markdown tags if present.
 """
-        return prompt
     }
 }
 
@@ -617,7 +658,8 @@ extension TranslationActor: TranslationEngineProtocol {
         provider: APIProvider,
         isDictionaryMode: Bool,
         sourceLang: TranslationLanguage,
-        targetLang: TranslationLanguage
+        targetLang: TranslationLanguage,
+        context: CapturedContext? = nil
     ) -> AsyncThrowingStream<String, Error> {
         let actor = self
         return AsyncThrowingStream { continuation in
@@ -626,12 +668,12 @@ extension TranslationActor: TranslationEngineProtocol {
                 if isDictionaryMode && !provider.kind.isTraditionalMT && provider.kind != .macOSNative {
                     stream = await actor.translateDictionary(
                         text: text, sourceLang: sourceLang,
-                        targetLang: targetLang, provider: provider
+                        targetLang: targetLang, provider: provider, context: context
                     )
                 } else {
                     stream = await actor.translateStream(
                         text: text, sourceLang: sourceLang,
-                        targetLang: targetLang, provider: provider
+                        targetLang: targetLang, provider: provider, context: context
                     )
                 }
                 do {

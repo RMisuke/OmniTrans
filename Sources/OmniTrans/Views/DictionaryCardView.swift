@@ -1,104 +1,116 @@
 import SwiftUI
 
-/// Professional dictionary card with staggered entrance and hover micro-interactions.
-/// All staggered animations are gated by the global "动画效果" toggle.
+// MARK: - Dictionary Card View (Staggered Entrance)
+
+/// 词典卡片，使用 ``StaggeredEntranceContainer`` 实现声明式错列入场。
+///
+/// ## 架构改进
+///
+/// - **旧实现**：4 个 `@State` 布尔 + `animateIn()` 复位函数 + 硬编码
+///   `.delay(0.04)` / `.delay(0.08)` / `.delay(0.12)`
+/// - **新实现**：零 `@State`、零 `animateIn`。每个 section 包裹在
+///   `StaggeredEntranceContainer` 中，延迟由 `IndexCounter` 动态分配。
+///   卡片通过 `.id(entry.word)` 强制在查词切换时完整重建，自然触发
+///   所有子容器的 `.onAppear` 入场动画。
+///
+/// - `nativeCardStyle()` 提供高不透明度纯色背景 + 0.5pt 发丝环。
 struct DictionaryCardView: View {
     let entry: DictionaryEntry
-    @AppStorage("animations_enabled") private var animationsEnabled = true
-
-    @State private var showHeader = false
-    @State private var showPhonetic = false
-    @State private var showDefinitions = false
-    @State private var showExamples = false
-
-    private var springFast: Animation? {
-        animationsEnabled ? .spring(response: 0.32, dampingFraction: 0.78) : nil
-    }
-    private var springMedium: Animation? {
-        animationsEnabled ? .spring(response: 0.28, dampingFraction: 0.75) : nil
-    }
 
     var body: some View {
+        let counter = IndexCounter()
         VStack(alignment: .leading, spacing: 0) {
-            if showHeader { wordHeader.transition(.opacity.combined(with: .move(edge: .top))) }
-            if showPhonetic, !entry.phonetic.isEmpty { phoneticRow.transition(.opacity) }
-            if showDefinitions, !entry.definitions.isEmpty {
-                Divider().padding(.vertical, AppTheme.spaceSM)
-                definitionsList.transition(.opacity.combined(with: .move(edge: .leading)))
+            // Index 0: 词头（必定显示）
+            StaggeredEntranceContainer(index: counter.next) {
+                wordHeader
             }
-            if showExamples, !entry.examples.isEmpty {
-                Divider().padding(.vertical, AppTheme.spaceSM)
-                examplesList.transition(.opacity.combined(with: .move(edge: .leading)))
+
+            // Index 1: 音标（条件显示）
+            if !entry.phonetic.isEmpty {
+                StaggeredEntranceContainer(index: counter.next) {
+                    phoneticRow
+                }
+            }
+
+            // Index N: 释义（条件显示）
+            if !entry.definitions.isEmpty {
+                Divider().padding(.vertical, AppTheme.spaceXS)
+                StaggeredEntranceContainer(index: counter.next) {
+                    definitionsList
+                }
+            }
+
+            // Index N: 例句（条件显示）
+            if !entry.examples.isEmpty {
+                Divider().padding(.vertical, AppTheme.spaceXS)
+                StaggeredEntranceContainer(index: counter.next) {
+                    examplesList
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { animateIn() }
-        .onChange(of: entry.word) { _ in animateIn() }
-        .animation(springFast, value: showHeader)
-        .animation(springMedium?.delay(0.04), value: showPhonetic)
-        .animation(springMedium?.delay(0.08), value: showDefinitions)
-        .animation(springMedium?.delay(0.12), value: showExamples)
+        .nativeCardStyle()
+        .id(entry.word)  // 强制重建 → 重新触发所有入场动画
     }
 
-    private func animateIn() {
-        showHeader = false; showPhonetic = false; showDefinitions = false; showExamples = false
-        withAnimationGated(.spring(response: 0.3, dampingFraction: 0.75)) { showHeader = true }
-        withAnimationGated(.spring(response: 0.28, dampingFraction: 0.75).delay(0.04)) { showPhonetic = true }
-        withAnimationGated(.spring(response: 0.28, dampingFraction: 0.75).delay(0.08)) { showDefinitions = true }
-        withAnimationGated(.spring(response: 0.28, dampingFraction: 0.75).delay(0.12)) { showExamples = true }
-    }
-
-    // MARK: - Word header
+    // MARK: - Sections
 
     private var wordHeader: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "character.book.closed.fill")
-                .font(.title3).foregroundColor(AppTheme.textAccent)
+                .font(.title3)
+                .foregroundColor(AppTheme.accentAction)
             Text(entry.word)
-                .font(.system(size: AppTheme.fontSizeTitle + 2, weight: .bold))
+                .font(.system(size: AppTheme.fontSizeTitle, weight: .bold))
                 .foregroundColor(AppTheme.textPrimary)
             Spacer()
-        }.padding(.bottom, AppTheme.spaceXS)
+        }
+        .padding(.bottom, AppTheme.spaceXXS)
     }
-
-    // MARK: - Phonetic
 
     private var phoneticRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: "waveform").font(.caption2).foregroundColor(AppTheme.textSecondary)
+            Image(systemName: "waveform")
+                .font(.caption2)
+                .foregroundColor(AppTheme.textSecondary)
             Text(entry.phonetic)
-                .font(.system(size: AppTheme.fontSizeBody, design: .monospaced)).foregroundColor(AppTheme.textSecondary)
+                .font(.system(size: AppTheme.fontSizeBody, design: .monospaced))
+                .foregroundColor(AppTheme.textSecondary)
         }
     }
 
-    // MARK: - Definitions
-
     private var definitionsList: some View {
-        VStack(alignment: .leading, spacing: AppTheme.spaceSM) {
+        VStack(alignment: .leading, spacing: AppTheme.spaceXS) {
             ForEach(entry.definitions) { def in
                 DefinitionRowView(def: def, posColor: posColor)
             }
         }
     }
 
-    // MARK: - Examples
-
     private var examplesList: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(entry.examples.enumerated()), id: \.element.id) { idx, ex in
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(alignment: .top, spacing: 4) {
-                        Text("\(idx + 1).").font(.caption2).foregroundColor(AppTheme.textSecondary)
+                        Text("\(idx + 1).")
+                            .font(.caption2)
+                            .foregroundColor(AppTheme.textSecondary)
                             .frame(width: 14, alignment: .trailing)
-                        Text(ex.en).font(.system(size: AppTheme.fontSizeLabel)).italic().foregroundColor(AppTheme.textPrimary)
+                        Text(ex.en)
+                            .font(.system(size: AppTheme.fontSizeCaption))
+                            .italic()
+                            .foregroundColor(AppTheme.textPrimary)
                     }
-                    Text(ex.zh).font(.caption2).foregroundColor(AppTheme.textSecondary).padding(.leading, 18)
+                    Text(ex.zh)
+                        .font(.caption2)
+                        .foregroundColor(AppTheme.textSecondary)
+                        .padding(.leading, 18)
                 }
             }
         }
     }
 
-    // MARK: - POS colour
+    // MARK: - POS Color Mapping
 
     private func posColor(_ pos: String) -> Color {
         let lower = pos.lowercased()
@@ -114,24 +126,36 @@ struct DictionaryCardView: View {
     }
 }
 
-/// Individual definition row with hover micro-interaction.
+// MARK: - Definition Row
+
 private struct DefinitionRowView: View {
     let def: DictionaryEntry.Definition
     let posColor: (String) -> Color
-    @AppStorage("animations_enabled") private var animationsEnabled = true
+
     @State private var isHovered = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: AppTheme.spaceSM) {
+        HStack(alignment: .top, spacing: AppTheme.spaceXS) {
             Text(def.pos)
-                .font(.caption2).fontWeight(.bold).foregroundColor(.white)
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(RoundedRectangle(cornerRadius: 3).fill(posColor(def.pos)))
+                .font(.caption2)
+                .fontWeight(.bold)
+                .foregroundColor(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(posColor(def.pos))
+                )
                 .scaleEffect(isHovered ? 1.05 : 1.0)
-                .shadow(color: posColor(def.pos).opacity(isHovered ? 0.35 : 0), radius: 4, y: 1)
-                .animation(animationsEnabled ? .spring(response: 0.2, dampingFraction: 0.7) : nil, value: isHovered)
+                .shadow(
+                    color: posColor(def.pos).opacity(isHovered ? 0.35 : 0),
+                    radius: 4, y: 1
+                )
+                .animation(AppTheme.Motion.snip.gated, value: isHovered)
+
             Text(def.meaning)
-                .font(.system(size: AppTheme.fontSizeBody)).foregroundColor(AppTheme.textPrimary)
+                .font(.system(size: AppTheme.fontSizeBody))
+                .foregroundColor(AppTheme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .onHover { hovering in isHovered = hovering }

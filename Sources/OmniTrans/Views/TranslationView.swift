@@ -2,14 +2,14 @@ import SwiftUI
 
 struct TranslationView: View {
     @ObservedObject var state: AppState
+    @Environment(TranslationSessionStore.self) private var session
     @Binding var showSettings: Bool
-    @AppStorage("animations_enabled") private var animationsEnabled = true
+    @AppStorage("is_context_aware") private var isContextAware = true
     @State private var showCopyToast = false
     @State private var swapTrigger = false
     @State private var showCursor = true
     @State private var cursorTimer: Timer?
-
-    private let fadeAnim: Animation? = .easeInOut(duration: 0.55)
+    @State private var contextHovered = false
 
     /// Lazy-loaded app icon, resized for header use.
     private var headerIcon: NSImage {
@@ -25,21 +25,21 @@ struct TranslationView: View {
         return NSImage(systemSymbolName: "character.bubble.fill", accessibilityDescription: nil)!
     }
 
-    /// Smooth animated indicator: red error / yellow loading / green success.
+    /// Smooth animated indicator using AppTheme.IndicatorColor tokens.
     @ViewBuilder
     private var headerIndicator: some View {
         if state.showErrorPulse {
             Image(systemName: "exclamationmark.circle.fill")
-                .foregroundColor(Color(red: 1.000, green: 0.361, blue: 0.376))
+                .foregroundColor(AppTheme.IndicatorColor.error.color)
                 .transition(.opacity)
         } else if state.isTranslating {
             Image(systemName: "circle.fill")
-                .foregroundColor(Color(red: 0.980, green: 0.784, blue: 0.000))
+                .foregroundColor(AppTheme.IndicatorColor.loading.color)
                 .scaleEffect(0.65)
                 .transition(.opacity)
         } else if state.showSuccessPulse {
             Image(systemName: "checkmark.circle.fill")
-                .foregroundColor(Color(red: 0.204, green: 0.831, blue: 0.600))
+                .foregroundColor(AppTheme.IndicatorColor.success.color)
                 .transition(.opacity)
         }
     }
@@ -59,14 +59,15 @@ struct TranslationView: View {
         .overlay(alignment: .top) {
             if showCopyToast {
                 copyToast
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.offset(y: -4).combined(with: .opacity))
                     .zIndex(10)
             }
         }
         .animationsGated()
-        .animation(fadeAnim, value: state.showErrorPulse)
-        .animation(fadeAnim, value: state.isTranslating)
-        .animation(fadeAnim, value: state.showSuccessPulse)
+        .animation(AppTheme.Motion.slow.gated, value: showCopyToast)
+        .animation(AppTheme.Motion.slow.gated, value: state.showErrorPulse)
+        .animation(AppTheme.Motion.slow.gated, value: state.isTranslating)
+        .animation(AppTheme.Motion.slow.gated, value: state.showSuccessPulse)
         .onChange(of: state.isTranslating) { _, translating in
             if translating {
                 startCursor()
@@ -86,11 +87,11 @@ struct TranslationView: View {
 
     private var copyToast: some View {
         HStack(spacing: 6) {
-            Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+            Image(systemName: "checkmark.circle.fill").foregroundColor(AppTheme.success)
             Text("已拷贝到剪贴板").font(.caption)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
-        .background(AdaptiveGlassBackground())
+        .background(AppTheme.bgThick)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(radius: 4)
         .padding(.top, 6)
@@ -105,9 +106,25 @@ struct TranslationView: View {
             Text("OmniTrans").font(.headline)
 
             if state.isTranslating {
-                ProgressView().scaleEffect(0.5).padding(.leading, 4)
+                ProgressView().scaleEffect(0.5).padding(.leading, 4).tint(AppTheme.accentAction)
             }
             headerIndicator
+
+            // Context-aware toggle
+            Button(action: { isContextAware.toggle() }) {
+                Image(systemName: isContextAware ? "brain.head.profile" : "brain")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(isContextAware ? AppTheme.accentAction : Color.primary.opacity(0.45))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 4).padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(contextHovered ? Color.primary.opacity(0.08) : Color.clear)
+                    .animation(AppTheme.Motion.snip.gated, value: contextHovered)
+            )
+            .onHover { hovering in contextHovered = hovering }
+            .help(isContextAware ? "上下文感知已开启 — 点击关闭" : "上下文感知已关闭 — 点击开启")
 
             Spacer()
 
@@ -181,7 +198,7 @@ struct TranslationView: View {
             .frame(width: 120)
 
             Button(action: {
-                withAnimationGated(.spring(response: 0.3, dampingFraction: 0.6)) {
+                withAnimation(AppTheme.Motion.fluid.gated) {
                     swapTrigger.toggle()
                 }
                 swapLanguages()
@@ -248,19 +265,23 @@ struct TranslationView: View {
 
     // MARK: - Output
 
+    // MARK: - Output
+
     private var outputArea: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let shared = AppState.shared
+        let tText  = shared.session.translatedText
+
+        return VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("翻译结果").font(.caption).foregroundColor(.secondary)
                 Spacer()
-                if !state.translatedText.isEmpty {
-                    Text("\(state.translatedText.count) 字符").font(.caption2).foregroundColor(.secondary)
+                if !tText.isEmpty {
+                    Text("\(tText.count) 字符").font(.caption2).foregroundColor(.secondary)
                 }
-                if !state.translatedText.isEmpty {
+                if !tText.isEmpty {
                     Button(action: {
-                        let textToSpeak = state.translatedText
-                        guard !textToSpeak.isEmpty else { return }
-                        TTSManager.shared.speakNative(text: textToSpeak)
+                        guard !tText.isEmpty else { return }
+                        TTSManager.shared.speakNative(text: tText)
                     }) {
                         Image(systemName: "speaker.wave.2").font(.caption2)
                     }
@@ -276,32 +297,87 @@ struct TranslationView: View {
             .padding(.horizontal, 12).padding(.top, 6)
 
             ScrollView {
-                if state.isTranslating && state.translatedText.isEmpty {
+                if shared.session.isTranslating && tText.isEmpty {
                     SkeletonShimmerView()
                         .padding(.horizontal, 4).padding(.top, 8)
                 }
-                if let error = state.errorMessage {
+                if let error = shared.session.errorMessage {
                     errorBlock(error)
                 }
-                HStack(alignment: .top, spacing: 0) {
-                    Text(state.translatedText)
-                        .font(.system(size: 15))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .move(edge: .bottom)),
-                            removal: .identity
-                        ))
-                    if state.isTranslating && showCursor {
-                        Rectangle()
-                            .fill(Color.accentColor)
-                            .frame(width: 2, height: 15)
+
+                Group {
+                    if shared.session.isDictionaryMode {
+                        let rawText = tText
+                        let sanitizedText = cleanJsonStreamText(rawText)
+
+                        // ── Branch A: successful structured parse ──
+                        if let entry = DictionaryEntry.parse(from: sanitizedText, word: shared.inputText) {
+                            inlineDictionaryBlock(entry)
+                                .transition(.opacity)
+                        }
+                        // ── Branch B: still streaming / partial → fallback to hard-lock ──
+                        else if shared.session.isTranslating {
+                            if let fallbackJson = shared.session.lastValidDictionaryJson,
+                               let fallbackEntry = DictionaryEntry.parse(from: fallbackJson, word: shared.inputText) {
+                                inlineDictionaryBlock(fallbackEntry)
+                            } else {
+                                SkeletonShimmerView()
+                                    .padding(.horizontal, 4).padding(.top, 8)
+                            }
+                        }
+                        // ── Branch C: streaming ended, non‑JSON → raw text ──
+                        else if !sanitizedText.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Divider().padding(.vertical, 4).padding(.horizontal, 12)
+                                Text(rawText)
+                                    .font(.system(size: 13))
+                                    .foregroundColor(AppTheme.textSecondary)
+                                    .textSelection(.enabled)
+                                    .padding(.horizontal, 12)
+                            }
+                            .transition(.opacity)
+                        }
+                        // ── Branch D: empty → loading ──
+                        else {
+                            ProgressView().scaleEffect(0.8).padding(.top, 20)
+                        }
+                    } else {
+                        // ── Translation mode: raw text stream ──
+                        HStack(alignment: .top, spacing: 0) {
+                            Text(tText)
+                                .font(.system(size: 15))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .transition(.asymmetric(
+                                    insertion: .opacity.combined(with: .move(edge: .bottom)),
+                                    removal: .identity
+                                ))
+                            if shared.session.isTranslating && showCursor {
+                                Rectangle()
+                                    .fill(Color.accentColor)
+                                    .frame(width: 2, height: 15)
+                            }
+                        }
+                        .padding(.horizontal, 12).padding(.top, 4)
                     }
                 }
-                .padding(.horizontal, 12).padding(.top, 4)
+                .animation(AppTheme.Motion.snip.gated, value: tText)
             }
             .padding(.bottom, 8)
         }
+    }
+
+    // MARK: - JSON Stream Sanitizer
+
+    /// Strips leading/trailing whitespace and removes `[DONE]` sentinel
+    /// that some LLM streaming implementations append to the final frame.
+    @inline(__always)
+    private func cleanJsonStreamText(_ text: String) -> String {
+        var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.hasSuffix("[DONE]") {
+            result = String(result.dropLast(6))
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Error
@@ -319,6 +395,57 @@ struct TranslationView: View {
         .background(Color.red.opacity(0.08))
         .cornerRadius(8)
         .padding(.horizontal, 12).padding(.top, 6)
+    }
+
+    // MARK: - Inline Dictionary Block
+
+    private func inlineDictionaryBlock(_ entry: DictionaryEntry) -> some View {
+        let counter = IndexCounter()
+        return VStack(alignment: .leading, spacing: 0) {
+            Divider().padding(.vertical, 6).padding(.horizontal, 12)
+
+            StaggeredEntranceContainer(index: counter.next) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "character.book.closed.fill")
+                        .font(.system(size: 13)).foregroundColor(AppTheme.accentAction)
+                    Text(entry.word)
+                        .font(.system(size: 16, weight: .bold)).foregroundColor(AppTheme.textPrimary)
+                    if !entry.phonetic.isEmpty {
+                        Text(entry.phonetic)
+                            .font(.system(size: 12, design: .monospaced)).foregroundColor(AppTheme.textSecondary)
+                    }
+                }
+                .padding(.horizontal, 12).padding(.bottom, 6)
+            }
+
+            ForEach(Array(entry.definitions.enumerated()), id: \.element.id) { idx, def in
+                StaggeredEntranceContainer(index: counter.next) {
+                    HStack(alignment: .top, spacing: 6) {
+                        Text(def.pos).font(.caption2).fontWeight(.bold).foregroundColor(.white)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(RoundedRectangle(cornerRadius: 3).fill(Color.accentColor))
+                        Text(def.meaning)
+                            .font(.system(size: 13)).foregroundColor(AppTheme.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 3)
+                }
+            }
+
+            if !entry.examples.isEmpty {
+                StaggeredEntranceContainer(index: counter.next) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(entry.examples) { ex in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(ex.en).font(.system(size: 12)).italic().foregroundColor(AppTheme.textPrimary)
+                                Text(ex.zh).font(.caption2).foregroundColor(AppTheme.textSecondary)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.top, 4)
+                }
+            }
+        }
     }
 
     // MARK: - Actions

@@ -8,7 +8,10 @@ final class HotkeyManager {
 
     private var hotkeyRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
-    var onHotkey: ((String?) -> Void)?
+    /// Callback when translate hotkey is pressed.
+    /// - Parameter 1: captured text (nil if no text was captured)
+    /// - Parameter 2: bidirectional sliding-window context (nil if unavailable)
+    var onHotkey: ((String?, CapturedContext?) -> Void)?
 
     // OCR capture hotkey (Opt+F by default)
     private var ocrHotkeyRef: EventHotKeyRef?
@@ -266,7 +269,7 @@ final class HotkeyManager {
     private let ocrStrategies: [TextCaptureStrategy] = [
         ClipboardCaptureStrategy(),
         AXCaptureStrategy(),
-        VisionOCRCaptureStrategy()
+        ScreenCaptureOCRCaptureStrategy()
     ]
 
 
@@ -298,12 +301,18 @@ private func unifiedHotkeyCallback(_: EventHandlerCallRef?, _ event: EventRef?, 
         // Translate hotkey — no OCR fallback
         guard now.timeIntervalSince(_debounce) > 0.8 else { return noErr }
         _debounce = now
+        // ── Pre-connect: warm TCP/TLS before text capture ──
+        DispatchQueue.main.async { mgr.preConnectCurrentProvider() }
         let text = mgr.captureWithoutOCR()
-        DispatchQueue.main.async { mgr.onHotkey?(text) }
+        // ── Capture bidirectional sliding-window context ──
+        let context: CapturedContext? = text.flatMap { SlidingWindowContextCapture.capture(selectedText: $0) }
+        DispatchQueue.main.async { mgr.onHotkey?(text, context) }
     } else if hid.id == 2 {
         // OCR hotkey
         guard now.timeIntervalSince(_ocrDebounce) > 0.8 else { return noErr }
         _ocrDebounce = now
+        // ── Pre-connect: warm TCP/TLS before OCR capture ──
+        DispatchQueue.main.async { mgr.preConnectCurrentProvider() }
         DispatchQueue.main.async { mgr.onOCRHotkey?() }
     } else if hid.id == 3 {
         // Replace hotkey (⌥R) — paste translation result into frontmost app
@@ -313,5 +322,36 @@ private func unifiedHotkeyCallback(_: EventHandlerCallRef?, _ event: EventRef?, 
     }
 
     return noErr
+}
+
+// MARK: - Network Pre-connect (TCP/TLS Warmup)
+
+extension HotkeyManager {
+
+    /// Sends an ultra-lightweight HEAD request to the current provider's API
+    /// host to complete DNS resolution + TCP + TLS handshake before the actual
+    /// translation request fires.  This eliminates ~50ms+ of cold-start
+    /// connection latency by ensuring the HTTP/2 connection is already
+    /// established and pooled when `TranslationActor` sends the real POST.
+    ///
+    /// Called from the Carbon hotkey callback *before* text capture so the
+    /// handshake overlaps with the capture pipeline (Cmd+C simulation, OCR,
+    /// etc.).  Fire-and-forget — errors are silently ignored.
+    @MainActor
+    func preConnectCurrentProvider() {
+        guard let provider = AppState.shared.selectedProvider,
+              provider.kind != .macOSNative,
+              let url = URL(string: provider.baseURL)
+        else { return }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "HEAD"
+        req.timeoutInterval = 3  // Short timeout — best-effort only
+
+        let task = sharedURLSession.dataTask(with: req) { _, _, _ in
+            // Fire-and-forget; connection is now in the shared pool
+        }
+        task.resume()
+    }
 }
 

@@ -1,25 +1,33 @@
 import SwiftUI
 import AppKit
 
-/// Adaptive glass-morphism background that bridges to the native
-/// `NSVisualEffectView`.
+// MARK: - Adaptive Glass Background (macOS 26 Native)
+
+/// High-opacity adaptive background using `.ultraThickMaterial` on
+/// macOS 26+ for the premium "Thick Bottom" content canvas, and
+/// `.sidebar` + `.behindWindow` on macOS 14+ for Mica fallback.
 ///
-/// - **macOS 26+**:  Activates `.hudWindow` material — the system's most
-///   modern fluid overlay with real-time desktop blending and subtle
-///   light-bleed edges ("Liquid Glass").
-/// - **macOS 14+**:  Falls back gracefully to `.sidebar` — a deep,
-///   high-quality frosted glass (Mica) with identical blur performance.
+/// ## Material Strategy (DESIGN-apple.md — thick materials)
+/// - **macOS 26+**: `.ultraThickMaterial` — heavy blur with high
+///   opacity, no light-bleed, solid enough that background content
+///   never bleeds through text.
+/// - **macOS 14+**: `.sidebar` — deep frosted Mica with identical
+///   GPU-compositor performance.
 ///
-/// Because the effect is rendered on the GPU compositor, it adds
-/// zero CPU overhead and never blocks the main run loop.
+/// ## No Low-Opacity Web-Tiles
+/// The old `Color.primary.opacity(0.03)` mist layer and specular
+/// gradient borders have been removed.  The native material alone
+/// provides sufficient premium feel without visual noise.
 struct AdaptiveGlassBackground: NSViewRepresentable {
+
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
         view.blendingMode = .behindWindow
         view.state = .active
         view.material = resolvedMaterial()
         view.wantsLayer = true
-        view.layer?.cornerRadius = 0   // caller applies clipShape
+        view.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        view.layer?.cornerRadius = 0
         view.layer?.masksToBounds = true
         return view
     }

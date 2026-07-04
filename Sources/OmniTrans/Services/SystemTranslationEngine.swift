@@ -84,51 +84,41 @@ actor SystemTranslationEngine {
         source: Locale.Language,
         target: Locale.Language
     ) async throws -> String {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
-            let lock = NSLock()
-            var resumed = false
-
+        let gate = ResumeGate()
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             let task = Task {
                 do {
                     let response = try await translateText(text, source: source, target: target)
-                    lock.lock()
-                    if !resumed { resumed = true; lock.unlock(); cont.resume(returning: response) }
-                    else { lock.unlock() }
+                    await gate.runOnce { cont.resume(returning: response) }
                 } catch {
-                    lock.lock()
-                    if !resumed { resumed = true; lock.unlock(); cont.resume(throwing: error) }
-                    else { lock.unlock() }
+                    await gate.runOnce { cont.resume(throwing: error) }
                 }
             }
-
             DispatchQueue.global().asyncAfter(
                 deadline: .now() + .seconds(Int(timeoutSeconds))
             ) {
                 task.cancel()
-                lock.lock()
-                if !resumed {
-                    resumed = true; lock.unlock()
+                Task { await gate.runOnce {
                     cont.resume(throwing: TranslationService.TranslationError.apiError(
                         Self.languagePackMissingMessage
                     ))
-                } else { lock.unlock() }
+                }}
             }
         }
     }
 
-    /// Stub — `TranslationSession` has no public initializers in the current SDK.
-    /// When the Translation framework API stabilises, restore the implementation:
-    ///   let session = TranslationSession(...)
-    ///   try await session.prepareTranslation()
-    ///   return try await session.translate(text).targetText
+    /// Uses `TranslationSession(installedSource:target:)` (macOS 26.0+) for
+    /// on-device Neural Engine translation.  The session is created per‑request
+    /// and the framework handles model caching internally.
+    @available(macOS 26.0, *)
     private static func translateText(
         _ text: String,
         source: Locale.Language,
         target: Locale.Language
     ) async throws -> String {
-        throw TranslationService.TranslationError.apiError(
-            "系统原生翻译暂不可用（TranslationSession API 已变更）。请切换至云端 API。"
-        )
+        let session = TranslationSession(installedSource: source, target: target)
+        let response = try await session.translate(text)
+        return response.targetText
     }
 
     // MARK: - Language availability
@@ -138,28 +128,21 @@ actor SystemTranslationEngine {
         target: Locale.Language
     ) async throws {
         let avail = self.availability
+        let gate = ResumeGate()
 
         let status: LanguageAvailability.Status = try await withCheckedThrowingContinuation {
             (cont: CheckedContinuation<LanguageAvailability.Status, Error>) in
-            let lock = NSLock()
-            var resumed = false
-
             let task = Task {
                 let s = await avail.status(from: source, to: target)
-                lock.lock()
-                if !resumed { resumed = true; lock.unlock(); cont.resume(returning: s) }
-                else { lock.unlock() }
+                await gate.runOnce { cont.resume(returning: s) }
             }
-
             DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(3)) {
                 task.cancel()
-                lock.lock()
-                if !resumed {
-                    resumed = true; lock.unlock()
+                Task { await gate.runOnce {
                     cont.resume(throwing: TranslationService.TranslationError.apiError(
                         Self.languagePackMissingMessage
                     ))
-                } else { lock.unlock() }
+                }}
             }
         }
 
@@ -199,4 +182,18 @@ actor SystemTranslationEngine {
         请打开 系统设置 → 通用 → 语言与地区，
         滚动到底部找到「翻译语言」，下载所需语言模型后重试。
         """
+}
+
+// MARK: - Resume Gate (Swift 6 Concurrency-Safe)
+
+/// Lightweight actor that guarantees a continuation is resumed exactly once,
+/// replacing the old `NSLock` + `Bool` pattern which is illegal in Swift 6.
+private actor ResumeGate {
+    private var fired = false
+
+    func runOnce(_ block: @Sendable () -> Void) {
+        guard !fired else { return }
+        fired = true
+        block()
+    }
 }

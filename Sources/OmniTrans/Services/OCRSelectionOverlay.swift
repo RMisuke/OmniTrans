@@ -77,7 +77,7 @@ final class OCRSelectionOverlay {
         // The overlay stays visible during capture — SCContentFilter erases it from
         // the pixel stream at the compositor level, eliminating the 50ms hide delay.
         Task {
-            guard let cgImage = await captureService.capture(appKitRect: appKitRect, excludingWindowID: windowID) else {
+            guard let pixelBuffer = await captureService.capture(appKitRect: appKitRect, excludingWindowID: windowID) else {
                 await MainActor.run {
                     onComplete?(nil)
                     onComplete = nil
@@ -86,7 +86,7 @@ final class OCRSelectionOverlay {
                 return
             }
 
-            let text = performOCR(on: cgImage)
+            let text = performOCR(on: pixelBuffer)
             await MainActor.run {
                 onComplete?(text)
                 onComplete = nil
@@ -97,18 +97,28 @@ final class OCRSelectionOverlay {
 
     // MARK: - OCR processing
 
-    /// Runs VNRecognizeTextRequest on `cgImage`, returns ordered text.
-    /// The input `cgImage` is consumed; caller should not retain it afterward.
-    private func performOCR(on cgImage: CGImage) -> String? {
+    /// Runs VNRecognizeTextRequest directly on a `CVPixelBuffer`, eliminating
+    /// the `CGImage` copy / colour-space conversion tax on high-DPI displays.
+    ///
+    /// The buffer is locked read-only for the duration of the Vision request
+    /// and unlocked immediately after — zero additional CPU-side pixel copies.
+    private func performOCR(on pixelBuffer: CVPixelBuffer) -> String? {
         // Use autoreleasepool to eagerly reclaim Vision's internal C++ buffers
         return autoreleasepool { () -> String? in
             let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
+            // .fast delivers ~3× speedup over .accurate — sufficient for lookup & single-sentence OCR
+            request.recognitionLevel = .fast
+            // Disable language correction — LLM engines provide superior correction downstream
+            request.usesLanguageCorrection = false
             request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en", "ja", "ko", "fr", "de", "es"]
-            request.minimumTextHeight = 0.01
+            // Filter noise-level text fragments to reduce unnecessary recognition blocks
+            request.minimumTextHeight = 0.02
 
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            // Lock the pixel buffer read-only for Vision; unlock in defer
+            CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
             do {
                 try handler.perform([request])
             } catch {
@@ -151,7 +161,7 @@ final class OCRSelectionOverlay {
 
             let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
             // Vision handler and request go out of scope here; autoreleasepool
-            // ensures the backing CGImage / IOSurface / ANE buffers are released
+            // ensures the backing IOSurface / ANE buffers are released
             // before returning to the caller.
             return trimmed.isEmpty ? nil : trimmed
         }

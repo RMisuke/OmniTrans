@@ -104,16 +104,6 @@ enum ProviderStorageManager {
         secretCache.removeValue(forKey: id)
     }
 
-    // MARK: - Deprecated wrappers
-
-    @available(*, deprecated, message: "Use deleteProviderSecrets(for:)")
-    static func deleteProviderKey(id: UUID) { deleteProviderSecrets(for: id) }
-
-    @available(*, deprecated, message: "Use cachedValue(for:field:)")
-    static func loadProviderKey(for id: UUID) -> String? {
-        cachedValue(for: id, field: "apiKey")
-    }
-
     // MARK: - Languages
 
     static func loadSourceLang() -> TranslationLanguage {

@@ -9,7 +9,7 @@ struct APISettingsView: View {
     var body: some View {
         ZStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Label("API 配置", systemImage: "server.rack")
                             .font(.headline)
@@ -106,7 +106,7 @@ struct APISettingsView: View {
 
     private func moveProvider(from: Int, to: Int) {
         guard to >= 0, to < state.providers.count else { return }
-        withAnimationGated(.spring(response: 0.25, dampingFraction: 0.7)) {
+        withAnimation(AppTheme.Motion.fluid.gated) {
             state.providers.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
             state.save()
         }

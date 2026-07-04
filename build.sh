@@ -5,13 +5,22 @@ cd "$(dirname "$0")"
 
 echo "=== Cleaning old build ==="
 rm -rf .build/OmniTrans.app .build/release/OmniTrans .build/release/OmniTrans.dSYM 2>/dev/null || true
-echo "=== Building OmniTrans (universal: arm64 + x86_64) ==="
-swift build -c release --arch arm64 --arch x86_64 2>&1
+
+echo "=== Building OmniTrans (universal: arm64 + x86_64) with WMO ==="
+swift build -c release \
+    --arch arm64 --arch x86_64 \
+    -Xswiftc -whole-module-optimization \
+    -Xswiftc -O \
+    2>&1
 
 BIN=".build/apple/Products/Release/OmniTrans"
 APP_DIR=".build/OmniTrans.app"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN" "$APP_DIR/Contents/MacOS/OmniTrans"
+
+echo "=== Optimizing & Stripping Binary ==="
+strip -u -r "$APP_DIR/Contents/MacOS/OmniTrans"
+
 # Copy app icon (about page)
 cp "Resource/icon/icon.icns" "$APP_DIR/Contents/Resources/icon.icns"
 # Copy menu bar icon
@@ -26,8 +35,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key><string>com.omnitrans.app</string>
     <key>CFBundleName</key><string>OmniTrans</string>
     <key>CFBundleDisplayName</key><string>OmniTrans</string>
-    <key>CFBundleVersion</key><string>0.4-dev</string>
-    <key>CFBundleShortVersionString</key><string>0.4-dev</string>
+    <key>CFBundleVersion</key><string>0.5</string>
+    <key>CFBundleShortVersionString</key><string>0.5</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>CFBundleIconFile</key><string>icon.icns</string>
@@ -47,3 +56,7 @@ echo ""
 echo "=== Build complete ==="
 echo "App: $(pwd)/$APP_DIR"
 echo "Run: open $(pwd)/$APP_DIR"
+
+# Show binary size for verification
+BIN_SIZE=$(stat -f%z "$APP_DIR/Contents/MacOS/OmniTrans" 2>/dev/null || stat -c%s "$APP_DIR/Contents/MacOS/OmniTrans" 2>/dev/null || echo "?")
+echo "Binary size: ${BIN_SIZE} bytes"

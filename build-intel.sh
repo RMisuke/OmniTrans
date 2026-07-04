@@ -26,8 +26,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key><string>com.omnitrans.intel</string>
     <key>CFBundleName</key><string>OmniTrans</string>
     <key>CFBundleDisplayName</key><string>OmniTrans</string>
-    <key>CFBundleVersion</key><string>0.2</string>
-    <key>CFBundleShortVersionString</key><string>0.2</string>
+    <key>CFBundleVersion</key><string>0.5</string>
+    <key>CFBundleShortVersionString</key><string>0.5</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>CFBundleIconFile</key><string>icon.icns</string>

@@ -1,7 +1,7 @@
 import Foundation
 import Carbon
 
-let kAppVersion = "0.4-dev"
+let kAppVersion = "0.5"
 
 @MainActor
 final class AppState: ObservableObject {
@@ -76,6 +76,10 @@ final class AppState: ObservableObject {
     /// SwiftUI observation — only StreamingTextView recomputes on text changes.
     let session = TranslationSessionStore()
 
+    /// Low-frequency configuration state (providers, languages, context toggle, etc.).
+    /// Views can observe `AppState.shared.configuration` for reactive settings updates.
+    let configuration = ConfigurationStore()
+
     var selectedProvider: APIProvider? { providers.first { $0.id == selectedProviderID && $0.isEnabled } }
     var enabledProviders: [APIProvider] { providers.filter(\.isEnabled) }
 
@@ -134,7 +138,7 @@ final class AppState: ObservableObject {
     func deleteProvider(_ p: APIProvider) {
         guard !p.isBuiltIn else { return }
         providers.removeAll { $0.id == p.id }
-        ProviderStorageManager.deleteProviderKey(id: p.id)
+        ProviderStorageManager.deleteProviderSecrets(for: p.id)
         if selectedProviderID == p.id { selectedProviderID = enabledProviders.first?.id }
         ProviderStorageManager.saveSelectedProviderID(selectedProviderID)
         save()
@@ -142,10 +146,13 @@ final class AppState: ObservableObject {
 
     func ensureKey(for provider: APIProvider) -> APIProvider {
         var p = provider
-        if p.apiKey.isEmpty, let key = ProviderStorageManager.loadProviderKey(for: p.id), !key.isEmpty {
-            p.apiKey = key
-            if let i = providers.firstIndex(where: { $0.id == p.id }) {
-                providers[i].apiKey = key
+        if p.apiKey.isEmpty {
+            let key = ProviderStorageManager.cachedValue(for: p.id, field: "apiKey")
+            if !key.isEmpty {
+                p.apiKey = key
+                if let i = providers.firstIndex(where: { $0.id == p.id }) {
+                    providers[i].apiKey = key
+                }
             }
         }
         return p
@@ -200,18 +207,59 @@ final class AppState: ObservableObject {
         translate()
     }
 
-    func translate() {
+    /// In-memory translation cache — avoids redundant API calls.
+    private let translationCache = NSCache<NSString, NSString>()
+
+    /// Builds a composite cache key using `Hasher`.
+    ///
+    /// The key combines source text, language direction, provider identity,
+    /// and — when context-aware translation is enabled — the leading and
+    /// trailing context strings.  This ensures that translating the same
+    /// source text with context ON vs OFF produces different cache entries.
+    private func buildCacheKey(text: String, provider: APIProvider,
+                                context: CapturedContext?) -> String {
+        var hasher = Hasher()
+        hasher.combine(text)
+        hasher.combine(targetLang.rawValue)
+        hasher.combine(provider.id)
+        // ── Context-aware gating ──
+        let ctxOn = configuration.isContextAwareEnabled
+        hasher.combine(ctxOn)
+        if ctxOn, let ctx = context {
+            hasher.combine(ctx.leadingContext)
+            hasher.combine(ctx.trailingContext)
+        }
+        return "ck_\(hasher.finalize())"
+    }
+
+    func translate(context: CapturedContext? = nil) {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         guard let p = selectedProvider, p.isEnabled else { errorMessage = "请先选择并配置一个可用的 API"; return }
+
+        // ── Cache gate ──
+        let cacheOn = configuration.isCacheEnabled
+
+        // ── Composite cache key: text + lang + provider + context-awareness state ──
+        let cacheKey = buildCacheKey(text: text, provider: p, context: context) as NSString
+        if cacheOn, let cached = translationCache.object(forKey: cacheKey) as String? {
+            translatedText = cached
+            isTranslating = false; streamingFinished = true
+            showSuccessPulse = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                self?.showSuccessPulse = false
+            }
+            return
+        }
+
         // Skip if nothing changed (same text, target, and provider)
         if text == lastText, targetLang == lastTarget, selectedProviderID == lastProviderID, !translatedText.isEmpty { return }
 
         retryCount = 0
-        doTranslate(text: text, provider: p)
+        doTranslate(text: text, provider: p, context: context)
     }
 
-    private func doTranslate(text: String, provider: APIProvider) {
+    private func doTranslate(text: String, provider: APIProvider, context: CapturedContext? = nil) {
         activeStreamTask?.cancel()
         isTranslating = true; errorMessage = nil; translatedText = ""
         streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
@@ -241,31 +289,36 @@ final class AppState: ObservableObject {
                 provider: effectiveProvider,
                 isDictionaryMode: isDict,
                 sourceLang: self.sourceLang,
-                targetLang: self.targetLang
+                targetLang: self.targetLang,
+                context: context
             )
 
             if isDict { self.isDictionaryMode = true }
 
+            // ── Pipeline now batches tokens at 30ms; no local throttling needed ──
             var fullText = ""
-            var lastFlush = ContinuousClock.Instant.now
-            let flushInterval = Duration.milliseconds(50)
 
             do {
-                for try await token in stream {
-                    fullText += token
-                    let now = ContinuousClock.Instant.now
-                    if !isDict, (now - lastFlush) >= flushInterval {
-                        self.translatedText = fullText
-                        lastFlush = now
+                for try await batch in stream {
+                    fullText += batch
+                    if !isDict {
+                        // Update UI safely on MainActor
+                        await MainActor.run { self.translatedText = fullText }
                     }
                 }
                 if !isDict {
-                    self.translatedText = fullText
+                    await MainActor.run { self.translatedText = fullText }
                 }
-                self.isTranslating = false
+                await MainActor.run { self.isTranslating = false }
                 self.streamingFinished = true
                 self.showSuccessPulse = true
-                self.isDictionaryMode = false
+
+                // ── Cache successful result (composite key) ──
+                if self.configuration.isCacheEnabled {
+                    let ck = self.buildCacheKey(text: text, provider: effectiveProvider, context: context) as NSString
+                    self.translationCache.setObject(fullText as NSString, forKey: ck)
+                    self.translationCache.countLimit = 80
+                }
 
                 if isDict {
                     if effectiveProvider.kind == .macOSNative {
@@ -273,6 +326,8 @@ final class AppState: ObservableObject {
                         self.dictionaryEntry = entry
                     } else if let entry = DictionaryEntry.parse(from: fullText, word: text) {
                         self.dictionaryEntry = entry
+                        // ── Hard-lock: cache last valid JSON for menu bar resilience ──
+                        self.session.lastValidDictionaryJson = fullText
                     } else {
                         self.dictionaryEntry = nil
                     }
@@ -284,7 +339,10 @@ final class AppState: ObservableObject {
                     self.showSuccessPulse = false
                 }
                 self.retryCount = 0
+                // ⚠️ addHistory must be called BEFORE isDictionaryMode reset,
+                // otherwise HistoryEntry.isDictionaryMode is always false
                 self.addHistory(text: text, result: fullText, provider: effectiveProvider)
+                self.isDictionaryMode = false
             } catch {
                 if isDict && effectiveProvider.kind != .macOSNative {
                     print("[DictFallback] ⚡️ Dictionary mode timed out, switching to macOS native dictionary")
@@ -314,7 +372,7 @@ final class AppState: ObservableObject {
                         self.selectedProviderID = next.id
                         ProviderStorageManager.saveSelectedProviderID(next.id)
                     }
-                    self.doTranslate(text: text, provider: next)
+                    self.doTranslate(text: text, provider: next, context: context)
                     return
                 }
 
@@ -400,12 +458,12 @@ final class AppState: ObservableObject {
 
     func addHistory(text: String, result: String, provider: APIProvider) {
         guard !UserDefaults.standard.bool(forKey: "history_disabled") else { return }
-        let entry = HistoryEntry(input: text, output: result, sourceLang: sourceLang, targetLang: targetLang, providerName: provider.name, model: provider.modelName)
+        let entry = HistoryEntry(input: text, output: result, sourceLang: sourceLang, targetLang: targetLang, providerName: provider.name, model: provider.modelName, isContextAwareEnabled: configuration.isContextAwareEnabled, isDictionaryMode: isDictionaryMode)
         Task { await HistoryActor.shared.add(entry) }
         translationHistory.insert(entry, at: 0)
-        let maxCount = UserDefaults.standard.integer(forKey: "max_history_count")
-        let limit = maxCount > 0 ? maxCount : 100
-        if translationHistory.count > limit { translationHistory = Array(translationHistory.prefix(limit)) }
+        // Cap in-memory UI array to 50 entries (matching UserDefaults trim level)
+        // Full history lives in history_archive.jsonl — loaded on demand
+        if translationHistory.count > 50 { translationHistory = Array(translationHistory.prefix(50)) }
     }
 
     func clearHistory() {
@@ -433,11 +491,17 @@ struct HistoryEntry: Identifiable, Codable, Equatable {
     let sourceLang: TranslationLanguage; let targetLang: TranslationLanguage
     let providerName: String; let model: String
     let timestamp: Date
+    /// Whether context-aware translation was enabled when this entry was created.
+    let isContextAwareEnabled: Bool
+    /// Whether this was a dictionary-mode lookup (word → structured JSON).
+    let isDictionaryMode: Bool
 
-    init(input: String, output: String, sourceLang: TranslationLanguage, targetLang: TranslationLanguage, providerName: String, model: String) {
+    init(input: String, output: String, sourceLang: TranslationLanguage, targetLang: TranslationLanguage, providerName: String, model: String, isContextAwareEnabled: Bool = false, isDictionaryMode: Bool = false) {
         self.id = UUID(); self.input = input; self.output = output
         self.sourceLang = sourceLang; self.targetLang = targetLang
         self.providerName = providerName; self.model = model
         self.timestamp = Date()
+        self.isContextAwareEnabled = isContextAwareEnabled
+        self.isDictionaryMode = isDictionaryMode
     }
 }

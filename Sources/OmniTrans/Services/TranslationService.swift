@@ -69,7 +69,7 @@ enum TranslationService {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await sharedURLSession.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw TranslationError.networkError("invalid") }
         guard http.statusCode == 200 else {
             let msg = (try? JSONDecoder().decode(OAIErr.self, from: data))?.error.message ?? "HTTP \(http.statusCode)"
@@ -99,7 +99,7 @@ enum TranslationService {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await sharedURLSession.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw TranslationError.networkError("invalid") }
         guard http.statusCode == 200 else {
             let msg = (try? JSONDecoder().decode(AnthErr.self, from: data))?.error.message ?? "HTTP \(http.statusCode)"
@@ -128,7 +128,7 @@ enum TranslationService {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await sharedURLSession.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw TranslationError.networkError("invalid") }
         guard http.statusCode == 200 else {
             let msg = (try? JSONDecoder().decode(GemErr.self, from: data))?.error.message ?? "HTTP \(http.statusCode)"

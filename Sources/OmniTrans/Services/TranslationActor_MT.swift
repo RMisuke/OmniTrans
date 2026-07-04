@@ -95,7 +95,7 @@ private enum SignerUtilities {
         req.httpMethod = "GET"
         req.timeoutInterval = 15
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await sharedURLSession.data(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无响应"])
         }

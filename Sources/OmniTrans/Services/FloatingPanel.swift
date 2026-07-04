@@ -17,8 +17,8 @@ final class FloatingPanel: NSPanel {
         titlebarAppearsTransparent = true
         titleVisibility = .hidden
         isMovableByWindowBackground = true
-        isOpaque = false
-        backgroundColor = .clear
+        isOpaque = true
+        backgroundColor = .windowBackgroundColor
         hasShadow = true
         isReleasedWhenClosed = false
         hidesOnDeactivate = false
@@ -77,27 +77,11 @@ final class FloatingPanel: NSPanel {
         contentView?.layer?.transform = CATransform3DIdentity
         alphaValue = 1.0
         makeKeyAndOrderFront(nil)
-
-        // Lightweight spring scale (render-server, non-blocking)
-        // Gate: skip when user disables animations
-        if AnimationGate.isEnabled, let cv = contentView {
-            let spring = CASpringAnimation(keyPath: "transform.scale")
-            spring.fromValue = 0.96
-            spring.toValue = 1.0
-            spring.mass = 0.8
-            spring.stiffness = 400
-            spring.damping = 18
-            spring.initialVelocity = 0.3
-            spring.duration = spring.settlingDuration
-            spring.fillMode = .forwards
-            spring.isRemovedOnCompletion = false
-            cv.layer?.add(spring, forKey: "popIn")
-        }
     }
 
     /// Smooth fade-out, then physically unload SwiftUI view tree to release memory.
     func hide() {
-        TTSManager.shared.stop()
+        Task { await TTSManager.shared.stop() }
         MemoryPurgeHelper.shared.purgeBackendCache()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
