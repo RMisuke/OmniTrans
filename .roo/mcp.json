@@ -17,6 +17,14 @@
         "--repository",
         "'/Users/chensinuo/Codex/AI Translater'"
       ]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/chensinuo/Codex/AI Translater"
+      ]
     }
   }
 }

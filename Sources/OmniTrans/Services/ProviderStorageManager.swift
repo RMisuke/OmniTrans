@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Static proxy for persistent storage.  Loads providers from UserDefaults,
 /// fills secret fields from an in-memory cache (populated once from Keychain),
@@ -15,38 +16,47 @@ enum ProviderStorageManager {
         static let history = "translation_history"
     }
 
-    // ── In-memory secret cache ──
-    nonisolated(unsafe) private static var secretCache: [UUID: KeychainFields] = [:]
-    nonisolated(unsafe) private static var cacheLoaded = false
+    // ── In-memory secret cache (thread-safe via OSAllocatedUnfairLock) ──
+    fileprivate static let cacheLock = OSAllocatedUnfairLock(initialState: (
+        cache: [UUID: KeychainFields](),
+        loaded: false
+    ))
 
     // MARK: - Cache
 
     static func preloadSecrets() {
-        guard !cacheLoaded else { return }
-        secretCache = KeychainManager.batchReadAll()
-        cacheLoaded = true
+        cacheLock.withLock { state in
+            guard !state.loaded else { return }
+            state.cache = KeychainManager.batchReadAll()
+            state.loaded = true
+        }
     }
 
     static func cachedFields(for providerID: UUID) -> KeychainFields {
-        secretCache[providerID] ?? KeychainFields()
+        cacheLock.withLock { state in
+            state.cache[providerID] ?? KeychainFields()
+        }
     }
 
     /// Single field lookup from cache — zero Keychain I/O.
     static func cachedValue(for providerID: UUID, field: String) -> String {
-        let f = secretCache[providerID] ?? KeychainFields()
-        switch field {
-        case "apiKey":    return f.apiKey
-        case "apiSecret": return f.apiSecret
-        case "region":    return f.customRegion
-        default:          return ""
+        cacheLock.withLock { state in
+            let f = state.cache[providerID] ?? KeychainFields()
+            switch field {
+            case "apiKey":    return f.apiKey
+            case "apiSecret": return f.apiSecret
+            case "region":    return f.customRegion
+            default:          return ""
+            }
         }
     }
 
     // MARK: - Providers
 
     static func loadProviders() -> [APIProvider] {
+        #if DEBUG
         print("[Storage] loadProviders called")
-        print("[Storage]   secretCache has (secretCache.count) entries")
+        #endif
         preloadSecrets()
         guard let data = UserDefaults.standard.data(forKey: Key.providers),
               let decoded = try? JSONDecoder().decode([APIProvider].self, from: data)
@@ -54,7 +64,7 @@ enum ProviderStorageManager {
 
         var providers = decoded
         for i in providers.indices {
-            let fields = secretCache[providers[i].id] ?? KeychainFields()
+            let fields = cacheLock.withLock { state in state.cache[providers[i].id] ?? KeychainFields() }
             if providers[i].apiKey.isEmpty && !fields.apiKey.isEmpty {
                 providers[i].apiKey = fields.apiKey
             }
@@ -69,10 +79,12 @@ enum ProviderStorageManager {
     }
 
     static func saveProviders(_ providers: [APIProvider]) {
-        print("[Storage] saveProviders called with (providers.count) providers")
+        #if DEBUG
+        print("[Storage] saveProviders called with \(providers.count) providers")
         for p in providers {
             print("[Storage]   provider \(p.name) (id=\(p.id)) apiKey=\(p.apiKey.prefix(6))... secret=\(p.apiSecret.prefix(6))...")
         }
+        #endif
         for p in providers {
             let fields = KeychainFields(
                 apiKey: p.apiKey,
@@ -81,10 +93,10 @@ enum ProviderStorageManager {
             )
             if !fields.isEmpty {
                 KeychainManager.saveFields(fields, for: p.id)
-                secretCache[p.id] = fields
+                _ = cacheLock.withLock { state in state.cache[p.id] = fields }
             } else {
                 KeychainManager.deleteAllFields(for: p.id)
-                secretCache.removeValue(forKey: p.id)
+                _ = cacheLock.withLock { state in state.cache.removeValue(forKey: p.id) }
             }
         }
 
@@ -101,7 +113,7 @@ enum ProviderStorageManager {
 
     static func deleteProviderSecrets(for id: UUID) {
         KeychainManager.deleteAllFields(for: id)
-        secretCache.removeValue(forKey: id)
+        _ = cacheLock.withLock { state in state.cache.removeValue(forKey: id) }
     }
 
     // MARK: - Languages

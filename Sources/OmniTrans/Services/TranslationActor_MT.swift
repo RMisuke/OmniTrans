@@ -14,12 +14,44 @@ extension String {
         return (try? NSAttributedString(data: data, options: options, documentAttributes: nil).string) ?? self
     }
 
+    /// Redacts sensitive query parameters (AccessKeyId, SecretKey, Signature, key, api_key)
+    /// from URL strings for safe logging. (S2)
+    func redactSensitiveParams() -> String {
+        let patterns: [(String, String)] = [
+            ("AccessKeyId=[^&]+", "AccessKeyId=***"),
+            ("Signature=[^&]+", "Signature=***"),
+            ("key=[^&]+", "key=***"),
+            ("api_key=[^&]+", "api_key=***"),
+        ]
+        var result = self
+        for (pattern, replacement) in patterns {
+            result = result.replacingOccurrences(
+                of: pattern, with: replacement,
+                options: .regularExpression
+            )
+        }
+        return result
+    }
+
     /// Extracts content between `<tag>` and `</tag>` from XML.
+    /// Uses simple string scanning — suitable for known, simple XML shapes.
+    /// Prefer `xmlTagValue(_:)` for production paths where XML structure may vary.
     func extractXMLTag(_ tag: String) -> String? {
         guard let start = range(of: "<\(tag)>"),
               let end = range(of: "</\(tag)>")
         else { return nil }
         return String(self[start.upperBound..<end.lowerBound])
+    }
+
+    /// Robust XML tag value extraction via `XMLDocument` + XPath. (M6)
+    /// Handles namespaces, attributes, extra whitespace, and self-closing tags
+    /// that `extractXMLTag` cannot parse.
+    func xmlTagValue(_ tag: String) -> String? {
+        guard let data = self.data(using: .utf8) else { return nil }
+        // Suppress XML parser warnings (e.g. DTD loading)
+        let doc = try? XMLDocument(data: data, options: [.documentTidyXML, .nodeLoadExternalEntitiesNever])
+        return try? doc?.nodes(forXPath: "//\(tag)").first?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -93,7 +125,7 @@ private enum SignerUtilities {
         }
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        req.timeoutInterval = 15
+        req.timeoutInterval = NetworkConfig.mtTimeout
 
         let (data, resp) = try await sharedURLSession.data(for: req)
         guard let http = resp as? HTTPURLResponse else {
@@ -103,8 +135,8 @@ private enum SignerUtilities {
         let body = String(data: data, encoding: .utf8) ?? ""
 
         guard http.statusCode == 200 else {
-            let code = body.extractXMLTag("Code") ?? "Unknown"
-            let msg = body.extractXMLTag("Message") ?? body
+            let code = body.xmlTagValue("Code") ?? "Unknown"
+            let msg = body.xmlTagValue("Message") ?? body
             print("[\(label)Test] ❌ [\(code)] \(msg)")
             throw NSError(domain: "", code: http.statusCode,
                 userInfo: [NSLocalizedDescriptionKey: "\(label) [\(code)] \(msg)"])
@@ -170,7 +202,7 @@ enum AlibabaCloudSigner {
             accessKey: accessKeyId, secretKey: accessKeySecret,
             params: params, hash: Insecure.SHA1.self, label: "Alibaba"
         ) { body in
-            if let translated = body.extractXMLTag("Translated") {
+            if let translated = body.xmlTagValue("Translated") {
                 print("[AlibabaTest] ✅ hello → \(translated)")
             }
         }
@@ -196,7 +228,7 @@ enum VolcengineSigner {
             ("Version", "2020-06-01"),
             ("SourceLanguage", sourceLanguage),
             ("TargetLanguage", targetLanguage),
-            ("TextList", "[\(sourceText.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? sourceText)]"),
+            ("TextList", "[\(SignerUtilities.percentEncode(sourceText))]"), // M5: proper RFC 3986 encoding
             ("SignatureMethod", "HMAC-SHA256"),
             ("SignatureNonce", nonce),
             ("SignatureVersion", "1.0"),

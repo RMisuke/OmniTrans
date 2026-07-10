@@ -77,13 +77,22 @@ enum ContextAwareService {
         let trailing = String(ctx.trailingContext.prefix(limit))
 
         let contextBlock = """
-        ---
-        【重要语境参考说明】：
-        用户当前正在翻译双横线内部的文本。为了提供更精准、符合语境（如代词指代、专业术语、语气连贯性）的翻译，请参考以下该文本在原文中的上下文（上下文字符已被截断，仅供参考）：
-        【上文】：\(leading)
-        【被翻译目标文本】：\(ctx.selectedText)
-        【下文】：\(trailing)
-        请直接输出被翻译目标文本的流式译文，不要对上下文内容进行翻译或解释。
+        <ContextAwareness>
+        Use the surrounding context to ensure accurate pronoun resolution, terminology, and cohesion.
+        Do NOT translate the <Prefix> or <Suffix>. ONLY translate the <Target> text.
+
+        <Prefix>
+        \(leading)
+        </Prefix>
+
+        <Target>
+        \(ctx.selectedText)
+        </Target>
+
+        <Suffix>
+        \(trailing)
+        </Suffix>
+        </ContextAwareness>
         """
 
         return basePrompt + "\n\n" + contextBlock

@@ -1,0 +1,35 @@
+{
+	"servers": {
+		"qdrant": {
+			"command": "uvx",
+			"args": [
+				"mcp-server-qdrant"
+			],
+			"env": {
+				"QDRANT_URL": "${input:qdrantUrl}",
+				"QDRANT_API_KEY": "${input:qdrantApiKey}",
+				"COLLECTION_NAME": "${input:collectionName}"
+
+			},
+			"type": "stdio"
+		}
+	},
+	"inputs": [
+		{
+			"type": "promptString",
+			"id": "qdrantUrl",
+			"description": "Qdrant URL"
+		},
+		{
+			"type": "promptString",
+			"id": "qdrantApiKey",
+			"description": "Qdrant API Key",
+			"password": true
+		},
+		{
+			"type": "promptString",
+			"id": "collectionName",
+			"description": "Collection Name"
+		}
+	]
+}

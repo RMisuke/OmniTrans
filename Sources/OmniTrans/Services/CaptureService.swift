@@ -25,23 +25,31 @@ final class ScreenCaptureService: CaptureServiceProtocol {
 
     func capture(appKitRect: CGRect, excludingWindowID: CGWindowID) async -> CVPixelBuffer? {
         do {
-            let content = try await SCShareableContent.current
+            // SCShareableContent.current must be called from the main actor
+            // per Apple's documentation; failing to do so can produce stale
+            // window lists or spurious authorization failures.
+            let content = try await Task { @MainActor in try await SCShareableContent.current }.value
             let midPoint = CGPoint(x: appKitRect.midX, y: appKitRect.midY)
 
             guard let display = content.displays.first(where: { $0.frame.contains(midPoint) })
                     ?? content.displays.first else { return nil }
 
-            // Convert global AppKit rect → display-local CG rect
-            let displayOrigin = display.frame.origin
-            let displayHeight  = display.frame.height
+            // Convert global AppKit rect → display-local CG rect.
+            // Use NSScreen (AppKit coords) for ALL coordinate math to
+            // avoid the NSScreen.frame (bottom-left origin) vs
+            // SCDisplay.frame (top-left origin) mismatch that causes
+            // capture-region offset on non-primary displays.
+            guard let screen = NSScreen.screens.first(where: { $0.frame.contains(midPoint) })
+                    ?? NSScreen.main else { return nil }
+            let screenFrame = screen.frame
+            let scale = screen.backingScaleFactor
 
-            let localX = appKitRect.origin.x - displayOrigin.x
-            let localY = appKitRect.origin.y - displayOrigin.y
-            // Y-flip: AppKit bottom-left → CG top-left
-            let cgY = displayHeight - (localY + appKitRect.height)
-
+            let localAppKitX = appKitRect.origin.x - screenFrame.origin.x
+            let localAppKitY = appKitRect.origin.y - screenFrame.origin.y
+            // Y-flip within this single screen's frame — no cross-coordinate-system arithmetic
+            let localCGY = screenFrame.height - localAppKitY - appKitRect.height
             let sourceRect = CGRect(
-                x: localX, y: cgY,
+                x: localAppKitX, y: localCGY,
                 width: appKitRect.width, height: appKitRect.height
             )
 
@@ -52,11 +60,23 @@ final class ScreenCaptureService: CaptureServiceProtocol {
             config.showsCursor = false
             config.pixelFormat = kCVPixelFormatType_32BGRA
             config.sourceRect = sourceRect
-            config.width  = Int(sourceRect.width)
-            config.height = Int(sourceRect.height)
+            config.width  = Int(sourceRect.width * scale)
+            config.height = Int(sourceRect.height * scale)
             config.queueDepth = 1
 
+            print("[OCR] Capturing region=local\(sourceRect) scale=\(scale) output=\(config.width)×\(config.height) screen=\(screenFrame)")
+
             return try await captureSingleFrame(filter: filter, configuration: config)
+        } catch let error as SCStreamError {
+            // SCStreamError: -3808 = user-declined screen capture permission;
+            // -3815 = stream already started; others = transient.
+            let code = error.code
+            if code.rawValue == -3808 {
+                print("[SCK] Screen Recording permission denied — grant in System Settings → Privacy → Screen Recording")
+            } else {
+                print("[SCK] Stream error \(code.rawValue): \(error.localizedDescription)")
+            }
+            return nil
         } catch {
             print("[SCK] Capture failed: \(error.localizedDescription)")
             return nil
@@ -65,6 +85,11 @@ final class ScreenCaptureService: CaptureServiceProtocol {
 
     /// Creates an ephemeral `SCStream`, attaches a single-shot output handler,
     /// starts the stream, waits for the first `CVPixelBuffer`, then stops.
+    ///
+    /// Wrapped in a 3-second timeout — if `SCStream.startCapture()` succeeds
+    /// but never produces a frame (known SCK issue during display topology
+    /// changes, GPU starvation, or window-server congestion), the continuation
+    /// is resumed with `nil` rather than hanging the calling `Task` forever.
     private func captureSingleFrame(
         filter: SCContentFilter,
         configuration: SCStreamConfiguration
@@ -75,16 +100,39 @@ final class ScreenCaptureService: CaptureServiceProtocol {
         try stream.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: .global(qos: .userInitiated))
         try await stream.startCapture()
 
-        // Wait for the first frame (or error) with a continuation
-        return try await withCheckedThrowingContinuation { continuation in
-            streamOutput.onFrame = { buffer in
-                continuation.resume(returning: buffer)
+        return try await withThrowingTaskGroup(of: CVPixelBuffer?.self) { group in
+            // Frame task — resumes when the first buffer arrives (or on error)
+            group.addTask {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CVPixelBuffer?, Error>) in
+                    streamOutput.onFrame = { @Sendable buffer in
+                        continuation.resume(returning: buffer)
+                    }
+                    streamOutput.onError = { error in
+                        continuation.resume(throwing: error)
+                    }
+                    streamOutput.stream = stream
+                }
             }
-            streamOutput.onError = { error in
-                continuation.resume(throwing: error)
+
+            // Timeout task — fires after 3 s (was 1.5s — M1 SCStream
+            // need more time during display congestion)
+            group.addTask {
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+                print("[OCR] ⏱ Frame capture timed out after 3.0s")
+                // Stop the stream best-effort; don't wait for completion
+                Task { try? await stream.stopCapture() }
+                return nil
             }
-            // Stream teardown happens inside the callbacks
-            streamOutput.stream = stream
+
+            // Return whichever completes first
+            let result = try await group.next() ?? nil
+            group.cancelAll()
+
+            // Fire-and-forget stream teardown — stopCapture() can block
+            // indefinitely on some macOS versions; we never await it.
+            Task.detached { try? await stream.stopCapture() }
+
+            return result
         }
     }
 }
@@ -94,27 +142,33 @@ final class ScreenCaptureService: CaptureServiceProtocol {
 /// Captures the first `CVPixelBuffer` from an `SCStream` and fires the
 /// completion callback exactly once, then stops the stream.
 ///
-/// Uses `@unchecked Sendable` with internal synchronization via a
-/// `OSAllocatedUnfairLock`-guarded flag to satisfy Swift 6 concurrency
-/// safety while allowing the mutable `hasFired` state required by the
-/// `SCStreamOutput` delegate pattern.
+/// Uses `@unchecked Sendable` with internal synchronization via an
+/// `NSLock`-guarded flag to satisfy Swift 6 concurrency safety while
+/// allowing the mutable state required by the `SCStreamOutput` delegate
+/// pattern.  `markFired()` performs an atomic check-and-set so that
+/// `didOutputSampleBuffer` and `didStopWithError` cannot both resume
+/// the continuation.
 private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
-    var onFrame: (@Sendable (CVPixelBuffer) -> Void)?
-    var onError: (@Sendable (Error) -> Void)?
-    var stream: SCStream?
+    nonisolated(unsafe) var onFrame: (@Sendable (CVPixelBuffer) -> Void)?
+    nonisolated(unsafe) var onError: (@Sendable (Error) -> Void)?
+    nonisolated(unsafe) var stream: SCStream?
 
     private nonisolated(unsafe) var _hasFired = false
     private let _lock = NSLock()
 
-    private var hasFired: Bool {
-        get { _lock.withLock { _hasFired } }
-        set { _lock.withLock { _hasFired = newValue } }
+    /// Atomically checks whether the output has already fired.
+    /// Returns `true` if it has; otherwise sets the flag and returns `false`.
+    private func markFired() -> Bool {
+        _lock.lock()
+        defer { _lock.unlock() }
+        if _hasFired { return true }
+        _hasFired = true
+        return false
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
-        guard !hasFired else { return }
-        hasFired = true
+        guard !markFired() else { return }
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
             onError?(NSError(domain: "SCK", code: -1,
@@ -122,19 +176,15 @@ private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecke
             return
         }
 
-        // Stop the stream asynchronously, then deliver the buffer.
-        // The pixel buffer is retained by the sample buffer's lifetime;
-        // we deliver it before the stream fully stops to avoid pool teardown.
         let buffer = pixelBuffer
-        Task {
-            try? await stream.stopCapture()
-            self.onFrame?(buffer)
-        }
+        // Fire-and-forget stopCapture — SCStream.stopCapture() can block
+        // indefinitely on certain macOS versions; we never await it.
+        Task.detached { try? await stream.stopCapture() }
+        onFrame?(buffer)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        guard !hasFired else { return }
-        hasFired = true
+        guard !markFired() else { return }
         onError?(error)
     }
 }

@@ -17,7 +17,7 @@ enum APITestService {
         let start = Date()
         do {
             switch provider.kind {
-            case .openAI, .openAICompat:
+            case .openAI, .openAICompat, .ollama:
                 try await testOpenAI(provider: provider)
             case .anthropic:
                 try await testAnthropic(provider: provider)
@@ -46,7 +46,7 @@ enum APITestService {
     static func fetchModels(for provider: APIProvider) async -> ModelListResult {
         do {
             switch provider.kind {
-            case .openAI, .openAICompat:
+            case .openAI, .openAICompat, .ollama:
                 return try await fetchOpenAIModels(provider: provider)
             case .anthropic:
                 return try await fetchAnthropicModels(provider: provider)
@@ -76,9 +76,9 @@ enum APITestService {
         }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 15
+        request.timeoutInterval = NetworkConfig.modelFetchTimeout
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await sharedURLSession.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效响应"]) }
         guard http.statusCode == 200 else {
             throw NSError(domain: "", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
@@ -114,9 +114,9 @@ enum APITestService {
         }
         var request = URLRequest(url: url)
         request.setValue(provider.apiKey, forHTTPHeaderField: "x-goog-api-key")
-        request.timeoutInterval = 15
+        request.timeoutInterval = NetworkConfig.modelFetchTimeout
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await sharedURLSession.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效响应"]) }
         guard http.statusCode == 200 else {
             throw NSError(domain: "", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
@@ -133,6 +133,42 @@ enum APITestService {
         return .success(names.isEmpty ? ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"] : names)
     }
 
+    /// Shared timeout (seconds) for all connectivity probes.
+    /// 3 s is enough for TLS handshake + headers on modern CDN-backed APIs,
+    /// while failing fast enough to keep the indicator responsive.
+    private static let probeTimeout: TimeInterval = NetworkConfig.probeTimeout
+
+    /// Extracts a human-readable error message from a JSON error body
+    /// (OpenAI / Anthropic / Google formats).  Falls back to raw HTTP status.
+    private static func parseErrorBody(_ data: Data, statusCode: Int) -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "HTTP \(statusCode)"
+        }
+        // OpenAI / Anthropic: {"error": {"message": "..."}}
+        if let err = json["error"] as? [String: Any], let msg = err["message"] as? String {
+            return msg
+        }
+        // Google: {"error": {"message": "..."}}  or  {"error": {"code": ..., "message": "..."}}
+        if let err = json["error"] as? [String: Any], let msg = err["message"] as? String {
+            return msg
+        }
+        // Generic: any "message" key at top level
+        if let msg = json["message"] as? String { return msg }
+        return "HTTP \(statusCode)"
+    }
+
+    /// Validates an HTTP response.  Throws with a parsed error message
+    /// for any status outside 200…299.
+    private static func validateProbeResponse(data: Data, response: URLResponse) throws {
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效响应"])
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let msg = parseErrorBody(data, statusCode: http.statusCode)
+            throw NSError(domain: "", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+    }
+
     // MARK: - Private: Test helpers
 
     private static func testOpenAI(provider: APIProvider) async throws {
@@ -141,13 +177,9 @@ enum APITestService {
         }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 15
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效响应"]) }
-        guard http.statusCode == 200 else {
-            throw NSError(domain: "", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
-        }
-        _ = try JSONSerialization.jsonObject(with: data)
+        request.timeoutInterval = probeTimeout
+        let (data, response) = try await sharedURLSession.data(for: request)
+        try validateProbeResponse(data: data, response: response)
     }
 
     private static func testAnthropic(provider: APIProvider) async throws {
@@ -159,15 +191,11 @@ enum APITestService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(provider.apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.timeoutInterval = 15
+        request.timeoutInterval = probeTimeout
         let body: [String: Any] = ["model": provider.modelName, "max_tokens": 10, "messages": [["role": "user", "content": "hi"]]]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效响应"]) }
-        guard http.statusCode == 200 else {
-            throw NSError(domain: "", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
-        }
-        _ = try JSONSerialization.jsonObject(with: data)
+        let (data, response) = try await sharedURLSession.data(for: request)
+        try validateProbeResponse(data: data, response: response)
     }
 
     private static func testGoogle(provider: APIProvider) async throws {
@@ -175,33 +203,25 @@ enum APITestService {
             throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的 API 地址"])
         }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 15
+        request.timeoutInterval = probeTimeout
         request.setValue(provider.apiKey, forHTTPHeaderField: "x-goog-api-key")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效响应"]) }
-        guard http.statusCode == 200 else {
-            throw NSError(domain: "", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
-        }
-        _ = try JSONSerialization.jsonObject(with: data)
+        let (data, response) = try await sharedURLSession.data(for: request)
+        try validateProbeResponse(data: data, response: response)
     }
 
     // MARK: - Private: MT test helpers
 
     private static func testGoogleMT(provider: APIProvider) async throws {
-        var components = URLComponents(string: provider.baseURL)!
-        components.queryItems = [URLQueryItem(name: "key", value: provider.apiKey)]
-        guard let url = components.url else { throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效地址"]) }
+        guard let url = URL(string: provider.baseURL) else { throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效地址"]) }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 15
+        req.setValue(provider.apiKey, forHTTPHeaderField: "X-goog-api-key") // S1: header, not URL query
+        req.timeoutInterval = probeTimeout
         let body: [String: Any] = ["q": "test", "target": "zh", "format": "text"]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "Google MT 认证失败"])
-        }
-        _ = try JSONSerialization.jsonObject(with: data)
+        let (data, resp) = try await sharedURLSession.data(for: req)
+        try validateProbeResponse(data: data, response: resp)
     }
 
     private static func testBingMT(provider: APIProvider) async throws {
@@ -212,12 +232,9 @@ enum APITestService {
         var req = URLRequest(url: url)
         req.setValue(provider.apiKey, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
         req.setValue(region, forHTTPHeaderField: "Ocp-Apim-Subscription-Region")
-        req.timeoutInterval = 15
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "Bing MT 认证失败，请检查 Key 和 Region"])
-        }
-        _ = try JSONSerialization.jsonObject(with: data)
+        req.timeoutInterval = probeTimeout
+        let (data, resp) = try await sharedURLSession.data(for: req)
+        try validateProbeResponse(data: data, response: resp)
     }
 
     private static func testAlibabaMT(provider: APIProvider) async throws {

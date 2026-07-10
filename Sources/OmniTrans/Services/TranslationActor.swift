@@ -1,4 +1,74 @@
 import Foundation
+import CryptoKit
+
+// MARK: - Pinning Configuration
+
+/// Read pinned key hashes from UserDefaults so they can be configured
+/// without recompiling.  Set a comma‑separated list under key `pinned_key_hashes`,
+/// e.g.  `"sha256=AAAA...,sha256=BBBB..."`.
+enum PinningConfig {
+    /// Returns the current set of pinned hashes from UserDefaults.
+    /// Empty set → no pinning (backward‑compatible default).
+    static var currentHashes: Set<String> {
+        let raw = UserDefaults.standard.string(forKey: "pinned_key_hashes") ?? ""
+        guard !raw.isEmpty else { return [] }
+        let parts = raw.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+        return Set(parts)
+    }
+}
+
+// MARK: - SSL Pinning Delegate (S3)
+
+/// URLSession delegate that validates server certificates via public-key pinning.
+///
+/// Pinned hashes are configured through `PinningConfig.currentHashes`
+/// (backed by UserDefaults `pinned_key_hashes`).  When the set is empty,
+/// all certificates are accepted (backward‑compatible default).
+///
+/// - Important: `@unchecked Sendable` is required because `NSObject` is not
+///   `Sendable` in Swift 6, yet `URLSessionDelegate` callbacks are always
+///   invoked on the session's delegate queue — never concurrently.
+final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+    nonisolated(unsafe) static let shared = PinningDelegate()
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        // No pins configured → accept any valid certificate
+        let pinned = PinningConfig.currentHashes
+        guard !pinned.isEmpty else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust
+        else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        guard SecTrustEvaluateWithError(serverTrust, nil),
+              let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate],
+              let firstCert = certChain.first,
+              let serverKey = SecCertificateCopyKey(firstCert),
+              let keyData = SecKeyCopyExternalRepresentation(serverKey, nil) as Data?
+        else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        let hash = SHA256.hash(data: keyData).compactMap { String(format: "%02x", $0) }.joined()
+
+        if pinned.contains(hash) {
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        } else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+        }
+    }
+}
 
 // MARK: - Shared URLSession (HTTP/2 Pipelining + Connection Reuse)
 
@@ -10,19 +80,34 @@ import Foundation
 /// - `httpShouldUsePipelining = true` — enables HTTP/2 multiplexing
 /// - `httpMaximumConnectionsPerHost = 10` — allows concurrent streams
 /// - No URL cache — SSE streaming is incompatible with caching
-/// Module-internal shared `URLSession` singleton — used by `TranslationActor`
-/// and `TranslationService` for all HTTP requests.  HTTP/2 multiplexing
-/// eliminates per-request TCP/TLS handshake overhead.
+/// - `waitsForConnectivity` — retries transient network failures instead of fast-fail
+/// - `multipathServiceType = .handover` — seamless WiFi/cellular failover
+/// - `Accept-Encoding: gzip` — response compression for faster transfers
+/// - `PinningDelegate` — optional certificate pinning (no-op when pin list is empty)
+///
+/// Module-internal shared `URLSession` singleton — used by `TranslationActor`,
+/// `TranslationService`, `APITestService`, and `FallbackRouter` for ALL HTTP
+/// requests.  HTTP/2 multiplexing eliminates per-request TCP/TLS handshake overhead.
+let pinningDelegate = PinningDelegate.shared
+
 let sharedURLSession: URLSession = {
     let config = URLSessionConfiguration.default
     config.httpShouldUsePipelining = true
-    config.httpMaximumConnectionsPerHost = 10
+    config.httpMaximumConnectionsPerHost = NetworkConfig.maxConnectionsPerHost
     config.urlCache = nil
     config.requestCachePolicy = .reloadIgnoringLocalCacheData
-    // Keep-Alive is enabled by default for HTTP/1.1+ with default config
-    config.timeoutIntervalForRequest = 30
-    config.timeoutIntervalForResource = 60
-    return URLSession(configuration: config)
+    config.timeoutIntervalForRequest = NetworkConfig.requestTimeout
+    config.timeoutIntervalForResource = NetworkConfig.resourceTimeout
+    // ── Connection resilience (P1) ──
+    config.waitsForConnectivity = NetworkConfig.waitsForConnectivity
+    config.allowsExpensiveNetworkAccess = true
+    config.allowsConstrainedNetworkAccess = true
+    // Demand gzip — many providers (OpenAI, Anthropic, Google) already
+    // compress by default, but the explicit header ensures consistent behaviour.
+    var headers = config.httpAdditionalHeaders ?? [:]
+    headers["Accept-Encoding"] = "gzip, identity"
+    config.httpAdditionalHeaders = headers
+    return URLSession(configuration: config, delegate: pinningDelegate, delegateQueue: nil)
 }()
 
 // MARK: - Translation Actor
@@ -46,11 +131,13 @@ actor TranslationActor {
     /// Executes an HTTP request, validates status 200, returns response data.
     /// Used by all traditional MT methods to eliminate boilerplate.
     private func executeMTRequest(_ req: URLRequest, label: String) async throws -> Data {
+        NetworkLogger.logRequest(req, label: label)
         try Task.checkCancellation()
         let (data, resp) = try await makeSession().data(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw TranslationService.TranslationError.networkError("\(label): 无效响应")
         }
+        NetworkLogger.logResponse(http, data: data, label: label)
         guard http.statusCode == 200 else {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw TranslationService.TranslationError.apiError("\(label) HTTP \(http.statusCode): \(body.prefix(200))")
@@ -92,8 +179,10 @@ actor TranslationActor {
         guard let http, http.statusCode == 200 else {
             let body = try await readErrorBody(from: bytes)
             let msg = errorDecoder(body)
+            NetworkLogger.logError("SSE", TranslationService.TranslationError.apiError(msg))
             throw TranslationService.TranslationError.apiError(msg)
         }
+        NetworkLogger.logResponse(http, label: "SSE")
     }
 
     // MARK: - Streaming (primary path)
@@ -152,21 +241,36 @@ actor TranslationActor {
         }
     }
 
-    // MARK: - Non-streaming (fallback)
+    // MARK: - Non-streaming (single-shot — AI + MT)
 
-    func translate(
+    /// Single-shot translation for all provider kinds.
+    /// AI providers (OpenAI, Anthropic, Gemini) use REST non-streaming.
+    /// Traditional MT providers (Google, Bing, Alibaba, Volcengine) use native single-shot.
+    func nonStreamingTranslate(
         text: String,
         sourceLang: TranslationLanguage,
         targetLang: TranslationLanguage,
         provider: APIProvider
     ) async throws -> TranslationService.TranslationResult {
-        try await TranslationService.translate(
-            text: text, sourceLang: sourceLang,
-            targetLang: targetLang, using: provider
-        )
+        switch provider.kind {
+        case .openAI, .openAICompat, .ollama:
+            return try await nonStreamingOpenAI(text: text, src: sourceLang, tgt: targetLang, provider: provider)
+        case .anthropic:
+            return try await nonStreamingAnthropic(text: text, src: sourceLang, tgt: targetLang, provider: provider)
+        case .gemini:
+            return try await nonStreamingGemini(text: text, src: sourceLang, tgt: targetLang, provider: provider)
+        case .macOSNative:
+            throw TranslationService.TranslationError.apiError("macOS Native should be handled locally")
+        case .googleMT, .bingMT, .alibabaMT, .volcengineMT:
+            let result = try await mtTranslate(text: text, tgt: targetLang, provider: provider)
+            return TranslationService.TranslationResult(
+                text: result, providerName: provider.name,
+                model: provider.modelName, tokensUsed: 0
+            )
+        }
     }
 
-    // MARK: - Traditional MT (single-shot, used by TranslationService fallback)
+    // MARK: - Traditional MT (single-shot)
 
     func mtTranslate(
         text: String,
@@ -198,8 +302,9 @@ actor TranslationActor {
         isDictionaryMode: Bool = false,
         context: CapturedContext? = nil
     ) async throws {
+        NetworkLogger.log("Stream", "starting provider=\(provider.name) kind=\(provider.kind) dict=\(isDictionaryMode) text=\(text.prefix(40))")
         switch provider.kind {
-        case .openAI, .openAICompat:
+        case .openAI, .openAICompat, .ollama:
             try await openAIStream(text, sourceLang, targetLang, provider, continuation, isDictionaryMode: isDictionaryMode, context: context)
         case .anthropic:
             try await anthropicStream(text, sourceLang, targetLang, provider, continuation, isDictionaryMode: isDictionaryMode, context: context)
@@ -241,17 +346,22 @@ actor TranslationActor {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(p.apiKey)", forHTTPHeaderField: "Authorization")
-        req.timeoutInterval = 30
+        req.timeoutInterval = NetworkConfig.streamingTimeout
 
-        var body: [String: Any] = [
-            "model": p.modelName, "temperature": 0.1,
-            "max_tokens": p.maxTokens, "stream": true,
-            "messages": [["role": "system", "content": hint], ["role": "user", "content": text]]
-        ]
-        if isDictionaryMode && p.kind == .openAICompat {
-            body["response_format"] = ["type": "json_object"]
-        }
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let requestBody = OAIChatCompletionRequest(
+            model: p.modelName,
+            messages: [
+                .init(role: "system", content: hint),
+                .init(role: "user", content: text)
+            ],
+            temperature: p.temperature,
+            maxTokens: p.maxTokens,
+            stream: true,
+            responseFormat: (isDictionaryMode && p.kind == .openAICompat)
+                ? .init(type: "json_object")
+                : nil
+        )
+        req.httpBody = try JSONEncoder().encode(requestBody)
 
         let session = makeSession()
         let (bytes, resp) = try await session.bytes(for: req)
@@ -282,14 +392,17 @@ actor TranslationActor {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(p.apiKey, forHTTPHeaderField: "x-api-key")
         req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        req.timeoutInterval = 30
+        req.timeoutInterval = NetworkConfig.streamingTimeout
 
-        let body: [String: Any] = [
-            "model": p.modelName, "max_tokens": p.maxTokens,
-            "stream": true,
-            "messages": [["role": "user", "content": "\(hint)\n\n\(text)"]]
-        ]
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let requestBody = AnthMessagesRequest(
+            model: p.modelName,
+            maxTokens: p.maxTokens,
+            temperature: p.temperature,
+            stream: true,
+            system: nil, // hint baked into user message below (preserving existing behavior)
+            messages: [.init(role: "user", content: "\(hint)\n\n\(text)")]
+        )
+        req.httpBody = try JSONEncoder().encode(requestBody)
 
         let session = makeSession()
         let (bytes, resp) = try await session.bytes(for: req)
@@ -319,13 +432,13 @@ actor TranslationActor {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(p.apiKey, forHTTPHeaderField: "x-goog-api-key")
-        req.timeoutInterval = 30
+        req.timeoutInterval = NetworkConfig.streamingTimeout
 
-        let body: [String: Any] = [
-            "contents": [["parts": [["text": "\(hint)\n\n\(text)"]]]],
-            "generationConfig": ["temperature": p.temperature, "maxOutputTokens": p.maxTokens]
-        ]
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let requestBody = GeminiRequest(
+            contents: [.init(parts: [.init(text: "\(hint)\n\n\(text)")])],
+            generationConfig: .init(temperature: p.temperature, maxOutputTokens: p.maxTokens)
+        )
+        req.httpBody = try JSONEncoder().encode(requestBody)
 
         let session = makeSession()
         let (bytes, resp) = try await session.bytes(for: req)
@@ -351,20 +464,162 @@ actor TranslationActor {
         continuation.yield(result)
     }
 
+    // MARK: - Non-streaming AI (single-shot REST)
+
+    /// Non-streaming OpenAI-compatible (used for fallback when streaming fails).
+    private func nonStreamingOpenAI(
+        text: String, src: TranslationLanguage, tgt: TranslationLanguage,
+        provider p: APIProvider
+    ) async throws -> TranslationService.TranslationResult {
+        guard let url = URL(string: "\(p.baseURL)/chat/completions") else {
+            throw TranslationService.TranslationError.malformedURL("\(p.baseURL)/chat/completions")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(p.apiKey)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = NetworkConfig.nonStreamingTimeout
+
+        let hint = nonStreamingHint(src: src, tgt: tgt)
+        let requestBody = OAIChatCompletionRequest(
+            model: p.modelName,
+            messages: [
+                .init(role: "system", content: hint),
+                .init(role: "user", content: text)
+            ],
+            temperature: p.temperature,
+            maxTokens: p.maxTokens,
+            stream: false,
+            responseFormat: nil
+        )
+        req.httpBody = try JSONEncoder().encode(requestBody)
+
+        let (data, resp) = try await sharedURLSession.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw TranslationService.TranslationError.networkError("invalid")
+        }
+        guard http.statusCode == 200 else {
+            let msg = (try? JSONDecoder().decode(OAIErr.self, from: data))?.error.message ?? "HTTP \(http.statusCode)"
+            throw TranslationService.TranslationError.apiError(msg)
+        }
+        let r = try JSONDecoder().decode(OAIResp.self, from: data)
+        guard let c = r.choices.first?.message.content else {
+            throw TranslationService.TranslationError.invalidResponse
+        }
+        return TranslationService.TranslationResult(
+            text: c.trimmingCharacters(in: .whitespacesAndNewlines),
+            providerName: p.name, model: p.modelName,
+            tokensUsed: r.usage?.totalTokens ?? 0
+        )
+    }
+
+    /// Non-streaming Anthropic (used for fallback when streaming fails).
+    private func nonStreamingAnthropic(
+        text: String, src: TranslationLanguage, tgt: TranslationLanguage,
+        provider p: APIProvider
+    ) async throws -> TranslationService.TranslationResult {
+        guard let url = URL(string: "\(p.baseURL)/v1/messages") else {
+            throw TranslationService.TranslationError.malformedURL("\(p.baseURL)/v1/messages")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(p.apiKey, forHTTPHeaderField: "x-api-key")
+        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        req.timeoutInterval = NetworkConfig.nonStreamingTimeout
+
+        let hint = nonStreamingHint(src: src, tgt: tgt)
+        let requestBody = AnthMessagesRequest(
+            model: p.modelName,
+            maxTokens: p.maxTokens,
+            temperature: p.temperature,
+            stream: false,
+            system: hint,
+            messages: [.init(role: "user", content: text)]
+        )
+        req.httpBody = try JSONEncoder().encode(requestBody)
+
+        let (data, resp) = try await sharedURLSession.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw TranslationService.TranslationError.networkError("invalid")
+        }
+        guard http.statusCode == 200 else {
+            let msg = (try? JSONDecoder().decode(AnthErr.self, from: data))?.error.message ?? "HTTP \(http.statusCode)"
+            throw TranslationService.TranslationError.apiError(msg)
+        }
+        let r = try JSONDecoder().decode(AnthResp.self, from: data)
+        guard let c = r.content.first, c.type == "text" else {
+            throw TranslationService.TranslationError.invalidResponse
+        }
+        return TranslationService.TranslationResult(
+            text: c.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            providerName: p.name, model: p.modelName,
+            tokensUsed: (r.usage?.inputTokens ?? 0) + (r.usage?.outputTokens ?? 0)
+        )
+    }
+
+    /// Non-streaming Gemini (used for fallback when streaming fails).
+    private func nonStreamingGemini(
+        text: String, src: TranslationLanguage, tgt: TranslationLanguage,
+        provider p: APIProvider
+    ) async throws -> TranslationService.TranslationResult {
+        guard let url = URL(string: "\(p.baseURL)/models/\(p.modelName):generateContent") else {
+            throw TranslationService.TranslationError.malformedURL("\(p.baseURL)/models/\(p.modelName):generateContent")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(p.apiKey, forHTTPHeaderField: "x-goog-api-key")
+        req.timeoutInterval = NetworkConfig.nonStreamingTimeout
+
+        let hint = nonStreamingHint(src: src, tgt: tgt)
+        let requestBody = GeminiRequest(
+            contents: [.init(parts: [.init(text: "\(hint)\n\n\(text)")])],
+            generationConfig: .init(temperature: p.temperature, maxOutputTokens: p.maxTokens)
+        )
+        req.httpBody = try JSONEncoder().encode(requestBody)
+
+        let (data, resp) = try await sharedURLSession.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw TranslationService.TranslationError.networkError("invalid")
+        }
+        guard http.statusCode == 200 else {
+            let msg = (try? JSONDecoder().decode(GemErr.self, from: data))?.error.message ?? "HTTP \(http.statusCode)"
+            throw TranslationService.TranslationError.apiError(msg)
+        }
+        let r = try JSONDecoder().decode(GemResp.self, from: data)
+        guard let t = r.candidates?.first?.content?.parts?.first?.text else {
+            throw TranslationService.TranslationError.invalidResponse
+        }
+        return TranslationService.TranslationResult(
+            text: t.trimmingCharacters(in: .whitespacesAndNewlines),
+            providerName: p.name, model: p.modelName,
+            tokensUsed: r.usageMetadata?.totalTokenCount ?? 0
+        )
+    }
+
+    /// Minimal hint for non-streaming path — no context injection (MT/fallback).
+    private func nonStreamingHint(src: TranslationLanguage, tgt: TranslationLanguage) -> String {
+        if src == .auto {
+            return "Translate to \(tgt.languageCode). Output translation only."
+        } else {
+            return "Translate \(src.languageCode) to \(tgt.languageCode). Output translation only."
+        }
+    }
+
     // ── Google Cloud Translation v2 ──
 
     private func requestGoogleMT(
         text: String, tgt: TranslationLanguage, provider: APIProvider
     ) async throws -> String {
-        var components = URLComponents(string: provider.baseURL)!
-        components.queryItems = [URLQueryItem(name: "key", value: provider.apiKey)]
-        guard let url = components.url else {
+        guard let url = URL(string: provider.baseURL) else {
             throw TranslationService.TranslationError.malformedURL(provider.baseURL)
         }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 20
+        req.setValue(provider.apiKey, forHTTPHeaderField: "X-goog-api-key") // S1: header, not URL query
+        req.timeoutInterval = NetworkConfig.mtTimeout
         req.httpBody = try JSONSerialization.data(withJSONObject: [
             "q": text,
             "target": tgt.languageCode.isEmpty ? "zh" : tgt.languageCode,
@@ -395,7 +650,7 @@ actor TranslationActor {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(provider.apiKey, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
         req.setValue(region, forHTTPHeaderField: "Ocp-Apim-Subscription-Region")
-        req.timeoutInterval = 20
+        req.timeoutInterval = NetworkConfig.mtTimeout
         req.httpBody = try JSONSerialization.data(withJSONObject: [["Text": text]])
 
         let data = try await executeMTRequest(req, label: "Bing MT")
@@ -418,20 +673,20 @@ actor TranslationActor {
             targetLanguage: targetLang
         )
         let urlString = "https://mt.cn-hangzhou.aliyuncs.com/?\(signedQuery)"
-        print("[AlibabaMT] URL: \(urlString.prefix(200))...")
+        print("[AlibabaMT] URL: \(urlString.redactSensitiveParams().prefix(200))...") // S2
         guard let url = URL(string: urlString) else {
             throw TranslationService.TranslationError.malformedURL(provider.baseURL)
         }
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        req.timeoutInterval = 20
+        req.timeoutInterval = NetworkConfig.mtTimeout
 
         let data = try await executeMTRequest(req, label: "Aliyun MT")
         let body = String(data: data, encoding: .utf8) ?? ""
         print("[AlibabaMT] body: \(body.prefix(300))")
 
-        if let translated = body.extractXMLTag("Translated") { return translated }
-        if let code = body.extractXMLTag("Code"), let msg = body.extractXMLTag("Message") {
+        if let translated = body.xmlTagValue("Translated") { return translated }
+        if let code = body.xmlTagValue("Code"), let msg = body.xmlTagValue("Message") {
             throw TranslationService.TranslationError.apiError("阿里云 [\(code)] \(msg)")
         }
         throw TranslationService.TranslationError.invalidResponse
@@ -457,11 +712,11 @@ actor TranslationActor {
         }
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        req.timeoutInterval = 15
+        req.timeoutInterval = NetworkConfig.mtTimeout
 
         let data = try await executeMTRequest(req, label: "Volcengine MT")
         let body = String(data: data, encoding: .utf8) ?? ""
-        print("[VolcengineMT] body: \(body.prefix(300))")
+        print("[VolcengineMT] body: \(body.prefix(300))") // S2
 
         if let jsonData = body.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
@@ -487,34 +742,31 @@ actor TranslationActor {
         let langName = tgt.rawValue
 
         let baseHint = """
-You are an expert lexicographer and dictionary assistant.
-Analyze the following __SOURCE_LANG__ word and provide a detailed dictionary entry in __TARGET_LANG__.
+You are an expert lexicographer. Analyze the __SOURCE_LANG__ query and output a highly structured dictionary entry in __TARGET_LANG__.
 
-Expected JSON schema (fill precisely):
+Expected JSON Schema:
 {
   "is_word": true,
   "phonetic": "/IPA notation/",
   "definitions": [
-    {"pos": "n.", "meaning": "definition in \(langName)"}
+    {"pos": "n.", "meaning": "definition exclusively in \(langName)"}
   ],
   "examples": [
-    {"en": "example sentence in source language", "zh": "translation in \(langName)"}
+    {"en": "example in source language", "zh": "translation in \(langName)"}
   ]
 }
 
 <Rules>
-- ALL "meaning" values MUST be written in \(langName).
-- ALL "zh" example translations MUST be in \(langName).
-- "pos" values: use standard English abbreviations (n., v., adj., adv., prep., conj., pron.).
-- "phonetic": use IPA notation or empty string if not applicable.
-- List ALL common definitions. Provide at least 2 examples.
-- Use the query word in each example sentence.
+- "meaning" MUST be exclusively in \(langName).
+- "zh" (example translation) MUST be exclusively in \(langName). Include the query in the source example.
+- "pos": Standardize using n., v., adj., adv., prep., conj., pron.
+- "phonetic": Use IPA notation or \"\" if inapplicable.
+- Provide at least 2 examples.
 </Rules>
 
-
 [CRITICAL FORMAT CONSTRAINT]
-You must respond ONLY with a valid JSON object. Do NOT wrap in Markdown code blocks (no ```json).
-No explanations, no intro, no outro — pure JSON only.
+Output EXACTLY and ONLY valid JSON.
+Do NOT wrap the response in Markdown code blocks (no ```json). No explanations.
 """
 
         // ── Dictionary context: force 300 chars regardless of intensity setting ──
@@ -526,18 +778,16 @@ No explanations, no intro, no outro — pure JSON only.
         let trailing = String(ctx.trailingContext.prefix(cap))
 
         let contextInstruction = """
+<ContextOptimization>
+The query is used within the following specific context:
+<Prefix>\(leading)</Prefix>
+<Query>\(ctx.selectedText)</Query>
+<Suffix>\(trailing)</Suffix>
 
-
-【重要语境优化指令】：
-当前用户正在查阅词典，并提供了该单词/短语前后的上下文：
-【上文】：\(leading)
-【目标词汇】：\(ctx.selectedText)
-【下文】：\(trailing)
-
-请在生成的词典 JSON 响应中执行以下优化：
-1. 审视上下文，判断当前语境下该词最精确的语义。
-2. 在 "definitions"（释义列表）中，必须将最符合当前语境的解释与词性置于首位（Index 0），其他常规释义依次排在后面。
-3. 在 "examples"（例句列表）中，第一条例句（Index 0）必须直接利用或高度契合当前的实际语境进行造句，以便用户快速理解该词在此处的用法。
+Mandatory Adjustments:
+1. "definitions" Array Index 0: MUST be the exact meaning and part of speech used in this specific context.
+2. "examples" Array Index 0: MUST heavily reflect or directly utilize this contextual usage to help the user understand its current application.
+</ContextOptimization>
 """
 
         return baseHint + contextInstruction
@@ -566,33 +816,78 @@ No explanations, no intro, no outro — pure JSON only.
             basePrompt: basePrompt, context: context
         )
 
-        return augmentedPrompt + """
-
-
-[CRITICAL FORMAT CONSTRAINT]
-Translate directly. No introduction, no meta-commentary.
-Preserve original formatting and Markdown tags if present.
-"""
+        return augmentedPrompt
     }
 }
 
 
 // MARK: - SSE Throttle (80ms buffer)
 
-/// Accumulates SSE tokens and flushes them to the continuation every ~80ms,
+/// Accumulates SSE tokens and flushes them to the continuation every ~35ms,
 /// preventing SwiftUI from re-rendering on every single token.
+///
+/// **First-chunk passthrough**: the very first `yield()` delivers its token
+/// Adaptive throttle stream — batches tokens for fluid UI updates while
+/// dynamically adjusting the batch window based on real-time token arrival rate.
+///
+/// - First chunk always passes through immediately (zero latency for first word).
+/// - Subsequent tokens are batched using an adaptive interval:
+///   • Fast arrival (< 10 ms apart) → 15 ms batch  (responsive UI)
+///   • Medium arrival (10–40 ms)    → 35 ms batch  (smooth default)
+///   • Slow arrival (> 40 ms)       → 80 ms batch  (accumulate enough for fluent update)
+/// - During window drag (`isUserDraggingWindow`), the interval is capped at 120 ms
+///   to avoid main-thread contention with AppKit event tracking.
 private final class ThrottledStream {
     private var buffer = ""
     private var flushTask: Task<Void, Never>?
     private let continuation: AsyncThrowingStream<String, Error>.Continuation
-    private let fastIntervalNs: UInt64  = 80_000_000   // 80ms — idle
-    private let slowIntervalNs: UInt64  = 120_000_000  // 120ms — during window drag
+    /// Whether the first chunk has already been passed through
+    private var firstChunkDelivered = false
+
+    // MARK: - Adaptive throttle state
+
+    /// Monotonic timestamp (nanoseconds) of the last yielded token.
+    private var lastTokenTime = DispatchTime.now().uptimeNanoseconds
+    /// Smoothed inter-arrival time (nanoseconds) — exponential moving average.
+    private var smoothedGapNs: UInt64 = 35_000_000
+
+    /// Computes the current adaptive batch interval based on `smoothedGapNs`.
+    private var adaptiveIntervalNs: UInt64 {
+        let base: UInt64
+        if smoothedGapNs < 10_000_000 {
+            base = 15_000_000                         // fast network → 15ms
+        } else if smoothedGapNs < 40_000_000 {
+            base = NetworkConfig.throttleFastNs        // normal → 35ms
+        } else {
+            base = 80_000_000                          // slow → 80ms
+        }
+        // During window drag, never exceed the slow path limit
+        return min(base, NetworkConfig.throttleSlowNs)
+    }
 
     init(_ continuation: AsyncThrowingStream<String, Error>.Continuation) {
         self.continuation = continuation
     }
 
     func yield(_ chunk: String) {
+        // ── Update adaptive state ──
+        let now = DispatchTime.now().uptimeNanoseconds
+        let gapNs = now - lastTokenTime
+        lastTokenTime = now
+
+        // Exponential moving average (α ≈ 0.3)
+        if smoothedGapNs == 35_000_000 {
+            smoothedGapNs = gapNs  // first real measurement
+        } else {
+            smoothedGapNs = UInt64(Double(smoothedGapNs) * 0.7 + Double(gapNs) * 0.3)
+        }
+
+        // ── First chunk passthrough (P4) ──
+        if !firstChunkDelivered {
+            firstChunkDelivered = true
+            continuation.yield(chunk)
+            return
+        }
         buffer += chunk
         scheduleFlush()
     }
@@ -608,11 +903,8 @@ private final class ThrottledStream {
 
     private func scheduleFlush() {
         guard flushTask == nil else { return }
-        flushTask = Task { [weak self] in
-            guard let self else { return }
-            // Relax interval during window drag to avoid main-thread contention
-            let isDragging = await MainActor.run { AppState.isUserDraggingWindow }
-            let interval = isDragging ? self.slowIntervalNs : self.fastIntervalNs
+        let interval = self.adaptiveIntervalNs
+        flushTask = Task {
             try? await Task.sleep(nanoseconds: interval)
             guard !Task.isCancelled, !self.buffer.isEmpty else { return }
             let text = self.buffer
@@ -623,9 +915,9 @@ private final class ThrottledStream {
     }
 }
 
-// ── Inline response types ──
+// ── Shared error / response types (used by TranslationActor + TranslationService) ──
 
-private struct OAIErr: Codable, Sendable {
+struct OAIErr: Codable, Sendable {
     struct Detail: Codable, Sendable { let message: String }
     let error: Detail
 }
@@ -633,7 +925,7 @@ private struct OAIStreamChunk: Codable, Sendable {
     struct Choice: Codable, Sendable { struct Delta: Codable, Sendable { let content: String? }; let delta: Delta? }
     let choices: [Choice]?
 }
-private struct AnthErr: Codable, Sendable {
+struct AnthErr: Codable, Sendable {
     struct Detail: Codable, Sendable { let message: String }
     let error: Detail
 }
@@ -641,7 +933,7 @@ private struct AnthStreamEvent: Codable, Sendable {
     struct Delta: Codable, Sendable { let text: String?; let type: String? }
     let type: String?; let delta: Delta?
 }
-private struct GemErr: Codable, Sendable {
+struct GemErr: Codable, Sendable {
     struct Detail: Codable, Sendable { let message: String }
     let error: Detail
 }

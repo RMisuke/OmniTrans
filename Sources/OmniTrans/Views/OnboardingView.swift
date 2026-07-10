@@ -29,7 +29,7 @@ struct OnboardingView: View {
                 if page == 3 { offlineTranslationPage.transition(.opacity) }
                 if page == 4 { featuresPage.transition(.opacity) }
             }
-            .animation(AppTheme.Motion.slow.gated, value: page)
+            .animation(AppTheme.Motion.slow.resolveGated(), value: page)
             .frame(minHeight: 420)
 
             Divider()
@@ -61,7 +61,7 @@ struct OnboardingView: View {
             // Previous button (subtle material background)
             if page > 0 {
                 Button("上一步") {
-                    withAnimation(AppTheme.Motion.slow.gated) { page -= 1 }
+                    withAnimation(AppTheme.Motion.slow.resolveGated()) { page -= 1 }
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.large)
@@ -74,7 +74,7 @@ struct OnboardingView: View {
             // Next / Start button
             if page < totalPages - 1 {
                 Button("下一步") {
-                    withAnimation(AppTheme.Motion.slow.gated) { page += 1 }
+                    withAnimation(AppTheme.Motion.slow.resolveGated()) { page += 1 }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -94,7 +94,7 @@ struct OnboardingView: View {
     // MARK: - Permissions Trigger
 
     private func requestPermissions() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         AXIsProcessTrustedWithOptions(opts)
     }
 

@@ -9,12 +9,16 @@ let package = Package(
             name: "OmniTrans",
             path: "Sources/OmniTrans",
             swiftSettings: [
-                // Whole-module optimization in release builds
+                // ── Release-only optimizations ──
                 .unsafeFlags(["-whole-module-optimization"], .when(configuration: .release)),
-                // Enable Swift 6 strict concurrency checking
+                .unsafeFlags(["-cross-module-optimization"], .when(configuration: .release)),
+
+                // ── Swift 6 strict concurrency ──
                 .enableExperimentalFeature("StrictConcurrency"),
-                // Access-level imports reduce symbol visibility and rebuild scope
                 .enableExperimentalFeature("AccessLevelOnImport"),
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-dead_strip"], .when(configuration: .release)),
             ]
         )
     ]

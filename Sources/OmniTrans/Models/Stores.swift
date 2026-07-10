@@ -23,6 +23,9 @@ final class TranslationSessionStore {
     var dictionaryEntry: DictionaryEntry? = nil
     var detectedIsWord: Bool = false
     var showPermissionHint: Bool = false
+    var isFromLocalCache: Bool = false
+    var cachedModelName: String = ""
+    var cacheTimestamp: String = ""
 
     /// The last successfully parsed dictionary JSON string.  Used by the
     /// menu bar `TranslationView` as a "hard lock" fallback — when
@@ -51,8 +54,7 @@ final class ConfigurationStore {
     /// resolution, terminology, tonal consistency).  Defaults to `true`.
     var isContextAwareEnabled: Bool {
         get {
-            UserDefaults.standard.register(defaults: ["is_context_aware": true])
-            return UserDefaults.standard.bool(forKey: "is_context_aware")
+            UserDefaults.standard.bool(forKey: "is_context_aware")
         }
         set {
             UserDefaults.standard.set(newValue, forKey: "is_context_aware")
@@ -65,8 +67,7 @@ final class ConfigurationStore {
     /// Higher levels improve terminology accuracy but increase Token cost.
     var contextIntensity: Int {
         get {
-            UserDefaults.standard.register(defaults: ["context_intensity": 2])
-            return UserDefaults.standard.integer(forKey: "context_intensity")
+            UserDefaults.standard.integer(forKey: "context_intensity")
         }
         set {
             UserDefaults.standard.set(max(0, min(4, newValue)), forKey: "context_intensity")
@@ -78,23 +79,32 @@ final class ConfigurationStore {
     /// and hits the network / engine directly.  Defaults to `true`.
     var isCacheEnabled: Bool {
         get {
-            UserDefaults.standard.register(defaults: ["cache_enabled": true])
-            return UserDefaults.standard.bool(forKey: "cache_enabled")
+            UserDefaults.standard.bool(forKey: "cache_enabled")
         }
         set {
             UserDefaults.standard.set(newValue, forKey: "cache_enabled")
         }
     }
 
-    /// Context capture character limit derived from `contextIntensity`.
-    var contextCharLimit: Int {
-        switch contextIntensity {
-        case 0: return 100
-        case 1: return 200
-        case 3: return 400
-        case 4: return 500
-        default: return 300
+    /// Whether the personal dictionary cache is enabled.
+    /// When `true`, dictionary lookups first check the local SQLite database
+    /// before making an LLM API call.  Entries are write-once — only a user
+    /// initiated re‑lookup (`forceRefresh`) overwrites them.
+    /// Defaults to `true`.
+    var isDictCacheEnabled: Bool {
+        get {
+            UserDefaults.standard.bool(forKey: "dict_cache_enabled")
         }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "dict_cache_enabled")
+        }
+    }
+
+    /// Context capture character limit derived from `contextIntensity`.
+    /// Delegates to `ContextAwareService` — the single source of truth for
+    /// the intensity→character mapping, avoiding duplicate switch logic.
+    var contextCharLimit: Int {
+        ContextAwareService.contextCharLimit
     }
 
     /// Bridge from legacy AppState on launch / settings changes.
@@ -105,6 +115,25 @@ final class ConfigurationStore {
         sourceLang = state.sourceLang
         targetLang = state.targetLang
         translationHistory = state.translationHistory
+    }
+
+    // MARK: - Defaults Registration
+
+    /// Registers all default values with `UserDefaults` — must be called
+    /// **exactly once** during app launch (e.g. from `AppDelegate`).
+    ///
+    /// `register(defaults:)` only sets values that have never been written,
+    /// so repeated calls are harmless but wasteful — this method centralises
+    /// all defaults so the per-property `register(defaults:)` calls are
+    /// removed from the computed getters above.
+    static func registerDefaults() {
+        UserDefaults.standard.register(defaults: [
+            "is_context_aware": true,
+            "context_intensity": 2,
+            "cache_enabled": true,
+            "dict_cache_enabled": true,
+            "hotkeys_enabled": true,
+        ])
     }
 }
 

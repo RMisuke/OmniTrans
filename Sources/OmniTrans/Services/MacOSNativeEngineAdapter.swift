@@ -45,7 +45,8 @@ struct MacOSNativeEngineAdapter: TranslationEngineProtocol {
                         continuation.finish(throwing: error)
                     }
                 } else {
-                    // ── macOS 25 or earlier ──
+                    // ── macOS 25 or earlier ── (L8)
+                    NetworkLogger.log("NativeEngine", "macOS < 26 无法使用原生翻译引擎")
                     continuation.finish(
                         throwing: TranslationService.TranslationError.apiError(
                             "原生离线翻译需要 macOS 26 或更高版本。请升级系统或切换至云端 API。"

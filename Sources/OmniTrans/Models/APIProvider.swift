@@ -5,6 +5,7 @@ enum ProviderKind: String, Codable, CaseIterable, Identifiable {
     case openAICompat = "OpenAI 兼容"
     case anthropic  = "Claude"
     case gemini     = "Gemini"
+    case ollama      = "Ollama (本地)"
     case macOSNative = "macOS 原生"
     case googleMT   = "Google 翻译"
     case bingMT     = "Bing 翻译"
@@ -24,6 +25,7 @@ enum ProviderKind: String, Codable, CaseIterable, Identifiable {
     var defaultBaseURL: String {
         switch self {
         case .openAI:       return "https://api.openai.com/v1"
+        case .ollama:        return "http://127.0.0.1:11434/v1"
         case .openAICompat:  return "https://api.openai.com/v1"
         case .anthropic:     return "https://api.anthropic.com"
         case .gemini:        return "https://generativelanguage.googleapis.com/v1beta"
@@ -38,6 +40,7 @@ enum ProviderKind: String, Codable, CaseIterable, Identifiable {
     var defaultModel: String {
         switch self {
         case .openAI:       return "gpt-4o-mini"
+        case .ollama:        return "qwen2.5"
         case .openAICompat:  return "gpt-4o"
         case .anthropic:     return "claude-3-haiku-20240307"
         case .gemini:        return "gemini-2.0-flash"

@@ -120,3 +120,79 @@ enum WordDetector {
         return true
     }
 }
+
+// MARK: - Streaming Dictionary JSON Parser
+
+/// Incrementally parses LLM-streamed JSON chunks into partial `DictionaryEntry`
+/// results, so the UI can display definitions *before* the model finishes
+/// emitting the full JSON object.  Only `definitions` and `word` are updated
+/// incrementally; `examples` and `phonetic` are filled on final flush.
+actor StreamingDictParser {
+    private var buffer = ""
+    private var word: String
+    private var partialDefs: [DictionaryEntry.Definition] = []
+    private var phonetic: String = ""
+
+    init(word: String) {
+        self.word = word
+    }
+
+    /// Feed a raw SSE chunk.  Returns a partial entry if new definitions
+    /// were extracted, or `nil` if nothing new was found.
+    func feed(_ chunk: String) -> DictionaryEntry? {
+        buffer += chunk
+        let prevCount = partialDefs.count
+        partialDefs = extractDefinitions(from: buffer)
+        if !phonetic.isEmpty { /* already found */ }
+        else if let p = extractPhonetic(from: buffer) { phonetic = p }
+        guard partialDefs.count > prevCount else { return nil }
+        return buildPartial()
+    }
+
+    /// Flush remaining buffer and return the best-available entry.
+    /// Falls back to full `DictionaryEntry.parse` for the complete result.
+    func flush() -> DictionaryEntry? {
+        // Try full parse first for the definitive result
+        if let full = DictionaryEntry.parse(from: buffer, word: word) {
+            return full
+        }
+        // Fall back to partial with whatever we have
+        guard !partialDefs.isEmpty else { return nil }
+        return buildPartial()
+    }
+
+    private func buildPartial() -> DictionaryEntry {
+        DictionaryEntry(
+            isWord: true, word: word,
+            phonetic: phonetic,
+            phoneticVariants: nil,
+            definitions: partialDefs,
+            examples: [],
+            inflections: []
+        )
+    }
+
+    // MARK: - Regex-based partial extraction
+
+    /// Matches individual definition blocks like:
+    /// `{"pos": "n.", "meaning": "hello"}`
+    private func extractDefinitions(from raw: String) -> [DictionaryEntry.Definition] {
+        let pattern = #/\{\s*"pos"\s*:\s*"([^"]+)"\s*,\s*"meaning"\s*:\s*"([^"]+)"\s*\}/#
+        var defs: [DictionaryEntry.Definition] = []
+        for match in raw.matches(of: pattern) {
+            let pos = String(match.1)
+            let meaning = String(match.2)
+                .replacingOccurrences(of: "\\\"", with: "\"")
+                .replacingOccurrences(of: "\\n", with: "\n")
+            defs.append(.init(pos: pos, posLabel: nil, senseNumber: nil, labels: nil, meaning: meaning))
+        }
+        return defs
+    }
+
+    /// Extracts phonetic from partial JSON like `"phonetic": "/həˈloʊ/"`
+    private func extractPhonetic(from raw: String) -> String? {
+        let pattern = #/"phonetic"\s*:\s*"([^"]+)"/#
+        guard let match = raw.firstMatch(of: pattern) else { return nil }
+        return String(match.1)
+    }
+}

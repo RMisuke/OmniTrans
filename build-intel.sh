@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 echo "=== Cleaning old build ==="
 rm -rf .build/OmniTrans-intel.app .build/release/OmniTrans .build/release/OmniTrans.dSYM 2>/dev/null || true
-echo "=== Building OmniTrans (x86_64, Intel) ==="
+echo "=== Building OmniTrans (x86_64, Intel) release ==="
 swift build -c release --arch x86_64 2>&1
 
 BIN=".build/release/OmniTrans"
@@ -26,8 +26,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key><string>com.omnitrans.intel</string>
     <key>CFBundleName</key><string>OmniTrans</string>
     <key>CFBundleDisplayName</key><string>OmniTrans</string>
-    <key>CFBundleVersion</key><string>0.5</string>
-    <key>CFBundleShortVersionString</key><string>0.5</string>
+    <key>CFBundleVersion</key><string>0.6</string>
+    <key>CFBundleShortVersionString</key><string>0.6</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>CFBundleIconFile</key><string>icon.icns</string>

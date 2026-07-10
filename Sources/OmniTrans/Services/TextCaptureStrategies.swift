@@ -2,6 +2,12 @@ import Cocoa
 import Carbon
 import Vision
 import ScreenCaptureKit
+import os
+
+private let capLogger = OSLog(
+    subsystem: Bundle.main.bundleIdentifier ?? "com.omnitrans.omnitrans",
+    category: "capture"
+)
 
 // MARK: - Protocol
 
@@ -13,12 +19,15 @@ protocol TextCaptureStrategy {
 
 struct ClipboardCaptureStrategy: TextCaptureStrategy {
     func tryCapture() -> String? {
-        guard AXIsProcessTrusted() else { return nil }
+        guard AXIsProcessTrusted() else {
+            os_log(.debug, log: capLogger, "ClipboardCapture: 无辅助功能权限")
+            return nil
+        }
         let pb = NSPasteboard.general
         let initialCount = pb.changeCount
         let savedStrings = pb.readObjects(forClasses: [NSString.self], options: nil) as? [String]
         defer {
-            if pb.changeCount == initialCount + 1 {
+            if pb.changeCount != initialCount {
                 pb.clearContents()
                 if let strings = savedStrings, !strings.isEmpty {
                     pb.setString(strings.joined(separator: "\n"), forType: .string)
@@ -28,16 +37,27 @@ struct ClipboardCaptureStrategy: TextCaptureStrategy {
         let src = CGEventSource(stateID: .hidSystemState)
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true),
               let up   = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
-        else { return nil }
+        else {
+            os_log(.error, log: capLogger, "ClipboardCapture: 创建 CGEvent 失败")
+            return nil
+        }
         down.flags = .maskCommand; up.flags = .maskCommand
-        down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
         var captured: String?
-        for _ in 0..<40 {
+        for attempt in 0..<50 {
             if pb.changeCount != initialCount {
                 captured = pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let c = captured, !c.isEmpty { break }
+                if let c = captured, !c.isEmpty {
+                    os_log(.info, log: capLogger, "ClipboardCapture: 第 %d 次轮询捕获成功 (%d 字符)",
+                           attempt, c.count)
+                    break
+                }
             }
-            Thread.sleep(forTimeInterval: 0.005)
+            Thread.sleep(forTimeInterval: 0.003)
+        }
+        if captured == nil {
+            os_log(.error, log: capLogger, "ClipboardCapture: 50 次轮询后仍未捕获到文本")
         }
         return captured
     }
@@ -45,18 +65,40 @@ struct ClipboardCaptureStrategy: TextCaptureStrategy {
 
 // MARK: - Strategy 2: AX API direct read
 
+/// Timeout (seconds) for AX API calls — prevents indefinite blocking when
+/// the target application is unresponsive (e.g. beachballing).
+private let kAXTimeout: Float = 0.5
+
 struct AXCaptureStrategy: TextCaptureStrategy {
     func tryCapture() -> String? {
-        guard AXIsProcessTrusted() else { return nil }
+        guard AXIsProcessTrusted() else {
+            os_log(.debug, log: capLogger, "AXCapture: 无辅助功能权限")
+            return nil
+        }
         let system = AXUIElementCreateSystemWide()
         guard let appRef = system.copyAttribute(kAXFocusedApplicationAttribute as CFString),
-              CFGetTypeID(appRef) == AXUIElementGetTypeID() else { return nil }
+              CFGetTypeID(appRef) == AXUIElementGetTypeID()
+        else {
+            os_log(.debug, log: capLogger, "AXCapture: 无法获取焦点应用")
+            return nil
+        }
         let app = appRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(app, kAXTimeout)
         guard let elemRef = app.copyAttribute(kAXFocusedUIElementAttribute as CFString),
-              CFGetTypeID(elemRef) == AXUIElementGetTypeID() else { return nil }
+              CFGetTypeID(elemRef) == AXUIElementGetTypeID()
+        else {
+            os_log(.debug, log: capLogger, "AXCapture: 无法获取焦点元素")
+            return nil
+        }
         let elem = elemRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(elem, kAXTimeout)
         guard let s = elem.copyAttribute(kAXSelectedTextAttribute as CFString) as? String,
-              !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+              !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            os_log(.debug, log: capLogger, "AXCapture: 选中文本为空或不可用")
+            return nil
+        }
+        os_log(.info, log: capLogger, "AXCapture 成功: %d 字符", s.count)
         return s
     }
 }
@@ -65,7 +107,17 @@ struct AXCaptureStrategy: TextCaptureStrategy {
 
 /// Uses `SCScreenshotManager.captureImage` + `VNRecognizeTextRequest`
 /// to perform regional OCR without any deprecated APIs.
+///
+/// Uses `.accurate` exclusively — `.fast`'s character-feature classifier
+/// produces pervasive Latin-character substitution errors (e.g. `a`→`4`,
+/// `e`→`¢`, `m`→`rn`) that cannot be filtered by confidence threshold.
+/// The image is converted to grayscale before inference to cut VRAM ~75 %
+/// for the larger neural model.
 struct ScreenCaptureOCRCaptureStrategy: TextCaptureStrategy {
+
+    /// Recognition languages ordered by priority — English first.
+    private static let languages = ["en", "zh-Hans", "zh-Hant", "ja", "ko"]
+
     func tryCapture() -> String? {
         return autoreleasepool {
             let mouse = NSEvent.mouseLocation
@@ -83,52 +135,63 @@ struct ScreenCaptureOCRCaptureStrategy: TextCaptureStrategy {
 
                 guard let cgImage = captureScreen(rect: rect) else { continue }
 
-                // Convert to grayscale to cut memory ~75%
-                let grayImage = toGrayscale(cgImage)
-                guard let processedImage = grayImage else { continue }
+                // Grayscale cuts VRAM ~75% for the neural model
+                guard let processedImage = toGrayscale(cgImage) else { continue }
 
                 let request = VNRecognizeTextRequest()
                 request.recognitionLevel = .accurate
                 request.usesLanguageCorrection = false
-                request.recognitionLanguages = ["zh-Hans","zh-Hant","en","ja","ko","fr","de","es"]
+                request.recognitionLanguages = Self.languages
                 request.minimumTextHeight = 0.02
 
-                let handler = VNImageRequestHandler(cgImage: processedImage, options: [:])
-                var observations: [VNRecognizedTextObservation]?
                 do {
-                    try handler.perform([request])
-                    observations = request.results
+                    try VNImageRequestHandler(cgImage: processedImage, options: [:]).perform([request])
                 } catch { continue }
 
-                guard let observations, !observations.isEmpty else { continue }
-
-                let filtered = observations
-                    .compactMap { obs -> (text: String, y: Float, x: Float, width: Float)? in
-                        guard let c = obs.topCandidates(1).first, c.confidence >= minConf else { return nil }
-                        let t = c.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !t.isEmpty else { return nil }
-                        let bb = obs.boundingBox
-                        return (t, Float(bb.origin.y), Float(bb.origin.x), Float(bb.width))
-                    }
-                    .sorted { a, b in
-                        if abs(a.y - b.y) > 0.03 { return a.y > b.y }
-                        return a.x < b.x
-                    }
-                guard !filtered.isEmpty else { continue }
-
-                var result = ""
-                var lastY: Float = -1
-                for item in filtered {
-                    if lastY >= 0, abs(item.y - lastY) > 0.03 { result += "\n" }
-                    if !result.isEmpty && result.last != "\n" { result += " " }
-                    result += item.text
-                    lastY = item.y
+                if let obs = request.results, !obs.isEmpty,
+                   let text = Self.extractOrderedText(from: obs, minConfidence: minConf),
+                   !text.isEmpty {
+                    return text
                 }
-                let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { return trimmed }
             }
             return nil
         }
+    }
+
+    // MARK: - Text extraction helper
+
+    /// Extracts spatially‑ordered text from VN observations.
+    private static func extractOrderedText(
+        from observations: [VNRecognizedTextObservation]?,
+        minConfidence: Float
+    ) -> String? {
+        guard let observations, !observations.isEmpty else { return nil }
+        let filtered = observations
+            .compactMap { obs -> (text: String, y: Float, x: Float)? in
+                guard let c = obs.topCandidates(1).first,
+                      c.confidence >= minConfidence
+                else { return nil }
+                let t = c.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !t.isEmpty else { return nil }
+                let bb = obs.boundingBox
+                return (t, Float(bb.origin.y), Float(bb.origin.x))
+            }
+            .sorted { a, b in
+                if abs(a.y - b.y) > 0.03 { return a.y > b.y }
+                return a.x < b.x
+            }
+        guard !filtered.isEmpty else { return nil }
+
+        var result = ""
+        var lastY: Float = -1
+        for item in filtered {
+            if lastY >= 0, abs(item.y - lastY) > 0.03 { result += "\n" }
+            if !result.isEmpty && result.last != "\n" { result += " " }
+            result += item.text
+            lastY = item.y
+        }
+        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // MARK: - Screen Capture (ScreenCaptureKit, non-deprecated)
@@ -137,48 +200,52 @@ struct ScreenCaptureOCRCaptureStrategy: TextCaptureStrategy {
     /// Uses a semaphore to bridge the async API into the synchronous
     /// `tryCapture()` interface required by the strategy protocol.
     private func captureScreen(rect: CGRect) -> CGImage? {
-        let semaphore = DispatchSemaphore(value: 0)
+        let lock = NSLock()
         var result: CGImage?
+        let semaphore = DispatchSemaphore(value: 0)
+        let workItem = DispatchWorkItem {
+            Task {
+                do {
+                    let content = try await SCShareableContent.current
+                    let midPoint = CGPoint(x: rect.midX, y: rect.midY)
+                    guard let display = content.displays.first(where: { $0.frame.contains(midPoint) })
+                            ?? content.displays.first else { semaphore.signal(); return }
 
-        Task {
-            do {
-                let content = try await SCShareableContent.current
-                let midPoint = CGPoint(x: rect.midX, y: rect.midY)
-                guard let display = content.displays.first(where: { $0.frame.contains(midPoint) })
-                        ?? content.displays.first else {
-                    semaphore.signal(); return
-                }
+                    // Use NSScreen for ALL coordinate math — NSScreen.frame
+                    // (AppKit, bottom-left origin) vs SCDisplay.frame (CG,
+                    // top-left origin) have different Y values for non-primary
+                    // displays.  Computing locally within one NSScreen avoids
+                    // cross-coordinate-system arithmetic entirely.
+                    guard let screen = NSScreen.screens.first(where: { $0.frame.contains(midPoint) })
+                            ?? NSScreen.main else { semaphore.signal(); return }
+                    let screenFrame = screen.frame
+                    let scale = screen.backingScaleFactor
 
-                let displayOrigin = display.frame.origin
-                let displayHeight  = display.frame.height
+                    let localAppKitX = rect.origin.x - screenFrame.origin.x
+                    let localAppKitY = rect.origin.y - screenFrame.origin.y
+                    let localCGY = screenFrame.height - localAppKitY - rect.height
+                    let sourceRect = CGRect(x: localAppKitX, y: localCGY, width: rect.width, height: rect.height)
 
-                let localX = rect.origin.x - displayOrigin.x
-                let localY = rect.origin.y - displayOrigin.y
-                let cgY = displayHeight - (localY + rect.height)
-                let sourceRect = CGRect(
-                    x: localX, y: cgY,
-                    width: rect.width, height: rect.height
-                )
+                    let filter = SCContentFilter(display: display, excludingWindows: [])
+                    let config = SCStreamConfiguration()
+                    config.showsCursor = false
+                    config.pixelFormat = kCVPixelFormatType_32BGRA
+                    config.sourceRect = sourceRect
+                    config.width  = Int(sourceRect.width * scale)
+                    config.height = Int(sourceRect.height * scale)
 
-                let filter = SCContentFilter(display: display, excludingWindows: [])
-                let config = SCStreamConfiguration()
-                config.showsCursor = false
-                config.pixelFormat = kCVPixelFormatType_32BGRA
-                config.sourceRect = sourceRect
-                config.width  = Int(sourceRect.width)
-                config.height = Int(sourceRect.height)
-
-                result = try await SCScreenshotManager.captureImage(
-                    contentFilter: filter,
-                    configuration: config
-                )
-            } catch {
-                // Silent fail — fall through to next pass
+                    let captured = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                    lock.lock()
+                    result = captured
+                    lock.unlock()
+                } catch { /* silent */ }
+                semaphore.signal()
             }
-            semaphore.signal()
         }
-
+        DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
         _ = semaphore.wait(timeout: .now() + 0.5)
+        lock.lock()
+        defer { lock.unlock() }
         return result
     }
 
@@ -235,15 +302,21 @@ enum SlidingWindowContextCapture {
         let system = AXUIElementCreateSystemWide()
 
         guard let appRef = system.copyAttribute(kAXFocusedApplicationAttribute as CFString),
-              CFGetTypeID(appRef) == AXUIElementGetTypeID() else { return nil }
+              CFGetTypeID(appRef) == AXUIElementGetTypeID()
+        else { return nil }
         let app = appRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(app, kAXTimeout)
 
         guard let elemRef = app.copyAttribute(kAXFocusedUIElementAttribute as CFString),
-              CFGetTypeID(elemRef) == AXUIElementGetTypeID() else { return nil }
+              CFGetTypeID(elemRef) == AXUIElementGetTypeID()
+        else { return nil }
         let elem = elemRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(elem, kAXTimeout)
 
         // ── Get current selection range ──
-        guard let rangeVal = elem.copyAttribute(kAXSelectedTextRangeAttribute as CFString) else { return nil }
+        guard let rangeVal = elem.copyAttribute(kAXSelectedTextRangeAttribute as CFString),
+              CFGetTypeID(rangeVal) == AXValueGetTypeID()
+        else { return nil }
         var range = CFRange()
         guard AXValueGetValue(rangeVal as! AXValue, .cfRange, &range) else { return nil }
 
@@ -251,7 +324,8 @@ enum SlidingWindowContextCapture {
         var totalChars: Int
         if let numVal = elem.copyAttribute(kAXNumberOfCharactersAttribute as CFString) as? NSNumber {
             totalChars = numVal.intValue
-        } else if let numVal = elem.copyAttribute(kAXNumberOfCharactersAttribute as CFString) {
+        } else if let numVal = elem.copyAttribute(kAXNumberOfCharactersAttribute as CFString),
+                  CFGetTypeID(numVal) == AXValueGetTypeID() {
             // Some apps return an AXValue wrapping the number
             var val: Int = 0
             if AXValueGetValue(numVal as! AXValue, .cfRange, &val) {
@@ -350,11 +424,11 @@ enum SlidingWindowContextCapture {
         let src = CGEventSource(stateID: .hidSystemState)
 
         // ── Capture leading context (Cmd+Shift+LeftArrow → Cmd+C) ──
-        let leading = captureSimulatedSide(src: src, direction: .left, timeoutSeconds: 0.05)
-        // ── Wait briefly for UI to settle ──
-        Thread.sleep(forTimeInterval: 0.01)
+        let leading = captureSimulatedSide(src: src, direction: .left, timeoutSeconds: 0.04)
+        // ── Minimal settle time before next expansion ──
+        Thread.sleep(forTimeInterval: 0.003)
         // ── Capture trailing context (Cmd+Shift+RightArrow → Cmd+C) ──
-        let trailing = captureSimulatedSide(src: src, direction: .right, timeoutSeconds: 0.05)
+        let trailing = captureSimulatedSide(src: src, direction: .right, timeoutSeconds: 0.04)
 
         guard !leading.isEmpty || !trailing.isEmpty else { return nil }
 
@@ -388,7 +462,7 @@ enum SlidingWindowContextCapture {
         arrowUp.post(tap: .cghidEventTap)
 
         // Small delay to let OS process the selection change
-        Thread.sleep(forTimeInterval: 0.01)
+        Thread.sleep(forTimeInterval: 0.005)
 
         // Cmd+C
         guard let copyDown = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true),
@@ -405,7 +479,7 @@ enum SlidingWindowContextCapture {
                 captured = pb.string(forType: .string) ?? ""
                 if !captured.isEmpty { break }
             }
-            Thread.sleep(forTimeInterval: 0.002)
+            Thread.sleep(forTimeInterval: 0.001)
         }
 
         return captured

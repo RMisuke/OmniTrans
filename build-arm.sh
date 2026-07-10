@@ -3,18 +3,40 @@ set -e
 
 cd "$(dirname "$0")"
 
-echo "=== Cleaning old build ==="
-rm -rf .build/OmniTrans-arm64.app .build/release/OmniTrans .build/release/OmniTrans.dSYM 2>/dev/null || true
+# ──────────────────────────────────────────────
+#  Toolchain: force Xcode-beta for Xcode 27 Beta 3
+#  (avoids "spec already registered" errors from
+#   the standalone CLT SwiftBuild.framework)
+# ──────────────────────────────────────────────
+export DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer"
 
-echo "=== Building OmniTrans (arm64) with WMO ==="
-swift build -c release \
+echo "=== Build environment ==="
+echo "DEVELOPER_DIR: $DEVELOPER_DIR"
+echo "Swift:"
+xcrun swift --version 2>&1 | head -2
+echo ""
+
+echo "=== Cleaning old build ==="
+rm -rf .build/OmniTrans-arm64.app .build/release .build/out 2>/dev/null || true
+
+echo "=== Building OmniTrans (arm64) release ==="
+xcrun swift build \
+    -c release \
     --arch arm64 \
-    -Xswiftc -whole-module-optimization \
-    -Xswiftc -O \
+    --disable-build-manifest-caching \
     2>&1
 
+# Binary output path (SwiftPM single-arch)
 BIN=".build/release/OmniTrans"
 APP_DIR=".build/OmniTrans-arm64.app"
+
+if [ ! -f "$BIN" ]; then
+    echo "ERROR: Binary not found at $BIN"
+    echo "Searching for built binary..."
+    find .build -name "OmniTrans" -type f 2>/dev/null
+    exit 1
+fi
+
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN" "$APP_DIR/Contents/MacOS/OmniTrans"
 
@@ -35,8 +57,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key><string>com.omnitrans.arm64</string>
     <key>CFBundleName</key><string>OmniTrans</string>
     <key>CFBundleDisplayName</key><string>OmniTrans</string>
-    <key>CFBundleVersion</key><string>0.5</string>
-    <key>CFBundleShortVersionString</key><string>0.5</string>
+    <key>CFBundleVersion</key><string>0.6</string>
+    <key>CFBundleShortVersionString</key><string>0.6</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>CFBundleIconFile</key><string>icon.icns</string>
@@ -76,6 +98,7 @@ echo ""
 # Ad-hoc code signing — prevents "app is damaged" on other Macs
 echo "=== Signing app (ad-hoc) ==="
 codesign --force --deep --sign - "$APP_DIR" 2>&1
+
 # Remove quarantine attribute added by browsers / email
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
@@ -85,5 +108,9 @@ echo "App: $(pwd)/$APP_DIR"
 echo "Run: open $(pwd)/$APP_DIR"
 
 # Show binary size for verification
-BIN_SIZE=$(stat -f%z "$APP_DIR/Contents/MacOS/OmniTrans" 2>/dev/null || stat -c%s "$APP_DIR/Contents/MacOS/OmniTrans" 2>/dev/null || echo "?")
+if command -v stat &>/dev/null; then
+    BIN_SIZE=$(stat -f%z "$APP_DIR/Contents/MacOS/OmniTrans" 2>/dev/null || echo "?")
+else
+    BIN_SIZE="?"
+fi
 echo "Binary size: ${BIN_SIZE} bytes"
