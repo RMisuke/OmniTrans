@@ -1,13 +1,9 @@
 import Cocoa
 import Carbon
-import Vision
-import ScreenCaptureKit
 import os
-
-private let capLogger = OSLog(
-    subsystem: Bundle.main.bundleIdentifier ?? "com.omnitrans.omnitrans",
-    category: "capture"
-)
+@preconcurrency import Vision
+@preconcurrency import ScreenCaptureKit
+import DisplayGeometry
 
 // MARK: - Protocol
 
@@ -19,14 +15,14 @@ protocol TextCaptureStrategy {
 
 struct ClipboardCaptureStrategy: TextCaptureStrategy {
     func tryCapture() -> String? {
-        guard AXIsProcessTrusted() else {
-            os_log(.debug, log: capLogger, "ClipboardCapture: 无辅助功能权限")
-            return nil
-        }
+        guard AXIsProcessTrusted() else { return nil }
         let pb = NSPasteboard.general
         let initialCount = pb.changeCount
         let savedStrings = pb.readObjects(forClasses: [NSString.self], options: nil) as? [String]
         defer {
+            // Restore clipboard if *any* change occurred — not just initialCount+1.
+            // This handles the case where a third-party app also modifies the
+            // pasteboard during the capture window (TOCTOU-safe snapshot compare).
             if pb.changeCount != initialCount {
                 pb.clearContents()
                 if let strings = savedStrings, !strings.isEmpty {
@@ -37,27 +33,16 @@ struct ClipboardCaptureStrategy: TextCaptureStrategy {
         let src = CGEventSource(stateID: .hidSystemState)
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true),
               let up   = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
-        else {
-            os_log(.error, log: capLogger, "ClipboardCapture: 创建 CGEvent 失败")
-            return nil
-        }
+        else { return nil }
         down.flags = .maskCommand; up.flags = .maskCommand
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
         var captured: String?
-        for attempt in 0..<50 {
+        for _ in 0..<30 {
             if pb.changeCount != initialCount {
                 captured = pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let c = captured, !c.isEmpty {
-                    os_log(.info, log: capLogger, "ClipboardCapture: 第 %d 次轮询捕获成功 (%d 字符)",
-                           attempt, c.count)
-                    break
-                }
+                if let c = captured, !c.isEmpty { break }
             }
             Thread.sleep(forTimeInterval: 0.003)
-        }
-        if captured == nil {
-            os_log(.error, log: capLogger, "ClipboardCapture: 50 次轮询后仍未捕获到文本")
         }
         return captured
     }
@@ -71,34 +56,20 @@ private let kAXTimeout: Float = 0.5
 
 struct AXCaptureStrategy: TextCaptureStrategy {
     func tryCapture() -> String? {
-        guard AXIsProcessTrusted() else {
-            os_log(.debug, log: capLogger, "AXCapture: 无辅助功能权限")
-            return nil
-        }
+        guard AXIsProcessTrusted() else { return nil }
         let system = AXUIElementCreateSystemWide()
         guard let appRef = system.copyAttribute(kAXFocusedApplicationAttribute as CFString),
               CFGetTypeID(appRef) == AXUIElementGetTypeID()
-        else {
-            os_log(.debug, log: capLogger, "AXCapture: 无法获取焦点应用")
-            return nil
-        }
+        else { return nil }
         let app = appRef as! AXUIElement
         AXUIElementSetMessagingTimeout(app, kAXTimeout)
         guard let elemRef = app.copyAttribute(kAXFocusedUIElementAttribute as CFString),
               CFGetTypeID(elemRef) == AXUIElementGetTypeID()
-        else {
-            os_log(.debug, log: capLogger, "AXCapture: 无法获取焦点元素")
-            return nil
-        }
+        else { return nil }
         let elem = elemRef as! AXUIElement
         AXUIElementSetMessagingTimeout(elem, kAXTimeout)
         guard let s = elem.copyAttribute(kAXSelectedTextAttribute as CFString) as? String,
-              !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            os_log(.debug, log: capLogger, "AXCapture: 选中文本为空或不可用")
-            return nil
-        }
-        os_log(.info, log: capLogger, "AXCapture 成功: %d 字符", s.count)
+              !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return s
     }
 }
@@ -120,20 +91,21 @@ struct ScreenCaptureOCRCaptureStrategy: TextCaptureStrategy {
 
     func tryCapture() -> String? {
         return autoreleasepool {
+            // NSEvent.mouseLocation 是 AppKit 全局坐标（bottom-left）。
+            // 保持 AppKit 坐标系，不做 CG 翻转 —— 旧代码 `cgScreenHeight - mouse.y`
+            // 假设所有屏幕底部对齐于全局 y=0（依赖主屏布局），外接屏在主屏
+            // 上方/下方/左侧/右侧时必然失配，导致取图偏移或取错屏。
             let mouse = NSEvent.mouseLocation
-            let cgScreenHeight = NSScreen.screens.map { $0.frame.maxY }.max()
-                ?? NSScreen.main?.frame.maxY
-                ?? 0
-            let cgMouseY = cgScreenHeight - mouse.y
 
             let passes: [(width: CGFloat, height: CGFloat, minConfidence: Float)] = [
                 (240, 50,  0.35), (400, 90, 0.25), (560, 140, 0.15),
             ]
 
             for (w, h, minConf) in passes {
-                let rect = CGRect(x: mouse.x - w/2, y: cgMouseY - h/2, width: w, height: h)
+                // AppKit 全局 rect（bottom-left），与 NSScreen.frame 坐标系一致
+                let rect = CGRect(x: mouse.x - w/2, y: mouse.y - h/2, width: w, height: h)
 
-                guard let cgImage = captureScreen(rect: rect) else { continue }
+                guard let cgImage = captureScreen(appKitRect: rect) else { continue }
 
                 // Grayscale cuts VRAM ~75% for the neural model
                 guard let processedImage = toGrayscale(cgImage) else { continue }
@@ -199,54 +171,51 @@ struct ScreenCaptureOCRCaptureStrategy: TextCaptureStrategy {
     /// Captures a screen region using `SCScreenshotManager`.
     /// Uses a semaphore to bridge the async API into the synchronous
     /// `tryCapture()` interface required by the strategy protocol.
-    private func captureScreen(rect: CGRect) -> CGImage? {
-        let lock = NSLock()
-        var result: CGImage?
+    ///
+    /// - Parameter appKitRect: **AppKit 全局 rect**（bottom-left），由
+    ///   `NSEvent.mouseLocation` 直接构造，不做 CG 翻转。
+    private func captureScreen(appKitRect: CGRect) -> CGImage? {
+        // 用 `OSAllocatedUnfairLock`（Sendable）替代 NSLock + 捕获可变 var，
+        // 满足 Swift 6 严格并发（消除 lock/unlock 与 mutation 告警）。
+        let box = OSAllocatedUnfairLock(initialState: nil as CGImage?)
         let semaphore = DispatchSemaphore(value: 0)
-        let workItem = DispatchWorkItem {
-            Task {
-                do {
-                    let content = try await SCShareableContent.current
-                    let midPoint = CGPoint(x: rect.midX, y: rect.midY)
-                    guard let display = content.displays.first(where: { $0.frame.contains(midPoint) })
-                            ?? content.displays.first else { semaphore.signal(); return }
 
-                    // Use NSScreen for ALL coordinate math — NSScreen.frame
-                    // (AppKit, bottom-left origin) vs SCDisplay.frame (CG,
-                    // top-left origin) have different Y values for non-primary
-                    // displays.  Computing locally within one NSScreen avoids
-                    // cross-coordinate-system arithmetic entirely.
-                    guard let screen = NSScreen.screens.first(where: { $0.frame.contains(midPoint) })
-                            ?? NSScreen.main else { semaphore.signal(); return }
-                    let screenFrame = screen.frame
-                    let scale = screen.backingScaleFactor
+        Task.detached(priority: .userInitiated) {
+            defer { semaphore.signal() }
+            do {
+                let content = try await SCShareableContent.current
 
-                    let localAppKitX = rect.origin.x - screenFrame.origin.x
-                    let localAppKitY = rect.origin.y - screenFrame.origin.y
-                    let localCGY = screenFrame.height - localAppKitY - rect.height
-                    let sourceRect = CGRect(x: localAppKitX, y: localCGY, width: rect.width, height: rect.height)
+                // ── 屏幕选择：AppKit 坐标匹配 NSScreen.frame（bottom-left 一致）──
+                let midPoint = CGPoint(x: appKitRect.midX, y: appKitRect.midY)
+                guard let screen = DisplayGeometry.screen(containing: midPoint)
+                        ?? DisplayGeometry.nearestScreen(to: midPoint) else { return }
 
-                    let filter = SCContentFilter(display: display, excludingWindows: [])
-                    let config = SCStreamConfiguration()
-                    config.showsCursor = false
-                    config.pixelFormat = kCVPixelFormatType_32BGRA
-                    config.sourceRect = sourceRect
-                    config.width  = Int(sourceRect.width * scale)
-                    config.height = Int(sourceRect.height * scale)
+                // ── CGDirectDisplayID 精确关联 SCDisplay，杜绝坐标系错配 ──
+                guard let displayID = DisplayGeometry.displayID(for: screen),
+                      let display = DisplayGeometry.scDisplay(in: content, matching: displayID)
+                else { return }
 
-                    let captured = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-                    lock.lock()
-                    result = captured
-                    lock.unlock()
-                } catch { /* silent */ }
-                semaphore.signal()
-            }
+                // ── 统一坐标转换：AppKit 全局 → display-local（top-left）──
+                let scale = DisplayGeometry.scaleFactor(for: display, screen: screen)
+                let sourceRect = DisplayGeometry.displayLocalSourceRect(forAppKitGlobal: appKitRect,
+                                                                        screenFrame: screen.frame)
+                let pixel = DisplayGeometry.outputPixelSize(forLocalRect: sourceRect, scale: scale)
+
+                let filter = SCContentFilter(display: display, excludingWindows: [])
+                let config = SCStreamConfiguration()
+                config.showsCursor = false
+                config.pixelFormat = kCVPixelFormatType_32BGRA
+                config.sourceRect = sourceRect
+                config.width  = pixel.width
+                config.height = pixel.height
+
+                let captured = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                box.withLock { $0 = captured }
+            } catch { /* silent */ }
         }
-        DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
+
         _ = semaphore.wait(timeout: .now() + 0.5)
-        lock.lock()
-        defer { lock.unlock() }
-        return result
+        return box.withLock { $0 }
     }
 
     // MARK: - Grayscale conversion

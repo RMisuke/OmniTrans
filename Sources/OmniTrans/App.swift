@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Carbon
+import DisplayGeometry
 
 // MARK: - App Entry Point
 
@@ -9,10 +10,12 @@ struct OmniTransApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            Color.clear.frame(width: 0, height: 0)
+        // （审计 C1）不再创建 0×0 占位 WindowGroup —— accessory 菜单栏应用
+        // 启动时不需要任何窗口。`Settings` 场景仅在用户显式打开时才实例化
+        // 窗口，消除原占位窗口「创建 → 遍历查找 → 关闭」的启动开销与闪烁。
+        Settings {
+            EmptyView()
         }
-        .defaultSize(width: 0, height: 0)
     }
 }
 
@@ -24,6 +27,14 @@ struct OmniTransApp: App {
 /// - **Settings window**: `SettingsWindowManager` — independent `.titled` NSWindow.
 ///
 /// No popover, no custom click-handling, no right-click hacks.
+/// OCR 忙碌状态机（方案 A）——驱动菜单栏状态反馈：
+/// - `.selecting`：用户正在框选区域
+/// - `.parsing`：OCR 分析中（截图 + Vision）
+/// - `.idle`：空闲（还原图标）
+enum OCRBusyState {
+    case idle, selecting, parsing
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
@@ -32,6 +43,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let windowManager = WindowManager()
     private var statusItem: NSStatusItem?
     private var onboardingWindow: NSWindow?
+    /// 当前 OCR 忙碌状态（方案 A）——驱动菜单栏「解析中…」稳定反馈。
+    private var ocrBusyState: OCRBusyState = .idle
+    /// OCR 状态提示 popover（`.applicationDefined`，不因点击外部/失焦自动关闭）。
+    private var ocrStatusPopover: NSPopover?
     private var hotkeysDisabledItem: NSMenuItem?
 
     // MARK: - Lifecycle
@@ -39,33 +54,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        // ── Disable ANE (Apple Neural Engine) for Vision framework ──
-        // On this M1 system, the TextRecognition E5 ANE model bundles are
-        // corrupt/missing from the system framework (likely from a macOS
-        // Sequoia OTA update).  Setting VNDisableANE forces Vision to run
-        // its .accurate text recognition pipeline entirely on the CPU
-        // (Espresso engine) instead of trying to load the broken ANE model.
-        // This restores full OCR accuracy without character substitutions,
-        // at the cost of slightly slower per-inference latency.
-        setenv("VNDisableANE", "1", 1)
-
         // Register all UserDefaults defaults once at startup.
         ConfigurationStore.registerDefaults()
 
         MemoryPurgeHelper.shared.registerMemoryWarningObserver()
-        MacOSNativeProvider.prewarmCache()
+        // （审计 C2）移除 MacOSNativeProvider.prewarmCache() —— 用常见词预热
+        // 对真实查询命中率几乎为零，纯耗电；词典缓存改为按需填充。
 
-        // ── OCR hardware probe (runs once at startup) ──
-        // Diagnoses whether .accurate (ANE/CPU) or .fast-only is
-        // available on this system.  The result is stored in
-        // OCRHardwareMode.current and used by all OCR calls.
-        Task { await OCRHardwareDiagnostic.shared.run() }
+        // ── OCR 硬件探测（惰性化）──
+        // 不再在启动时立即运行（最多占用 ANE 6s）；改为首次 OCR 触发时执行，
+        // 与用户的框选拖拽时间重叠。探测完成前 fallback 到 .fast（安全模式）。
+
+#if DEBUG
+        // ── 多屏布局诊断 ── 仅 Debug 构建运行，Release 不做无用功（审计 B3）──
+        Task { @MainActor in await DisplayLayoutDebug.dump() }
+#endif
 
         ThemeEngine.shared.apply()
 
         // Onboarding re-trigger from About page
         NotificationCenter.default.addObserver(forName: NSNotification.Name("OmniTransShowOnboarding"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.showOnboardingIfNeeded() }
+        }
+
+        // ── OCR loading indicator（方案 A：状态机统一驱动）──
+        NotificationCenter.default.addObserver(forName: Notification.Name("OmniTransOCRLoading"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setOCRStatus(.parsing) }
+        }
+        NotificationCenter.default.addObserver(forName: Notification.Name("OmniTransOCRDone"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setOCRStatus(.idle) }
         }
 
         // ── OCR failure feedback (see OCRSelectionOverlay) ──
@@ -97,13 +114,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         HotkeyManager.shared.onReplaceHotkey = {
             let text = AppState.shared.translatedText
             guard !text.isEmpty else { return }
-            TextReplacementService.shared.replaceSelectedText(with: text)
+            // async 版本：不在主线程自旋，避免 UI 冻结
+            Task { await TextReplacementService.shared.replaceSelectedText(with: text) }
         }
 
         AnimationGate.refresh()
-
-        // ── Install shared Carbon event handler once at startup ──
-        HotkeyManager.setup()
 
         // Only register hotkeys if user hasn't disabled them
         if UserDefaults.standard.bool(forKey: "hotkeys_enabled") {
@@ -120,7 +135,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         HotkeyManager.shared.preConnectCurrentProvider()
 
         setupStatusItem()
-        hidePlaceholderWindow()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             self?.showOnboardingIfNeeded()
@@ -179,7 +193,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = buildMenu()
         menu.delegate = self
         menu.appearance = NSApp.effectiveAppearance
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 2), in: button)
+        // NSStatusBarButton 的坐标系在 macOS 新版中不可靠，直接转换会偏移到屏幕最右侧。
+        // 使用 popUpContextMenu 让 AppKit 基于当前点击事件自行定位，最准确可靠。
+        if let event = NSApp.currentEvent {
+            NSMenu.popUpContextMenu(menu, with: event, for: button)
+        } else {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 2), in: button)
+        }
     }
 
     // MARK: - NSMenu Construction
@@ -356,7 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.async {
             let text = AppState.shared.translatedText
             guard !text.isEmpty else { return }
-            TextReplacementService.shared.replaceSelectedText(with: text)
+            Task { await TextReplacementService.shared.replaceSelectedText(with: text) }
         }
     }
 
@@ -523,13 +543,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let text, !text.isEmpty { s.translate(context: context) }
     }
 
+    // ── OCR 状态反馈（方案 A）──
+
+    /// 更新菜单栏 OCR 状态反馈：
+    /// - `.selecting`：popover 提示「拖选屏幕区域…」（框选阶段）
+    /// - `.parsing`：statusItem 标题「解析中…」（稳定主通道，点击/失焦不丢失）
+    /// - `.idle`：还原图标与标题，关闭 popover
+    private func setOCRStatus(_ state: OCRBusyState) {
+        guard let button = statusItem?.button else { return }
+        ocrBusyState = state
+        switch state {
+        case .selecting:
+            dismissOCRStatusPopover()
+            button.title = ""
+            showOCRStatusPopover(message: "拖选屏幕区域…")
+        case .parsing:
+            dismissOCRStatusPopover()
+            button.title = "解析中…"
+        case .idle:
+            dismissOCRStatusPopover()
+            button.title = ""
+            applyStatusBarIcon(to: button)
+        }
+    }
+
+    /// 复位 OCR 状态（回到空闲）。
+    private func clearOCRStatus() {
+        setOCRStatus(.idle)
+    }
+
+    /// 显示 OCR 状态 popover（`.applicationDefined`：不因点击外部/失焦自动关闭）。
+    private func showOCRStatusPopover(message: String) {
+        guard let button = statusItem?.button else { return }
+        dismissOCRStatusPopover()
+        let popover = NSPopover()
+        popover.behavior = .applicationDefined
+        popover.animates = false
+        let controller = NSViewController()
+        controller.view = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 40))
+        let label = NSTextField(wrappingLabelWithString: message)
+        label.frame = controller.view.bounds.insetBy(dx: 12, dy: 8)
+        label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        label.textColor = NSColor.labelColor
+        label.isEditable = false
+        label.isBordered = false
+        label.drawsBackground = false
+        label.alignment = .center
+        label.autoresizingMask = [.width, .height]
+        controller.view.addSubview(label)
+        popover.contentViewController = controller
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        ocrStatusPopover = popover
+    }
+
+    private func dismissOCRStatusPopover() {
+        ocrStatusPopover?.close()
+        ocrStatusPopover = nil
+    }
+
     private func startOCRSelection() {
-        OCRSelectionOverlay.shared.beginCapture { [weak self] text in
-            guard let self, let text else { return }
+        // （审计 C3）首次 OCR 时惰性触发硬件探测 —— 与用户拖拽框选的数百毫秒
+        // 重叠；runIfNeeded 幂等，后续调用立即返回。
+        Task { await OCRHardwareDiagnostic.shared.runIfNeeded() }
+
+        // 方案 A：框选开始即反馈，取词事件响应及时
+        setOCRStatus(.selecting)
+        OCRSelectionOverlay.shared.beginCapture { [weak self] result in
+            guard let self, let result else {
+                // OCR failed or cancelled — 恢复状态栏
+                NotificationCenter.default.post(name: Notification.Name("OmniTransOCRDone"), object: nil)
+                return
+            }
             let s = AppState.shared
-            s.resetForNew(text: text)
-            self.showFloatingPanel()
+            s.resetForNew(text: result.text)
+            // 方案 B：先 translate（同步置 isTranslating=true 或填充缓存结果），
+            // 再弹窗 —— 面板首帧即为「正在翻译…」动画或缓存结果，杜绝空白/半渲染帧。
             s.translate()
+            // 解析完成 → 恢复状态栏
+            NotificationCenter.default.post(name: Notification.Name("OmniTransOCRDone"), object: nil)
+            self.showFloatingPanel()
+            // result.lines 携带每行文字在屏幕上的区域（AppKit 全局 bottom-left），
+            // 可供后续原位替换 / 区域定位使用。
         }
     }
 
@@ -566,16 +660,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         onboardingWindow?.close()
         onboardingWindow = nil
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func hidePlaceholderWindow() {
-        DispatchQueue.main.async {
-            for window in NSApp.windows {
-                if window.contentView?.subviews.first is NSHostingView<SwiftUI.Color> {
-                    window.close()
-                }
-            }
-        }
     }
 
 }

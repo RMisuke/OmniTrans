@@ -38,8 +38,13 @@ protocol TTSEngine {
 @MainActor
 final class NativeTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate {
     private let synth = AVSpeechSynthesizer()
-    private let logger = Logger(subsystem: "com.omnitrans.app", category: "TTSEngine")
+    private let logger = Logger(subsystem: AppLogging.subsystem, category: "TTSEngine")
     private var continuation: CheckedContinuation<Void, Error>?
+
+    // MARK: - Speaking State (B15)
+
+    /// 真实播报状态 —— 直接查询底层 AVSpeechSynthesizer。
+    var isSpeaking: Bool { synth.isSpeaking }
 
     // MARK: - Voice Cache
 
@@ -158,6 +163,11 @@ final class OpenAITTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate {
 
     init(apiKey: String) { self.apiKey = apiKey }
 
+    // MARK: - Speaking State (B15)
+
+    /// 真实播报状态 —— 底层 AVAudioPlayer 是否正在播放。
+    var isSpeaking: Bool { player?.isPlaying ?? false }
+
     func speak(text: String) async throws {
         let url = URL(string: "https://api.openai.com/v1/audio/speech")!
         var req = URLRequest(url: url)
@@ -172,7 +182,9 @@ final class OpenAITTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: req)
+        // B16: 复用共享 URLSession（HTTP/2 连接池 + 统一超时），不再裸用 URLSession.shared
+        req.timeoutInterval = NetworkConfig.requestTimeout
+        let (data, response) = try await sharedURLSession.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
@@ -215,5 +227,8 @@ final class TTSManager {
         await openAI?.stop()
     }
 
-    var isSpeaking: Bool { false }
+    /// B15: 由底层引擎上报真实播报状态（此前恒为 false）。
+    var isSpeaking: Bool {
+        native.isSpeaking || (openAI?.isSpeaking ?? false)
+    }
 }

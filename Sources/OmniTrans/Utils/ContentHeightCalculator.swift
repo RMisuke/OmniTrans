@@ -60,8 +60,12 @@ struct ContentHeightCalculator {
     // MARK: - Cache
 
     /// 行数计算结果缓存，避免流式场景下高频重复 `boundingRect`。
-    /// key: `"\(text.hashValue)-\(layoutWidth)"`, value: 行数。
-    private static let lineCountCache = LineCountCache()
+    /// key: `"\(layoutWidth)|\(text)"`（直接用完整文本，避免 `hashValue` 碰撞，M11）。
+    private static let lineCountCache: LineCountCache = {
+        let cache = LineCountCache()
+        cache.countLimit = cacheLimit
+        return cache
+    }()
 
     /// 缓存上限，防止长文本场景下无限膨胀。
     private static let cacheLimit = 200
@@ -115,7 +119,8 @@ struct ContentHeightCalculator {
     /// - Returns: 文本在 `layoutWidth` 下的行数
     func lineCount(for text: String) -> Int {
         guard !text.isEmpty else { return 0 }
-        let key = "\(text.hashValue)-\(layoutWidth)" as NSString
+        // M11: 用完整文本（拼上宽度）作 key，消除 `hashValue` 的碰撞风险
+        let key = "\(layoutWidth)|\(text)" as NSString
         if let cached = Self.lineCountCache.object(forKey: key) {
             return cached.intValue
         }
@@ -123,10 +128,6 @@ struct ContentHeightCalculator {
         let lh = lineHeight
         let count = max(1, Int(ceil(h / lh)))
 
-        // 缓存上限保护
-        if Self.lineCountCache.countLimit < Self.cacheLimit {
-            Self.lineCountCache.countLimit = Self.cacheLimit
-        }
         Self.lineCountCache.setObject(NSNumber(value: count), forKey: key)
         return count
     }

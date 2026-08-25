@@ -86,8 +86,6 @@ final class AppState: ObservableObject {
     private var lastText = ""
     private var lastTarget: TranslationLanguage = .chinese
     private var lastProviderID: UUID? = nil
-    private var retryCount = 0
-    private let maxAutoRetry = 1
     private var activeStreamTask: Task<Void, Never>?
 
     init() {
@@ -261,7 +259,6 @@ final class AppState: ObservableObject {
         // Skip if nothing changed (same text, target, and provider)
         if text == lastText, targetLang == lastTarget, selectedProviderID == lastProviderID, !translatedText.isEmpty { return }
 
-        retryCount = 0
         doTranslate(text: text, provider: p, context: context, forceRefresh: forceRefresh)
     }
 
@@ -299,19 +296,34 @@ final class AppState: ObservableObject {
             let cacheEnabled = self.configuration.isDictCacheEnabled
             let langKey = self.targetLang.rawValue
 
+            // ── 上下文感知标记: 当上下文可用且上下文感知开启时，
+            //    缓存键追加 "_ctx" 后缀以区分上下文感知与非上下文感知的结果。
+            //    这确保语境含义不同的同词查询能得到各自对应的词典结果。
+            let isContextActive = context?.hasContext == true && configuration.isContextAwareEnabled
+            let ctxTag = isContextActive ? "_ctx" : ""
+
             // ── L1 内存缓存 (最快, 零 I/O) ──
-            if isDict, !forceRefresh, cacheEnabled {
+            if isDict, !forceRefresh, cacheEnabled, !isContextActive {
                 let l1Key = "\(text.lowercased())_\(langKey)" as NSString
                 if let cachedEntry = dictEntryCache.get(l1Key) {
                     self.dictionaryEntry = cachedEntry
                     self.isDictionaryMode = true
                     self.isTranslating = false
                     self.session.isFromLocalCache = true
-                    self.session.cachedModelName = ""
-                    self.session.cacheTimestamp = ""
+                    // 恢复 L1 元数据 (modelName|timestamp)
+                    if let meta = dictEntryCache.getMeta(l1Key) {
+                        let parts = meta.split(separator: "|", maxSplits: 1)
+                        self.session.cachedModelName = parts.count > 0 ? String(parts[0]) : ""
+                        self.session.cacheTimestamp = parts.count > 1 ? String(parts[1]) : ""
+                    } else {
+                        self.session.cachedModelName = ""
+                        self.session.cacheTimestamp = ""
+                    }
                     self.streamingFinished = true
                     self.showSuccessPulse = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { self.showSuccessPulse = false }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                        self?.showSuccessPulse = false
+                    }
                     self.addHistory(text: text, result: "", provider: effectiveProvider)
                     self.isDictionaryMode = false
                     return
@@ -319,12 +331,12 @@ final class AppState: ObservableObject {
             }
 
             // ── L2 SQLite 持久缓存 (磁盘 I/O, 命中后预热 L1) ──
-            if isDict, !forceRefresh, cacheEnabled {
+            if isDict, !forceRefresh, cacheEnabled, !isContextActive {
                 if let cached = await LocalDictionaryRepository.shared.fetchEntry(word: text, targetLang: langKey),
                    let entry = DictionaryEntry.parse(from: cached.jsonData, word: text) {
                     // Warm L1 — 后续查询零 I/O 直接命中内存
                     let l1Key = "\(text.lowercased())_\(langKey)" as NSString
-                    self.dictEntryCache.set(entry, forKey: l1Key)
+                    self.dictEntryCache.set(entry, modelName: cached.modelName, timestamp: cached.timestamp, forKey: l1Key)
                     // Populate UI
                     self.dictionaryEntry = entry
                     self.isDictionaryMode = true
@@ -334,7 +346,9 @@ final class AppState: ObservableObject {
                     self.session.cacheTimestamp = cached.timestamp
                     self.streamingFinished = true
                     self.showSuccessPulse = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { self.showSuccessPulse = false }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                        self?.showSuccessPulse = false
+                    }
                     self.addHistory(text: text, result: cached.jsonData, provider: effectiveProvider)
                     self.isDictionaryMode = false
                     return
@@ -389,7 +403,14 @@ final class AppState: ObservableObject {
                         if entry.isWord {
                             // Native 结果仅存 L1 (本地查询无 token 消耗)
                             let dk = "\(text.lowercased())_\(langKey)" as NSString
-                            self.dictEntryCache.set(entry, forKey: dk)
+                            let nativeModel = "macOS 词典"
+                            let nowNative = ISO8601DateFormatter()
+                            nowNative.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                            let tsNative = nowNative.string(from: Date())
+                            self.dictEntryCache.set(entry, modelName: nativeModel, timestamp: tsNative, forKey: dk)
+                            self.session.isFromLocalCache = true
+                            self.session.cachedModelName = nativeModel
+                            self.session.cacheTimestamp = tsNative
                         }
                     } else if let parser = dictParser,
                               let entry = await parser.flush() {
@@ -397,17 +418,26 @@ final class AppState: ObservableObject {
                         let fullText = chunks.joined()
                         // ── Hard-lock: 菜单栏兜底渲染 ──
                         self.session.lastValidDictionaryJson = fullText
-                        // ── L1 内存缓存 (同一 session 内零 I/O) ──
-                        let dk = "\(text.lowercased())_\(langKey)" as NSString
-                        self.dictEntryCache.set(entry, forKey: dk)
-                        // ── L2 SQLite 持久化 (write-once, 仅 forceRefresh 覆盖) ──
-                        let model = effectiveProvider.modelName
-                        Task.detached(priority: .utility) {
-                            await LocalDictionaryRepository.shared.saveEntry(
-                                word: text, targetLang: langKey,
-                                modelName: model, jsonData: fullText,
-                                overwrite: forceRefresh
-                            )
+                        // ── L1 内存缓存 (上下文感知结果使用独立键) ──
+                        let dk = "\(text.lowercased())_\(langKey)\(ctxTag)" as NSString
+                        let aiModel = effectiveProvider.modelName
+                        let nowAI = ISO8601DateFormatter()
+                        nowAI.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                        let tsAI = nowAI.string(from: Date())
+                        self.dictEntryCache.set(entry, modelName: aiModel, timestamp: tsAI, forKey: dk)
+                        self.session.isFromLocalCache = true
+                        self.session.cachedModelName = aiModel
+                        self.session.cacheTimestamp = tsAI
+                        // ── L2 SQLite 持久化 (仅非上下文感知模式, write-once) ──
+                        if !isContextActive {
+                            let model = aiModel
+                            Task.detached(priority: .utility) {
+                                await LocalDictionaryRepository.shared.saveEntry(
+                                    word: text, targetLang: langKey,
+                                    modelName: model, jsonData: fullText,
+                                    overwrite: forceRefresh
+                                )
+                            }
                         }
                     } else {
                         self.dictionaryEntry = nil
@@ -424,10 +454,9 @@ final class AppState: ObservableObject {
                 self.streamingFinished = true
                 self.showSuccessPulse = true
 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                    self.showSuccessPulse = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                    self?.showSuccessPulse = false
                 }
-                self.retryCount = 0
                 // ⚠️ addHistory must be called BEFORE isDictionaryMode reset,
                 // otherwise HistoryEntry.isDictionaryMode is always false
                 self.addHistory(text: text, result: chunks.joined(), provider: effectiveProvider)
@@ -447,8 +476,8 @@ final class AppState: ObservableObject {
                     self.isTranslating = false
                     self.streamingFinished = true
                     self.showSuccessPulse = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                        self.showSuccessPulse = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                        self?.showSuccessPulse = false
                     }
                     return
                 }
@@ -488,10 +517,9 @@ final class AppState: ObservableObject {
                         self.translatedText = r.text
                         self.isTranslating = false; self.streamingFinished = true
                         self.showSuccessPulse = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                            self.showSuccessPulse = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                            self?.showSuccessPulse = false
                         }
-                        self.retryCount = 0
                         self.addHistory(text: text, result: r.text, provider: effectiveProvider)
                     } catch {
                         NetworkLogger.logError("NonStreamingFallback", error)
@@ -500,11 +528,11 @@ final class AppState: ObservableObject {
                         self.isTranslating = false
                         self.showErrorShake = true
                         self.showErrorPulse = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                            self.showErrorPulse = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                            self?.showErrorPulse = false
                         }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                            self.showErrorShake = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                            self?.showErrorShake = false
                         }
                     }
                 }
@@ -518,7 +546,6 @@ final class AppState: ObservableObject {
         dictionaryEntry = nil; isDictionaryMode = false
         streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
         showPermissionHint = !HotkeyManager.isTrusted && text.isEmpty
-        retryCount = 0
 
         // Pre-allocate translatedText buffer: translations are typically 1×–3× source length.
         // This avoids ~log₂(N) heap reallocations during streaming token concatenation.

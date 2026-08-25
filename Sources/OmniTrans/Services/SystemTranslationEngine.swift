@@ -1,11 +1,11 @@
 import Foundation
-import Translation
-import NaturalLanguage
+@preconcurrency import Translation
+@preconcurrency import NaturalLanguage
 import os
 
 /// Logger for Translation framework diagnostics.
 private let transLogger = OSLog(
-    subsystem: Bundle.main.bundleIdentifier ?? "com.omnitrans.omnitrans",
+    subsystem: AppLogging.subsystem,
     category: "system-translation"
 )
 
@@ -37,20 +37,29 @@ actor SystemTranslationEngine {
     // MARK: - Language pack cache
 
     /// In-memory mirror of `UserDefaults` bool per language-pair key.
-    nonisolated(unsafe) private static var installedCache: [String: Bool] = [:]
+    /// 用 `OSAllocatedUnfairLock` 保护静态缓存，消除多线程数据竞争（审计 M2）。
+    private static let installedCacheLock = OSAllocatedUnfairLock(initialState: [String: Bool]())
+
+    private static func packKey(_ source: Locale.Language, _ target: Locale.Language) -> String {
+        "nlp_\(source.languageCode?.identifier ?? "?")_\(target.languageCode?.identifier ?? "?")"
+    }
 
     private static func isPackKnownInstalled(source: Locale.Language, target: Locale.Language) -> Bool {
-        let key = "nlp_\(source.languageCode?.identifier ?? "?")_\(target.languageCode?.identifier ?? "?")"
-        if let v = installedCache[key] { return v }
-        let v = UserDefaults.standard.bool(forKey: key)
-        installedCache[key] = v
-        return v
+        let key = packKey(source, target)
+        return installedCacheLock.withLock { cache in
+            if let v = cache[key] { return v }
+            let v = UserDefaults.standard.bool(forKey: key)
+            cache[key] = v
+            return v
+        }
     }
 
     private static func markPackInstalled(source: Locale.Language, target: Locale.Language) {
-        let key = "nlp_\(source.languageCode?.identifier ?? "?")_\(target.languageCode?.identifier ?? "?")"
-        installedCache[key] = true
-        UserDefaults.standard.set(true, forKey: key)
+        let key = packKey(source, target)
+        installedCacheLock.withLock { cache in
+            cache[key] = true
+            UserDefaults.standard.set(true, forKey: key)
+        }
     }
 
     // MARK: - Public API
@@ -206,7 +215,7 @@ actor SystemTranslationEngine {
                        source.languageCode?.identifier ?? "?",
                        target.languageCode?.identifier ?? "?")
                 let t0 = DispatchTime.now().uptimeNanoseconds
-                let s = await self.availability.status(from: source, to: target)
+                let s = await avail.status(from: source, to: target)
                 let elapsed = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000_000
                 os_log(.info, log: transLogger,
                        "语言包查询完成: %{public}s (%.2f s)",

@@ -39,7 +39,7 @@ enum TranslationService {
         guard provider.kind != .macOSNative else {
             throw TranslationError.apiError("macOS Native should be handled locally")
         }
-        return try await TranslationActor().nonStreamingTranslate(
+        return try await TranslationActor.shared.nonStreamingTranslate(
             text: text, sourceLang: sourceLang,
             targetLang: targetLang, provider: provider
         )

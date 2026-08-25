@@ -37,17 +37,13 @@ final class TranslationSessionStore {
 
 // MARK: - Configuration Store
 
-/// Provider config, language preferences, history — low-frequency state
-/// that does NOT change during streaming translation.
+/// Provider config / languages / history 的单一权威来源是 `AppState`；
+/// `ConfigurationStore` 仅承载 **设置型计算属性**（直接读写 UserDefaults），
+/// 供翻译逻辑读取。此前的 providers/selectedProviderID/… 存储副本与 `syncFrom`
+/// 从未被实际消费（Views 均观察 `AppState.shared`），已移除以避免双 SSOT 漂移
+/// （审计 M5）。
 @Observable
 final class ConfigurationStore {
-    var providers: [APIProvider] = []
-    var selectedProviderID: UUID? = nil
-    var dictProviderID: UUID? = nil
-    var sourceLang: TranslationLanguage = .auto
-    var targetLang: TranslationLanguage = .chinese
-    var translationHistory: [HistoryEntry] = []
-
     /// Context-aware translation toggle — persisted to UserDefaults.
     /// When enabled, the app injects bidirectional sliding-window context
     /// into the LLM prompt for domain-appropriate translations (pronoun
@@ -105,16 +101,6 @@ final class ConfigurationStore {
     /// the intensity→character mapping, avoiding duplicate switch logic.
     var contextCharLimit: Int {
         ContextAwareService.contextCharLimit
-    }
-
-    /// Bridge from legacy AppState on launch / settings changes.
-    @MainActor func syncFrom(_ state: AppState) {
-        providers = state.providers
-        selectedProviderID = state.selectedProviderID
-        dictProviderID = state.dictProviderID
-        sourceLang = state.sourceLang
-        targetLang = state.targetLang
-        translationHistory = state.translationHistory
     }
 
     // MARK: - Defaults Registration

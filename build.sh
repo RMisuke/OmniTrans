@@ -1,99 +1,46 @@
 #!/bin/bash
-set -e
-
+# ============================================================================
+# OmniTrans 通用构建脚本（universal：arm64 + x86_64）
+# 产物：.build/OmniTrans.app（bundle id: com.omnitrans.app）
+#
+# 修复要点：
+#   - DEVELOPER_DIR 动态检测（Xcode-beta > Xcode > xcode-select），兼容 CLT
+#   - 产物路径兼容 Xcode 27/Swift 6.4 的 .build/out/Products/Release 布局
+#   - 显式 MACOSX_DEPLOYMENT_TARGET=14.0，与 Package.swift / Info.plist 一致
+# ============================================================================
+set -euo pipefail
 cd "$(dirname "$0")"
 
-# ──────────────────────────────────────────────
-#  Toolchain: force Xcode-beta for Xcode 27 Beta 3
-#  (avoids "spec already registered" errors from
-#   the standalone CLT SwiftBuild.framework)
-# ──────────────────────────────────────────────
-export DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer"
+# 共享构建环境（工具链选择 / 产物路径解析 / Info.plist / 组装 .app）
+source "$(dirname "$0")/scripts/omnitrans-build-common.sh"
 
-echo "=== Build environment ==="
-echo "DEVELOPER_DIR: $DEVELOPER_DIR"
-echo "Swift:"
-xcrun swift --version 2>&1 | head -2
-echo ""
+APP_NAME="OmniTrans.app"
+APP_DIR="$OMNI_ROOT/.build/$APP_NAME"
 
 echo "=== Cleaning old build ==="
-rm -rf .build/OmniTrans.app .build/release .build/out .build/apple 2>/dev/null || true
+rm -rf "$APP_DIR" .build/release .build/out .build/apple 2>/dev/null || true
+
+omni_print_env
 
 echo "=== Building OmniTrans (universal: arm64 + x86_64) release ==="
-xcrun swift build \
-    -c release \
-    --arch arm64 \
-    --arch x86_64 \
-    --disable-build-manifest-caching \
-    2>&1
+omni_swift_build_release --arch arm64 --arch x86_64
 
-# Binary output path (SwiftPM multi-arch via SwiftBuild)
-# Swift 6.4 / Xcode 27 may output to .build/apple/Products/Release/
-BIN_CANDIDATES=(
-    ".build/apple/Products/Release/OmniTrans"
-    ".build/release/OmniTrans"
-)
-BIN=""
-for candidate in "${BIN_CANDIDATES[@]}"; do
-    if [ -f "$candidate" ]; then
-        BIN="$candidate"
-        break
-    fi
-done
-
-APP_DIR=".build/OmniTrans.app"
-
-if [ -z "$BIN" ]; then
-    echo "ERROR: Binary not found in any expected path."
-    echo "Searching for built binary..."
+echo "=== Resolving release binary ==="
+BIN="$(omni_resolve_release_binary)" || {
+    echo "ERROR: release binary not found in any expected SwiftPM path."
     find .build -name "OmniTrans" -type f 2>/dev/null
     exit 1
-fi
+}
+echo "Binary: $BIN"
+file "$BIN"
 
-echo "=== Binary found at: $BIN ==="
-
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-cp "$BIN" "$APP_DIR/Contents/MacOS/OmniTrans"
-
-echo "=== Optimizing & Stripping Binary ==="
-strip -u -r "$APP_DIR/Contents/MacOS/OmniTrans"
-
-# Copy app icon (about page)
-cp "Resource/icon/icon.icns" "$APP_DIR/Contents/Resources/icon.icns"
-# Copy menu bar icon
-cp "Resource/icon/menubar.icns" "$APP_DIR/Contents/Resources/menubar.icns"
-
-# Minimal Info.plist
-cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-    <key>CFBundleExecutable</key><string>OmniTrans</string>
-    <key>CFBundleIdentifier</key><string>com.omnitrans.app</string>
-    <key>CFBundleName</key><string>OmniTrans</string>
-    <key>CFBundleDisplayName</key><string>OmniTrans</string>
-    <key>CFBundleVersion</key><string>0.6</string>
-    <key>CFBundleShortVersionString</key><string>0.6</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>CFBundleIconFile</key><string>icon.icns</string>
-    <key>LSUIElement</key><true/>
-</dict></plist>
-PLIST
-
-echo ""
-
-# Ad-hoc code signing — prevents "app is damaged" on other Macs
-echo "=== Signing app (ad-hoc) ==="
-codesign --force --deep --sign - "$APP_DIR" 2>&1
-
-# Remove quarantine attribute added by browsers / email
-xattr -cr "$APP_DIR" 2>/dev/null || true
+echo "=== Assembling $APP_NAME ==="
+omni_assemble_app "$BIN" "$APP_DIR" "com.omnitrans.app"
 
 echo ""
 echo "=== Build complete ==="
-echo "App: $(pwd)/$APP_DIR"
-echo "Run: open $(pwd)/$APP_DIR"
+echo "App: $APP_DIR"
+echo "Run: open $APP_DIR"
 
 # Show binary size for verification
 if command -v stat &>/dev/null; then

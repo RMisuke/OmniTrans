@@ -1,4 +1,8 @@
 import Foundation
+import OSLog
+
+/// M8: 解析日志统一走 OSLog（subsystem 统一），避免 print 噪音。
+private let nativeDictLog = OSLog(subsystem: AppLogging.subsystem, category: "NativeDictParser")
 
 // MARK: - Native Dictionary Parser
 
@@ -121,11 +125,11 @@ enum NativeDictionaryParser {
 
         // ── Validate ──
         guard !definitions.isEmpty else {
-            print("[NativeDictParser] ❌ No definitions extracted for '\(word)'")
+            os_log(.error, log: nativeDictLog, "No definitions extracted for '%{public}@'", word)
             return nil
         }
 
-        print("[NativeDictParser] ✅ Parsed '\(word)': \(definitions.count) defs, \(examples.count) exs, \(inflections.count) infls")
+        os_log(.debug, log: nativeDictLog, "Parsed '%{public}@': %d defs, %d exs, %d infls", word, definitions.count, examples.count, inflections.count)
 
         return DictionaryEntry(
             isWord: true, word: word,
@@ -319,8 +323,11 @@ enum NativeDictionaryParser {
     /// Removes pinyin strings (containing tone-marked vowels like āáǎà) from
     /// Chinese definition text.  Legitimate English words without tone marks
     /// (DNA, WiFi, etc.) are preserved.
+    /// 仅当文本含中文字符时才剥离拼音 —— 纯英文释义中的带重音词（如
+    /// café、résumé、cliché）不属于中文拼音，不应被删除（审计 M3）。
     @inline(__always)
     private static func stripPinyin(_ text: String) -> String {
+        guard text.unicodeScalars.contains(where: { Self.isCJK($0) }) else { return text }
         let toneVowels = CharacterSet(charactersIn: "āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ")
         let words = text.components(separatedBy: .whitespaces)
         let filtered = words.filter { word in
@@ -330,6 +337,12 @@ enum NativeDictionaryParser {
             return false
         }
         return filtered.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+    }
+
+    /// 是否 CJK 统一表意文字（含扩展 A 区）。
+    @inline(__always)
+    private static func isCJK(_ scalar: Unicode.Scalar) -> Bool {
+        (0x4E00...0x9FFF).contains(scalar.value) || (0x3400...0x4DBF).contains(scalar.value)
     }
 
     // MARK: - Sense Flushing

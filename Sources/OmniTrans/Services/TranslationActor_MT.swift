@@ -137,12 +137,12 @@ private enum SignerUtilities {
         guard http.statusCode == 200 else {
             let code = body.xmlTagValue("Code") ?? "Unknown"
             let msg = body.xmlTagValue("Message") ?? body
-            print("[\(label)Test] ❌ [\(code)] \(msg)")
+            NetworkLogger.log("\(label)Test", "❌ [\(code)] \(msg)")
             throw NSError(domain: "", code: http.statusCode,
                 userInfo: [NSLocalizedDescriptionKey: "\(label) [\(code)] \(msg)"])
         }
 
-        print("[\(label)Test] HTTP 200")
+        NetworkLogger.log("\(label)Test", "HTTP 200")
         parseOK(body)
     }
 }
@@ -203,7 +203,7 @@ enum AlibabaCloudSigner {
             params: params, hash: Insecure.SHA1.self, label: "Alibaba"
         ) { body in
             if let translated = body.xmlTagValue("Translated") {
-                print("[AlibabaTest] ✅ hello → \(translated)")
+                NetworkLogger.log("AlibabaTest", "✅ hello → \(translated)")
             }
         }
     }
@@ -228,7 +228,11 @@ enum VolcengineSigner {
             ("Version", "2020-06-01"),
             ("SourceLanguage", sourceLanguage),
             ("TargetLanguage", targetLanguage),
-            ("TextList", "[\(SignerUtilities.percentEncode(sourceText))]"), // M5: proper RFC 3986 encoding
+            // 注意：`TextList` 必须是 JSON 数组文本（如 `["hello"]`），
+            // 由 `buildSignedQuery` 统一做一次 RFC 3986 百分号编码。
+            // 禁止在此预编码 —— 否则 `%` 会被二次编码成 `%25`，含空格/中文/特殊字符
+            // 的源文本会翻译错误或签名校验失败（审计 C2）。
+            ("TextList", "[\(sourceText)]"),
             ("SignatureMethod", "HMAC-SHA256"),
             ("SignatureNonce", nonce),
             ("SignatureVersion", "1.0"),
@@ -261,7 +265,7 @@ enum VolcengineSigner {
             params: params, hash: SHA256.self, label: "Volcengine"
         ) { body in
             if body.contains("TranslationList") {
-                print("[VolcengineTest] ✅ hello translated")
+                NetworkLogger.log("VolcengineTest", "✅ hello translated")
             }
         }
     }

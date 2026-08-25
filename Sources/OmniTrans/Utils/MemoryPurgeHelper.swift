@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import OSLog
 
 /// Aggressive memory pressure reducer.
 /// - Drains CoreAnimation offscreen caches
@@ -16,6 +17,9 @@ final class MemoryPurgeHelper {
 
     /// DispatchSource for system-level memory pressure events.
     private var memoryPressureSource: DispatchSourceMemoryPressure?
+
+    /// OSLog 句柄 —— 与全工程统一 subsystem（审计 M4）。
+    private let memPurgeLog = OSLog(subsystem: AppLogging.subsystem, category: "MemoryPurge")
 
     private init() {}
 
@@ -38,7 +42,7 @@ final class MemoryPurgeHelper {
             guard let self else { return }
             let event = source.data
             if event == .warning || event == .critical {
-                print("[MemoryPurge] ⚠️ System memory pressure (\(event)) — evicting caches")
+                os_log(.error, log: memPurgeLog, "System memory pressure (%{public}@) — evicting caches", "\(event)")
                 Task { await HistoryActor.shared.evictMemoryCache() }
                 self.purgeBackendCache()
             }
@@ -57,7 +61,8 @@ final class MemoryPurgeHelper {
         // 2. Touch CoreGraphics to flush its internal caches
         _ = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
 
-        // 3. Mach-level: query TASK_VM_INFO to nudge kernel page reclamation
+        // 3. Mach-level: query TASK_VM_INFO — 读取 phys_footprint 作为
+        //    purge 前的内存基线（B14：真正使用返回值，不再丢弃）
         #if arch(arm64) || arch(x86_64)
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
@@ -66,7 +71,10 @@ final class MemoryPurgeHelper {
                 task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
             }
         }
-        if kr == KERN_SUCCESS { _ = info }
+        if kr == KERN_SUCCESS {
+            let footprintMB = Double(info.phys_footprint) / (1024.0 * 1024.0)
+            os_log(.debug, log: memPurgeLog, "purge: phys_footprint=%.1f MB", footprintMB)
+        }
         #endif
 
         // 4. malloc zone pressure relief — tell system allocator to return

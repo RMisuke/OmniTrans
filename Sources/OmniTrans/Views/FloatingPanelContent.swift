@@ -1,6 +1,35 @@
 import SwiftUI
 import AppKit
 
+// MARK: - 时间戳格式化器（P5）
+
+/// P5: 复用 DateFormatter 单例，避免 body 重绘时反复创建格式化器。
+/// 全部在 `@MainActor` 隔离下使用，规避 Swift 6 并发告警。
+@MainActor
+private enum PanelTimestampFormatters {
+    static let iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    static let display: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy/M/d HH:mm"
+        f.timeZone = TimeZone.current
+        f.locale = Locale.current
+        return f
+    }()
+
+    static let legacy: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.timeZone = TimeZone.current
+        f.locale = Locale.current
+        return f
+    }()
+}
+
 // MARK: - Floating Panel Content v0.6
 
 struct FloatingPanelContent: View {
@@ -62,22 +91,15 @@ struct FloatingPanelContent: View {
 
     /// 工作区显示模式 — 驱动跨 mode 切换的动画。
     /// Formats the UTC SQLite timestamp to the user's local timezone.
+    /// P5: 复用静态格式化器，消除重绘时的重复创建开销。
+    @MainActor
     var formattedCacheTimestamp: String {
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let fallback = DateFormatter()
-        fallback.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        fallback.timeZone = TimeZone.current
-        fallback.locale = Locale.current
-
-        if let date = iso.date(from: session.cacheTimestamp) {
-            return fallback.string(from: date)
+        if let date = PanelTimestampFormatters.iso.date(from: session.cacheTimestamp) {
+            return PanelTimestampFormatters.display.string(from: date)
         }
-        // Fallback: try simple format
-        fallback.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        if let date = fallback.date(from: session.cacheTimestamp) {
-            fallback.dateFormat = "yyyy-MM-dd HH:mm"
-            return fallback.string(from: date)
+        // Fallback: legacy SQLite CURRENT_TIMESTAMP (UTC, no timezone info)
+        if let date = PanelTimestampFormatters.legacy.date(from: session.cacheTimestamp) {
+            return PanelTimestampFormatters.display.string(from: date)
         }
         return session.cacheTimestamp
     }
@@ -924,7 +946,9 @@ struct FloatingPanelContent: View {
 
     private func formattedTime(_ date: Date) -> String {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm"
+        f.dateFormat = "yyyy/M/d HH:mm"
+        f.locale = Locale.current
+        f.timeZone = TimeZone.current
         return f.string(from: date)
     }
 

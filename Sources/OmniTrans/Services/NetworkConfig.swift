@@ -1,6 +1,15 @@
 import Foundation
 import OSLog
 
+// MARK: - Unified OSLog Subsystem (M4)
+
+/// 全工程统一的 OSLog subsystem —— 优先取 bundle id（编译期注入），
+/// 兜底 `com.omnitrans.app`。所有 `Logger`/`OSLog` 一律引用此常量，
+/// 保证 `log stream --predicate 'subsystem == …'` 过滤口径一致。
+enum AppLogging {
+    static let subsystem = Bundle.main.bundleIdentifier ?? "com.omnitrans.app"
+}
+
 // MARK: - Unified Network Configuration (L1)
 
 /// Single source of truth for all networking timeout constants, session
@@ -57,28 +66,36 @@ enum NetworkConfig {
 ///   $ log stream --predicate 'subsystem == "com.omnitrans.omnitrans"'
 enum NetworkLogger {
     private static let log = OSLog(
-        subsystem: Bundle.main.bundleIdentifier ?? "com.omnitrans.omnitrans",
+        subsystem: AppLogging.subsystem,
         category: "network"
     )
 
     /// Logs an outgoing HTTP request with method, URL, and body preview.
+    ///
+    /// （审计 S3）请求体可能包含用户翻译文本，属隐私数据 —— 仅 DEBUG 构建记录
+    /// body 预览；Release 只记方法与 URL。
     static func logRequest(_ request: URLRequest, body: Data? = nil, label: String = "") {
         let method = request.httpMethod ?? "GET"
         let url = request.url?.absoluteString ?? "?"
         let tag = label.isEmpty ? "" : "[\(label)] "
         os_log(.debug, log: log, "%{public}@──→ %{public}@ %{public}@", tag, method, url)
+        #if DEBUG
         if let body = body, let str = String(data: body, encoding: .utf8), !str.isEmpty {
             os_log(.debug, log: log, "%{public}@  body: %{public}@", tag, String(str.prefix(500)))
         }
+        #endif
     }
 
     /// Logs an incoming HTTP response with status code and body preview.
+    /// Body preview is DEBUG-only for the same privacy reason as `logRequest`.
     static func logResponse(_ response: HTTPURLResponse, data: Data? = nil, label: String = "") {
         let tag = label.isEmpty ? "" : "[\(label)] "
         os_log(.debug, log: log, "%{public}@←── HTTP %d", tag, response.statusCode)
+        #if DEBUG
         if let data = data, let str = String(data: data, encoding: .utf8), !str.isEmpty {
             os_log(.debug, log: log, "%{public}@  body: %{public}@", tag, String(str.prefix(500)))
         }
+        #endif
     }
 
     /// Logs an error with context label and duration (if available).

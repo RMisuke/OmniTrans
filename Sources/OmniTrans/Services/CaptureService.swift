@@ -1,5 +1,8 @@
 import Cocoa
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
+@preconcurrency import CoreVideo
+import os
+import DisplayGeometry
 
 // MARK: - Capture Service Protocol
 
@@ -8,6 +11,63 @@ protocol CaptureServiceProtocol: Sendable {
     /// zero-copy handoff to Vision.  Callers must lock the buffer (read-only)
     /// for the duration of Vision processing and unlock immediately after.
     func capture(appKitRect: CGRect, excludingWindowID: CGWindowID) async -> CVPixelBuffer?
+}
+
+// MARK: - Shareable Content Cache
+
+/// 缓存 `SCShareableContent` —— 该枚举调用是 ScreenCaptureKit 最昂贵的同步操作
+/// （需向 WindowServer 枚举全部窗口/显示器，典型耗时 100–500ms），每次截图都重新
+/// 枚举是 OCR 首帧延迟的最大来源（审计 A1）。
+///
+/// 失效策略：
+/// 1. **屏幕拓扑变化** —— 监听 `NSApplication.didChangeScreenParametersNotification`
+///    （插拔显示器 / 分辨率调整 / Space 切换布局变化）立即失效。
+/// 2. **TTL 兜底** —— 30 秒后过期，防止未覆盖到的窗口列表漂移
+///    （如目标窗口在两次 OCR 之间被关闭导致 excludingWindows 匹配失败——
+///     该情况只影响排除列表，不影响 display 关联，故长 TTL 安全）。
+actor SCShareableContentCache {
+    static let shared = SCShareableContentCache()
+
+    private var cached: SCShareableContent?
+    private var cachedAt: ContinuousClock.Instant = .now
+    private var observer: (any NSObjectProtocol)?
+
+    /// 缓存有效期。display/window 拓扑由通知失效兜底，TTL 仅作保险。
+    private static let ttl: Duration = .seconds(30)
+
+    nonisolated private static let log = OSLog(subsystem: AppLogging.subsystem, category: "Capture")
+
+    func content() async throws -> SCShareableContent {
+        // 命中且未过期 → 直接返回（亚毫秒级）
+        if let cached, cachedAt.duration(to: .now) < Self.ttl {
+            return cached
+        }
+
+        // 未命中 → 重新枚举。
+        // Apple 文档要求该调用在主线程上下文执行，否则可能拿到过期的
+        // 窗口列表或伪授权失败；此处 actor 非主线程，故 hop 到 MainActor。
+        let fresh = try await Task { @MainActor in try await SCShareableContent.current }.value
+        cached = fresh
+        cachedAt = .now
+        installObserverIfNeeded()
+        return fresh
+    }
+
+    /// 屏幕参数变化时清空缓存（下一次捕获触发重新枚举）。
+    private func installObserverIfNeeded() {
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.invalidate() }
+        }
+    }
+
+    func invalidate() {
+        cached = nil
+    }
 }
 
 // MARK: - SCStream Single-Frame Capture Helper (macOS 14+)
@@ -23,35 +83,32 @@ protocol CaptureServiceProtocol: Sendable {
 /// and can be handed directly to `VNImageRequestHandler(cvPixelBuffer:)`.
 final class ScreenCaptureService: CaptureServiceProtocol {
 
+    nonisolated private static let log = OSLog(subsystem: AppLogging.subsystem, category: "Capture")
+
     func capture(appKitRect: CGRect, excludingWindowID: CGWindowID) async -> CVPixelBuffer? {
         do {
-            // SCShareableContent.current must be called from the main actor
-            // per Apple's documentation; failing to do so can produce stale
-            // window lists or spurious authorization failures.
-            let content = try await Task { @MainActor in try await SCShareableContent.current }.value
+            // ── 使用缓存的 shareable content（审计 A1：省去每帧全量枚举）──
+            let content = try await SCShareableContentCache.shared.content()
+
+            // ── 屏幕选择：AppKit 坐标匹配 NSScreen.frame（bottom-left 一致）──
+            // 绝不用 SCDisplay.frame.contains() 判断 —— 那是 top-left CG 坐标，
+            // 与 AppKit 坐标混用会令外接屏（上/下/左/右）回退到主屏。
             let midPoint = CGPoint(x: appKitRect.midX, y: appKitRect.midY)
+            guard let screen = DisplayGeometry.screen(containing: midPoint)
+                    ?? DisplayGeometry.nearestScreen(to: midPoint) else { return nil }
 
-            guard let display = content.displays.first(where: { $0.frame.contains(midPoint) })
-                    ?? content.displays.first else { return nil }
+            // ── 用 CGDirectDisplayID 精确关联 SCDisplay，杜绝坐标系错配 ──
+            guard let displayID = DisplayGeometry.displayID(for: screen),
+                  let display = DisplayGeometry.scDisplay(in: content, matching: displayID)
+            else { return nil }
 
-            // Convert global AppKit rect → display-local CG rect.
-            // Use NSScreen (AppKit coords) for ALL coordinate math to
-            // avoid the NSScreen.frame (bottom-left origin) vs
-            // SCDisplay.frame (top-left origin) mismatch that causes
-            // capture-region offset on non-primary displays.
-            guard let screen = NSScreen.screens.first(where: { $0.frame.contains(midPoint) })
-                    ?? NSScreen.main else { return nil }
-            let screenFrame = screen.frame
-            let scale = screen.backingScaleFactor
-
-            let localAppKitX = appKitRect.origin.x - screenFrame.origin.x
-            let localAppKitY = appKitRect.origin.y - screenFrame.origin.y
-            // Y-flip within this single screen's frame — no cross-coordinate-system arithmetic
-            let localCGY = screenFrame.height - localAppKitY - appKitRect.height
-            let sourceRect = CGRect(
-                x: localAppKitX, y: localCGY,
-                width: appKitRect.width, height: appKitRect.height
-            )
+            // ── 统一坐标转换：AppKit 全局 → display-local（top-left）──
+            // DisplayGeometry 在单个屏幕 frame 内完成 Y-flip，兼容负坐标与
+            // 任意排列方向；缩放因子动态读取 SCDisplay.scaleFactor。
+            let scale = DisplayGeometry.scaleFactor(for: display, screen: screen)
+            let sourceRect = DisplayGeometry.displayLocalSourceRect(forAppKitGlobal: appKitRect,
+                                                                    screenFrame: screen.frame)
+            let pixel = DisplayGeometry.outputPixelSize(forLocalRect: sourceRect, scale: scale)
 
             let excluded = content.windows.filter { $0.windowID == excludingWindowID }
             let filter = SCContentFilter(display: display, excludingWindows: excluded)
@@ -60,11 +117,14 @@ final class ScreenCaptureService: CaptureServiceProtocol {
             config.showsCursor = false
             config.pixelFormat = kCVPixelFormatType_32BGRA
             config.sourceRect = sourceRect
-            config.width  = Int(sourceRect.width * scale)
-            config.height = Int(sourceRect.height * scale)
+            config.width  = pixel.width
+            config.height = pixel.height
             config.queueDepth = 1
+            // 不捕获音频通道（默认即无，显式声明避免系统默认值漂移带来的额外开销）
+            config.capturesAudio = false
 
-            print("[OCR] Capturing region=local\(sourceRect) scale=\(scale) output=\(config.width)×\(config.height) screen=\(screenFrame)")
+            os_log(.debug, log: Self.log, "OCR capture region=local%@ scale=%.2f output=%dx%d",
+                   NSStringFromRect(sourceRect), scale, pixel.width, pixel.height)
 
             return try await captureSingleFrame(filter: filter, configuration: config)
         } catch let error as SCStreamError {
@@ -72,13 +132,13 @@ final class ScreenCaptureService: CaptureServiceProtocol {
             // -3815 = stream already started; others = transient.
             let code = error.code
             if code.rawValue == -3808 {
-                print("[SCK] Screen Recording permission denied — grant in System Settings → Privacy → Screen Recording")
+                os_log(.error, log: Self.log, "Screen Recording permission denied — grant in System Settings → Privacy → Screen Recording")
             } else {
-                print("[SCK] Stream error \(code.rawValue): \(error.localizedDescription)")
+                os_log(.error, log: Self.log, "Stream error %d: %@", code.rawValue, error.localizedDescription)
             }
             return nil
         } catch {
-            print("[SCK] Capture failed: \(error.localizedDescription)")
+            os_log(.error, log: Self.log, "Capture failed: %@", error.localizedDescription)
             return nil
         }
     }
@@ -100,12 +160,14 @@ final class ScreenCaptureService: CaptureServiceProtocol {
         try stream.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: .global(qos: .userInitiated))
         try await stream.startCapture()
 
-        return try await withThrowingTaskGroup(of: CVPixelBuffer?.self) { group in
+        // 任务组元素类型用 `PixelBufferBox?`（Sendable），避免 CVBuffer 非 Sendable
+        // 导致的 TaskGroup 关联类型告警；最终经 `result?.value` 解包回 CVPixelBuffer。
+        return try await withThrowingTaskGroup(of: PixelBufferBox?.self) { group in
             // Frame task — resumes when the first buffer arrives (or on error)
             group.addTask {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CVPixelBuffer?, Error>) in
-                    streamOutput.onFrame = { @Sendable buffer in
-                        continuation.resume(returning: buffer)
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PixelBufferBox?, Error>) in
+                    streamOutput.onFrame = { @Sendable box in
+                        continuation.resume(returning: box)
                     }
                     streamOutput.onError = { error in
                         continuation.resume(throwing: error)
@@ -114,11 +176,11 @@ final class ScreenCaptureService: CaptureServiceProtocol {
                 }
             }
 
-            // Timeout task — fires after 3 s (was 1.5s — M1 SCStream
+            // Timeout task — fires after 3 s (was 1.5s — M1 SCStream
             // need more time during display congestion)
             group.addTask {
-                try await Task.sleep(nanoseconds: 3_000_000_000)
-                print("[OCR] ⏱ Frame capture timed out after 3.0s")
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                os_log(.debug, log: Self.log, "Frame capture timed out after 3.0s")
                 // Stop the stream best-effort; don't wait for completion
                 Task { try? await stream.stopCapture() }
                 return nil
@@ -132,7 +194,7 @@ final class ScreenCaptureService: CaptureServiceProtocol {
             // indefinitely on some macOS versions; we never await it.
             Task.detached { try? await stream.stopCapture() }
 
-            return result
+            return result?.value
         }
     }
 }
@@ -149,7 +211,7 @@ final class ScreenCaptureService: CaptureServiceProtocol {
 /// `didOutputSampleBuffer` and `didStopWithError` cannot both resume
 /// the continuation.
 private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
-    nonisolated(unsafe) var onFrame: (@Sendable (CVPixelBuffer) -> Void)?
+    nonisolated(unsafe) var onFrame: (@Sendable (PixelBufferBox) -> Void)?
     nonisolated(unsafe) var onError: (@Sendable (Error) -> Void)?
     nonisolated(unsafe) var stream: SCStream?
 
@@ -176,17 +238,24 @@ private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecke
             return
         }
 
-        let buffer = pixelBuffer
         // Fire-and-forget stopCapture — SCStream.stopCapture() can block
         // indefinitely on certain macOS versions; we never await it.
         Task.detached { try? await stream.stopCapture() }
-        onFrame?(buffer)
+        // CVBuffer 非 Sendable：经 PixelBufferBox 包装后跨线程传递（审计并发告警）。
+        onFrame?(PixelBufferBox(pixelBuffer))
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         guard !markFired() else { return }
         onError?(error)
     }
+}
+
+/// CVBuffer（`CVPixelBuffer`）非 Sendable 的显式包装：由调用方保证在跨线程
+/// 回调期间缓冲区生命周期有效（消除 `@Sendable` 闭包捕获告警）。
+private final class PixelBufferBox: @unchecked Sendable {
+    let value: CVPixelBuffer
+    init(_ value: CVPixelBuffer) { self.value = value }
 }
 
 // MARK: - Capture Service Factory

@@ -2,13 +2,6 @@ import Carbon
 import Cocoa
 import os
 
-/// Shared OSLog for hotkey diagnostics — visible via `log stream` in both
-/// Debug and Release builds.
-private let logger = OSLog(
-    subsystem: Bundle.main.bundleIdentifier ?? "com.omnitrans.omnitrans",
-    category: "hotkey"
-)
-
 // MARK: - Debounce Controller (Sendable)
 
 /// Thread-safe debounce state — uses `OSAllocatedUnfairLock` for synchronous
@@ -51,13 +44,13 @@ final class DebounceController: @unchecked Sendable {
 /// lets — they are never mutated after initialization and all elements conform
 /// to `Sendable`, making cross-isolation access sound.
 private nonisolated(unsafe) let translateStrategies: [any TextCaptureStrategy] = [
-    AXCaptureStrategy(),          // Try AX API FIRST — reliable on macOS 26+
-    ClipboardCaptureStrategy(),  // Fallback: simulated Cmd+C
+    ClipboardCaptureStrategy(),
+    AXCaptureStrategy()
 ]
 
 private nonisolated(unsafe) let ocrStrategies: [any TextCaptureStrategy] = [
-    AXCaptureStrategy(),
     ClipboardCaptureStrategy(),
+    AXCaptureStrategy(),
     ScreenCaptureOCRCaptureStrategy()
 ]
 
@@ -68,75 +61,23 @@ private nonisolated(unsafe) let ocrStrategies: [any TextCaptureStrategy] = [
 /// 实际的回调闭包始终在 MainActor 上执行。
 @MainActor
 final class HotkeyManager {
-    nonisolated(unsafe) static let shared = HotkeyManager()
-
-    /// The shared Carbon event handler, installed once at startup.
-    /// Must be accessed (e.g. via `setup()`) to trigger `InstallEventHandler`.
-    private static let sharedHandlerRef: OSAllocatedUnfairLock<EventHandlerRef?> = {
-        let lock = OSAllocatedUnfairLock<EventHandlerRef?>(initialState: nil)
-        var spec = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind:  UInt32(kEventHotKeyPressed)
-        )
-        var ref: EventHandlerRef?
-        let err = InstallEventHandler(
-            GetApplicationEventTarget(),
-            unifiedHotkeyCallback,
-            1, &spec, nil, &ref
-        )
-        if err != noErr {
-            os_log(.error, log: logger, "InstallEventHandler failed: %d", err)
-        } else if let r = ref {
-            lock.withLock { $0 = r }
-        }
-        return lock
-    }()
-
-    /// Call once at startup to install the shared Carbon event handler.
-    static func setup() { _ = sharedHandlerRef }
+    // @MainActor 类的静态共享实例默认隔离到主线程；所有访问点均在 MainActor 上下文。
+    static let shared = HotkeyManager()
 
     private var hotkeyRef: EventHotKeyRef?
-    private var ocrHotkeyRef: EventHotKeyRef?
-    private var replaceHotkeyRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
     /// Callback when translate hotkey is pressed.
     /// - Parameter 1: captured text (nil if no text was captured)
     /// - Parameter 2: bidirectional sliding-window context (nil if unavailable)
     var onHotkey: (@MainActor (String?, CapturedContext?) -> Void)?
+
+    // OCR capture hotkey (Opt+F by default)
+    private var ocrHotkeyRef: EventHotKeyRef?
+    private var replaceHotkeyRef: EventHotKeyRef?
     var onOCRHotkey: (@MainActor () -> Void)?
     var onReplaceHotkey: (@MainActor () -> Void)?
 
-    // MARK: - Register / Unregister
-
-    /// Registers the translate hotkey (default ⌥D).
-    func register() {
-        let m = UserDefaults.standard.integer(forKey: "hotkey_carbonMods")
-        let k = UserDefaults.standard.integer(forKey: "hotkey_carbonKey")
-        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
-        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_D)
-        registerHotKey(key: key, mods: mods, id: 1, ref: &hotkeyRef)
-    }
-
-    /// Registers the OCR hotkey (default ⌥F).
-    func registerOCR() {
-        let m = UserDefaults.standard.integer(forKey: "ocr_hotkey_carbonMods")
-        let k = UserDefaults.standard.integer(forKey: "ocr_hotkey_carbonKey")
-        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
-        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_F)
-        registerHotKey(key: key, mods: mods, id: 2, ref: &ocrHotkeyRef)
-    }
-
-    /// Registers the replace hotkey (default ⌥R).
-    func registerReplace() {
-        let m = UserDefaults.standard.integer(forKey: "replace_hotkey_carbonMods")
-        let k = UserDefaults.standard.integer(forKey: "replace_hotkey_carbonKey")
-        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
-        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_R)
-        registerHotKey(key: key, mods: mods, id: 3, ref: &replaceHotkeyRef)
-    }
-
-    func unregister() {
-        if let r = hotkeyRef  { UnregisterEventHotKey(r); hotkeyRef = nil }
-    }
+    // MARK: - Debounce (thread-safe via DebounceController)
 
     /// Checks whether `id` has satisfied the debounce interval (0.8 s).
     /// `nonisolated` so the Carbon C callback can call it synchronously
@@ -262,24 +203,59 @@ final class HotkeyManager {
         if flags.contains(.command) { mods |= UInt32(cmdKey) }
         return mods
     }
-}
 
-// The `sharedHandlerRef` is now a private static property of `HotkeyManager`.
-// Access it via `HotkeyManager.setup()` which must be called at startup.
+    /// 统一安装唯一的 Carbon 事件处理器（三个热键共用）。
+    /// 避免对每个热键重复 `InstallEventHandler` 造成重复分发（审计 M6）。
+    private func ensureHandlerInstalled() {
+        guard handlerRef == nil else { return }
+        let ptr = Unmanaged.passUnretained(self).toOpaque()
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                 eventKind: UInt32(kEventHotKeyPressed))
+        var ref: EventHandlerRef?
+        InstallEventHandler(GetApplicationEventTarget(), unifiedHotkeyCallback, 1,
+                            &spec, ptr, &ref)
+        handlerRef = ref
+    }
 
-extension HotkeyManager {
+    func register() {
+        let m = UserDefaults.standard.integer(forKey: "hotkey_carbonMods")
+        let k = UserDefaults.standard.integer(forKey: "hotkey_carbonKey")
+        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
+        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_D)
+        let hid = EventHotKeyID(signature: 0x4149544C, id: 1)
+        RegisterEventHotKey(key, mods, hid, GetApplicationEventTarget(), 0, &hotkeyRef)
+        ensureHandlerInstalled()
+    }
 
-    /// Registers ONE Carbon hotkey with the given key/mod/id.
-    /// - Returns: `true` on success.
-    @discardableResult
-    func registerHotKey(key: UInt32, mods: UInt32, id: UInt32, ref: inout EventHotKeyRef?) -> Bool {
-        var hotKeyID = EventHotKeyID(signature: 0x4149544C, id: id)
-        let err = RegisterEventHotKey(key, mods, hotKeyID, GetApplicationEventTarget(), 0, &ref)
-        if err != noErr {
-            os_log(.error, log: logger, "RegisterEventHotKey(id=%d) failed: %d", id, err)
-            return false
-        }
-        return true
+    func unregister() {
+        if let r = hotkeyRef  { UnregisterEventHotKey(r); hotkeyRef = nil }
+        if let h = handlerRef { RemoveEventHandler(h); handlerRef = nil }
+    }
+
+    // MARK: - OCR hotkey (⌥F by default)
+
+    func registerOCR() {
+        let m = UserDefaults.standard.integer(forKey: "ocr_hotkey_carbonMods")
+        let k = UserDefaults.standard.integer(forKey: "ocr_hotkey_carbonKey")
+        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
+        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_F)
+        let hid = EventHotKeyID(signature: 0x4149544C, id: 2)
+        RegisterEventHotKey(key, mods, hid,
+                            GetApplicationEventTarget(), 0, &ocrHotkeyRef)
+        ensureHandlerInstalled()
+    }
+
+    // MARK: - Replace hotkey (⌥R by default)
+
+    func registerReplace() {
+        let hid = EventHotKeyID(signature: 0x4149544C, id: 3)
+        let m = UserDefaults.standard.integer(forKey: "replace_hotkey_carbonMods")
+        let k = UserDefaults.standard.integer(forKey: "replace_hotkey_carbonKey")
+        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
+        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_R)
+        RegisterEventHotKey(key, mods, hid,
+                            GetApplicationEventTarget(), 0, &replaceHotkeyRef)
+        ensureHandlerInstalled()
     }
 
     func unregisterReplace() {
@@ -331,16 +307,12 @@ extension HotkeyManager {
 
     // MARK: - Capture pipeline (Chain of Responsibility)
 
-    /// Translate-only capture: AX API → simulated Cmd+C (no OCR fallback)
+    /// Translate-only capture: Simulated Cmd+C → AX API (no OCR fallback)
     /// `nonisolated` so the Carbon C callback can call it from the background.
     nonisolated func capture() -> String? {
         for strategy in translateStrategies {
-            if let text = strategy.tryCapture() {
-                os_log(.info, log: logger, "捕获成功: %{public}s", String(describing: type(of: strategy)))
-                return text
-            }
+            if let text = strategy.tryCapture() { return text }
         }
-        os_log(.error, log: logger, "所有捕获策略均失败")
         return nil
     }
 
@@ -369,7 +341,7 @@ extension HotkeyManager {
 // `nonisolated` so they can run off the main thread without blocking UI.
 
 private func unifiedHotkeyCallback(_: EventHandlerCallRef?, _ event: EventRef?, _ userData: UnsafeMutableRawPointer?) -> OSStatus {
-    guard let event else { return -1 }
+    guard let ptr = userData, let event else { return -1 }
 
     var hid = EventHotKeyID()
     let status = GetEventParameter(
@@ -381,12 +353,12 @@ private func unifiedHotkeyCallback(_: EventHandlerCallRef?, _ event: EventRef?, 
     )
     guard status == noErr else { return noErr }
 
-    let mgr = HotkeyManager.shared
+    let mgr = Unmanaged<HotkeyManager>.fromOpaque(ptr).takeUnretainedValue()
     guard mgr.checkDebounce(id: Int(hid.id)) else { return noErr }
 
     if hid.id == 1 {
         // ── 首次使用划词时才请求辅助功能权限 ──
-        HotkeyManager.requestAccessibilityIfNeeded()
+        _ = HotkeyManager.requestAccessibilityIfNeeded()
         DispatchQueue.main.async { mgr.preConnectCurrentProvider() }
         // Offload capture to a background queue so Clipboard polling /
         // AX queries never block the Carbon event thread.
@@ -397,7 +369,7 @@ private func unifiedHotkeyCallback(_: EventHandlerCallRef?, _ event: EventRef?, 
         }
     } else if hid.id == 2 {
         // ── OCR 也先检查权限，避免 Clipboard/AX 策略静默失败 ──
-        HotkeyManager.requestAccessibilityIfNeeded()
+        _ = HotkeyManager.requestAccessibilityIfNeeded()
         DispatchQueue.main.async { mgr.preConnectCurrentProvider() }
         DispatchQueue.main.async { mgr.onOCRHotkey?() }
     } else if hid.id == 3 {

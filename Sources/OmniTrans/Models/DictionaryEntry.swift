@@ -1,4 +1,8 @@
 import Foundation
+import OSLog
+
+/// M8: 词典解析日志统一走 OSLog（subsystem 统一），避免 print 噪音。
+private let dictParseLog = OSLog(subsystem: AppLogging.subsystem, category: "DictParse")
 
 /// Structured dictionary lookup result — unified schema for both AI/LLM and
 /// macOS native dictionary (`DCSCopyTextDefinition`) data sources.
@@ -55,7 +59,7 @@ struct DictionaryEntry: Codable, Equatable {
 
     static func parse(from jsonString: String, word: String) -> DictionaryEntry? {
         var cleaned = jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
-        print("[DictParse] raw length: \(cleaned.count), preview: \(String(cleaned.prefix(120)))")
+        os_log(.debug, log: dictParseLog, "raw length: %d, preview: %{public}@", cleaned.count, String(cleaned.prefix(120)))
 
         cleaned = cleaned
             .replacingOccurrences(of: "```json", with: "")
@@ -75,7 +79,7 @@ struct DictionaryEntry: Codable, Equatable {
             .replacingOccurrences(of: "\\'", with: "'")
 
         guard let data = sanitized.data(using: .utf8) else {
-            print("[DictParse] ❌ utf8 encoding failed")
+            os_log(.error, log: dictParseLog, "utf8 encoding failed")
             return nil
         }
 
@@ -90,10 +94,10 @@ struct DictionaryEntry: Codable, Equatable {
                 examples: raw.examples ?? [],
                 inflections: raw.inflections ?? []
             )
-            print("[DictParse] ✅ parsed: \(entry.definitions.count) defs, \(entry.examples.count) exs")
+            os_log(.debug, log: dictParseLog, "parsed: %d defs, %d exs", entry.definitions.count, entry.examples.count)
             return entry
         } catch {
-            print("[DictParse] ❌ decode error: \(error)")
+            os_log(.error, log: dictParseLog, "decode error: %{public}@", String(describing: error))
             return nil
         }
     }

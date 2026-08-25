@@ -1,5 +1,6 @@
 import SwiftUI
 import Carbon
+import os
 
 // MARK: - Settings Panel Content (v1.0 — Full Animation Integration)
 
@@ -44,6 +45,9 @@ struct SettingsPanelContent: View {
     @State private var showAdvanced = false
     @State private var recordingKey: String? = nil
     @State private var refreshID = UUID()
+    /// 供应商参数保存防抖任务（拖动温度/Token 滑块时合并为一次保存，避免
+    /// 每一步都触发全量 Keychain 加密写，审计 M7）。
+    @State private var providerSyncDebounceTask: Task<Void, Never>?
 
     // ── Animation State ──
 
@@ -139,10 +143,10 @@ struct SettingsPanelContent: View {
             loadSettingsFromProvider()
         }
         .onChange(of: translationTemp) { _, newValue in
-            syncTemperatureToProvider(newValue)
+            debounceProviderSync { syncTemperatureToProvider(newValue) }
         }
         .onChange(of: translationMaxTokens) { _, newValue in
-            syncMaxTokensToProvider(newValue)
+            debounceProviderSync { syncMaxTokensToProvider(newValue) }
         }
         .onChange(of: customPromptEnabled) { _, enabled in
             if enabled, customPromptText.isEmpty {
@@ -163,6 +167,16 @@ struct SettingsPanelContent: View {
         guard let provider = state.selectedProvider, !provider.isBuiltIn else { return }
         translationTemp = provider.temperature
         translationMaxTokens = provider.maxTokens
+    }
+
+    /// 供应商参数变更防抖：停止交互 300ms 后才落库，避免滑块拖动每步全量保存。
+    private func debounceProviderSync(_ block: @escaping @MainActor () -> Void) {
+        providerSyncDebounceTask?.cancel()
+        providerSyncDebounceTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            block()
+        }
     }
 
     /// Push temperature change to the selected provider so TranslationActor uses it.
@@ -769,7 +783,7 @@ struct SettingsPanelContent: View {
         do {
             try csv.write(to: url, atomically: true, encoding: .utf8)
         } catch {
-            print("[CSV Export] ❌ Write failed: \(error)")
+            os_log(.error, log: OSLog(subsystem: AppLogging.subsystem, category: "Settings"), "CSV export write failed: %@", error.localizedDescription)
         }
     }
 

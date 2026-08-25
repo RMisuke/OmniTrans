@@ -98,7 +98,7 @@ enum FallbackRouter {
         req.timeoutInterval = NetworkConfig.probeTimeout
         do {
             let (_, resp) = try await sharedURLSession.data(for: req)
-            let alive = (resp as? HTTPURLResponse)?.statusCode ?? 0 < 500
+            let alive = ((resp as? HTTPURLResponse)?.statusCode ?? 0) < 500
             await probeCache.setPrimary(alive)
             return alive
         } catch {

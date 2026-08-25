@@ -1,6 +1,7 @@
 import Foundation
-import Vision
-import CoreVideo
+import os
+@preconcurrency import Vision
+@preconcurrency import CoreVideo
 
 // MARK: - OCR Execution Modes
 
@@ -59,16 +60,26 @@ enum OCRHardwareMode: Sendable, Equatable {
 final class OCRHardwareDiagnostic {
     static let shared = OCRHardwareDiagnostic()
 
+    /// 幂等守卫 —— 确保探测只执行一次（审计 C3：惰性触发入口）。
+    private var hasRun = false
+
+    nonisolated private static let diagLog = OSLog(subsystem: AppLogging.subsystem, category: "OCRDiag")
+
     private init() {}
 
-    /// Call once at app startup (from `applicationDidFinishLaunching`).
-    /// Runs asynchronously on a background Task; the probe result is stored
-    /// in `OCRHardwareMode.current` and consumed by `performOCR()`.
+    /// 首次 OCR 时调用（替代启动时立即探测）。幂等：已运行过则立即返回。
+    func runIfNeeded() async {
+        guard !hasRun else { return }
+        hasRun = true
+        await run()
+    }
+
+    /// Runs the probe sequence. Call once (via `runIfNeeded`).
     func run() async {
         // ── Step 1: .accurate with ANE ──
         let step1 = await probeAccurate(timeout: 3.0)
         if step1 {
-            print("[OCRDiag] ✅ .accurate with ANE works → ane mode")
+            os_log(.debug, log: Self.diagLog, ".accurate with ANE works → ane mode")
             OCRHardwareMode.current = .ane
             return
         }
@@ -80,13 +91,13 @@ final class OCRHardwareDiagnostic {
         setenv("VNDisableANE", "1", 1)
         let step2 = await probeAccurate(timeout: 3.0)
         if step2 {
-            print("[OCRDiag] ✅ .accurate on CPU (VNDisableANE) works → cpu mode")
+            os_log(.debug, log: Self.diagLog, ".accurate on CPU (VNDisableANE) works → cpu mode")
             OCRHardwareMode.current = .cpu
             return
         }
 
         // ── Step 3: Both failed → fast only ──
-        print("[OCRDiag] ⚠️ .accurate unavailable → fast mode (E5 model bundles missing)")
+        os_log(.default, log: Self.diagLog, ".accurate unavailable → fast mode (E5 model bundles missing)")
         OCRHardwareMode.current = .fast
     }
 
@@ -101,7 +112,7 @@ final class OCRHardwareDiagnostic {
     /// framework permissions, etc.).
     private func probeAccurate(timeout: Double) async -> Bool {
         guard let testBuffer = Self.createTestPixelBuffer() else {
-            print("[OCRDiag] ⚠️ Failed to allocate test pixel buffer")
+            os_log(.error, log: Self.diagLog, "Failed to allocate test pixel buffer")
             return false
         }
 
@@ -112,24 +123,26 @@ final class OCRHardwareDiagnostic {
             request.recognitionLanguages = ["en"]
             request.minimumTextHeight = 0.01
 
+            // 单次 resume 门控：结果回调与超时回调竞态安全，避免双重 resume。
+            let gate = ResumeOnceGate()
             let queue = DispatchQueue(label: "ocr-diag")
-            var success = false
-            let semaphore = DispatchSemaphore(value: 0)
+            // CVBuffer 非 Sendable：用显式 Sendable 盒声明「后台执行期间生命周期由调用方保证」。
+            let pb = PixelBufferBox(testBuffer)
 
             queue.async {
-                let handler = VNImageRequestHandler(cvPixelBuffer: testBuffer, options: [:])
+                let handler = VNImageRequestHandler(cvPixelBuffer: pb.value, options: [:])
                 do {
                     try handler.perform([request])
-                    success = true
+                    gate.runOnce { continuation.resume(returning: true) }
                 } catch {
                     // Expected when E5 bundles are corrupt: CRImageReaderError
-                    success = false
+                    gate.runOnce { continuation.resume(returning: false) }
                 }
-                semaphore.signal()
             }
 
-            _ = semaphore.wait(timeout: .now() + timeout)
-            continuation.resume(returning: success)
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                gate.runOnce { continuation.resume(returning: false) }
+            }
         }
     }
 
@@ -156,4 +169,27 @@ final class OCRHardwareDiagnostic {
         CVPixelBufferUnlockBaseAddress(buf, [])
         return buf
     }
+}
+
+// MARK: - Single-resume Gate
+
+/// 保证 `CheckedContinuation` 只被 resume 一次（超时与结果竞态门控）。
+private final class ResumeOnceGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+
+    func runOnce(_ block: () -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !fired else { return }
+        fired = true
+        block()
+    }
+}
+
+/// CVBuffer（`CVPixelBuffer`）非 Sendable 的显式包装：由调用方保证在后台
+/// 队列执行期间缓冲区生命周期有效（消除 `@Sendable` 闭包捕获告警）。
+private final class PixelBufferBox: @unchecked Sendable {
+    let value: CVPixelBuffer
+    init(_ value: CVPixelBuffer) { self.value = value }
 }

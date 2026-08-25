@@ -12,23 +12,6 @@ enum MacOSNativeProvider {
         return c
     }()
 
-    /// Pre-warms the cache with common lookup words to reduce first-query latency.
-    /// Call from `applicationDidFinishLaunching` on a background queue.
-    static func prewarmCache() {
-        let commonWords = ["hello", "world", "the", "and", "that", "have", "for", "not", "with", "you"]
-        DispatchQueue.global(qos: .utility).async {
-            for word in commonWords {
-                let cfWord = word as CFString
-                let range = CFRange(location: 0, length: CFStringGetLength(cfWord))
-                if let raw = DCSCopyTextDefinition(nil, cfWord, range)?.takeRetainedValue() as String?,
-                   !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   let parsed = NativeDictionaryParser.parse(word: word, rawText: stripHTML(raw)) {
-                    cache.setObject(DictEntryBox(parsed), forKey: word.lowercased() as NSString)
-                }
-            }
-        }
-    }
-
     private final class DictEntryBox {
         let entry: DictionaryEntry
         init(_ entry: DictionaryEntry) { self.entry = entry }

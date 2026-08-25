@@ -7,6 +7,9 @@ import os
 ///
 /// Keychain model: one JSON blob per provider stored at account `provider:{uuid}`.
 enum ProviderStorageManager {
+    /// M8: 存储日志统一走 OSLog（subsystem 统一）。
+    private static let log = OSLog(subsystem: AppLogging.subsystem, category: "Storage")
+
     private enum Key {
         static let providers = "saved_providers_v3"
         static let dictProviderID = "dict_provider_id"
@@ -55,7 +58,7 @@ enum ProviderStorageManager {
 
     static func loadProviders() -> [APIProvider] {
         #if DEBUG
-        print("[Storage] loadProviders called")
+        os_log(.debug, log: log, "loadProviders called")
         #endif
         preloadSecrets()
         guard let data = UserDefaults.standard.data(forKey: Key.providers),
@@ -64,7 +67,8 @@ enum ProviderStorageManager {
 
         var providers = decoded
         for i in providers.indices {
-            let fields = cacheLock.withLock { state in state.cache[providers[i].id] ?? KeychainFields() }
+            let pid = providers[i].id
+            let fields = cacheLock.withLock { state in state.cache[pid] ?? KeychainFields() }
             if providers[i].apiKey.isEmpty && !fields.apiKey.isEmpty {
                 providers[i].apiKey = fields.apiKey
             }
@@ -80,9 +84,9 @@ enum ProviderStorageManager {
 
     static func saveProviders(_ providers: [APIProvider]) {
         #if DEBUG
-        print("[Storage] saveProviders called with \(providers.count) providers")
+        os_log(.debug, log: log, "saveProviders called with %d providers", providers.count)
         for p in providers {
-            print("[Storage]   provider \(p.name) (id=\(p.id)) apiKey=\(p.apiKey.prefix(6))... secret=\(p.apiSecret.prefix(6))...")
+            os_log(.debug, log: log, "  provider %{public}@ apiKey=%{public}@... secret=%{public}@...", p.name, String(p.apiKey.prefix(6)), String(p.apiSecret.prefix(6)))
         }
         #endif
         for p in providers {
@@ -93,7 +97,7 @@ enum ProviderStorageManager {
             )
             if !fields.isEmpty {
                 KeychainManager.saveFields(fields, for: p.id)
-                _ = cacheLock.withLock { state in state.cache[p.id] = fields }
+                cacheLock.withLock { state in state.cache[p.id] = fields }
             } else {
                 KeychainManager.deleteAllFields(for: p.id)
                 _ = cacheLock.withLock { state in state.cache.removeValue(forKey: p.id) }

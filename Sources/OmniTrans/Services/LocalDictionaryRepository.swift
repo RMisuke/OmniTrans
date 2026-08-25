@@ -1,5 +1,9 @@
 import Foundation
+import OSLog
 import SQLite3
+
+/// M8: DB 日志统一走 OSLog（subsystem 统一），避免 print 噪音。
+private let dictRepoLog = OSLog(subsystem: AppLogging.subsystem, category: "DictRepo")
 
 // MARK: - Safe SQLite Destructor
 
@@ -23,6 +27,15 @@ private let SQLITE_TRANSIENT_COPY = unsafeBitCast(-1, to: sqlite3_destructor_typ
 /// overwrite an existing entry.  The `model_name` column stores metadata
 /// about which model generated the entry, purely for display purposes.
 actor LocalDictionaryRepository {
+    /// Returns an ISO8601 timestamp string with the current local timezone offset.
+    /// Example: `"2026-07-10T12:30:00+08:00"`
+    /// This ensures the timestamp is always stored with proper timezone context,
+    /// avoiding the UTC-vs-local mismatch that `CURRENT_TIMESTAMP` causes.
+    private static func localTimestampString() -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date())
+    }
     static let shared = LocalDictionaryRepository()
 
     private var db: OpaquePointer?
@@ -35,13 +48,13 @@ actor LocalDictionaryRepository {
 
         var handle: OpaquePointer?
         guard sqlite3_open(dbPath, &handle) == SQLITE_OK else {
-            print("[DictRepo] ❌ Failed to open database at \(dbPath)")
+            os_log(.error, log: dictRepoLog, "Failed to open database at %{public}@", dbPath)
             self.db = nil
             return
         }
         // Enable WAL mode for concurrent reads
         sqlite3_exec(handle, "PRAGMA journal_mode=WAL", nil, nil, nil)
-        print("[DictRepo] ✅ Opened at \(dbPath)")
+        os_log(.debug, log: dictRepoLog, "Opened at %{public}@", dbPath)
 
         // Create schema
         let sql = """
@@ -58,7 +71,7 @@ actor LocalDictionaryRepository {
             ON custom_dictionary(updated_at DESC);
         """
         if sqlite3_exec(handle, sql, nil, nil, nil) != SQLITE_OK {
-            print("[DictRepo] ❌ Schema creation failed")
+            os_log(.error, log: dictRepoLog, "Schema creation failed")
         }
         self.db = handle
     }
@@ -95,21 +108,22 @@ actor LocalDictionaryRepository {
     func saveEntry(word: String, targetLang: String, modelName: String, jsonData: String, overwrite: Bool = false) {
         guard let db else { return }
         let key = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let ts = Self.localTimestampString()
 
         let sql: String
         if overwrite {
             sql = """
             INSERT INTO custom_dictionary (query_word, target_lang, model_name, json_data, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(query_word, target_lang) DO UPDATE SET
                 model_name = excluded.model_name,
                 json_data  = excluded.json_data,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = ?
             """
         } else {
             sql = """
             INSERT OR IGNORE INTO custom_dictionary (query_word, target_lang, model_name, json_data, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?)
             """
         }
 
@@ -121,9 +135,15 @@ actor LocalDictionaryRepository {
         sqlite3_bind_text(stmt, 2, targetLang, -1, SQLITE_TRANSIENT_COPY)
         sqlite3_bind_text(stmt, 3, modelName, -1, SQLITE_TRANSIENT_COPY)
         sqlite3_bind_text(stmt, 4, jsonData, -1, SQLITE_TRANSIENT_COPY)
+        if overwrite {
+            sqlite3_bind_text(stmt, 5, ts, -1, SQLITE_TRANSIENT_COPY)
+            sqlite3_bind_text(stmt, 6, ts, -1, SQLITE_TRANSIENT_COPY)
+        } else {
+            sqlite3_bind_text(stmt, 5, ts, -1, SQLITE_TRANSIENT_COPY)
+        }
 
         if sqlite3_step(stmt) != SQLITE_DONE {
-            print("[DictRepo] ❌ Save failed: \(String(cString: sqlite3_errmsg(db)))")
+            os_log(.error, log: dictRepoLog, "Save failed: %{public}@", String(cString: sqlite3_errmsg(db)))
         }
     }
 
@@ -136,12 +156,21 @@ actor LocalDictionaryRepository {
     /// Returns the number of rows that failed to import.
     @discardableResult
     func batchImport(lines: [String], overwrite: Bool) -> Int {
+        let ts = Self.localTimestampString()
         let conflictStrategy = overwrite
-            ? "ON CONFLICT(query_word, target_lang) DO UPDATE SET model_name=excluded.model_name, json_data=excluded.json_data, updated_at=CURRENT_TIMESTAMP"
+            ? "ON CONFLICT(query_word, target_lang) DO UPDATE SET model_name=excluded.model_name, json_data=excluded.json_data, updated_at=?"
             : "ON CONFLICT(query_word, target_lang) DO NOTHING"
         sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil)
 
-        let sql = "INSERT INTO custom_dictionary (query_word, target_lang, model_name, json_data, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) \(conflictStrategy)"
+        // P8: 事务内只 prepare 一次，逐行 reset+rebind，避免每行重复 prepare 的开销
+        let sql = "INSERT INTO custom_dictionary (query_word, target_lang, model_name, json_data, updated_at) VALUES (?, ?, ?, ?, ?) \(conflictStrategy)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return lines.count
+        }
+        defer { sqlite3_finalize(stmt) }
+
         var errorCount = 0
         for line in lines {
             let cols = line.components(separatedBy: ",")
@@ -151,18 +180,21 @@ actor LocalDictionaryRepository {
             let model  = cols[2].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
             let json   = cols[3].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
 
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { errorCount += 1; continue }
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
             sqlite3_bind_text(stmt, 1, word, -1, SQLITE_TRANSIENT_COPY)
             sqlite3_bind_text(stmt, 2, lang, -1, SQLITE_TRANSIENT_COPY)
             sqlite3_bind_text(stmt, 3, model, -1, SQLITE_TRANSIENT_COPY)
             sqlite3_bind_text(stmt, 4, json, -1, SQLITE_TRANSIENT_COPY)
+            sqlite3_bind_text(stmt, 5, ts, -1, SQLITE_TRANSIENT_COPY)
+            if overwrite {
+                sqlite3_bind_text(stmt, 6, ts, -1, SQLITE_TRANSIENT_COPY)
+            }
             if sqlite3_step(stmt) != SQLITE_DONE { errorCount += 1 }
-            sqlite3_finalize(stmt)
         }
         sqlite3_exec(db, "COMMIT", nil, nil, nil)
         if errorCount > 0 {
-            print("[DictRepo] ⚠️ batchImport: \(errorCount)/\(lines.count) rows failed")
+            os_log(.error, log: dictRepoLog, "batchImport: %d/%d rows failed", errorCount, lines.count)
         }
         return errorCount
     }

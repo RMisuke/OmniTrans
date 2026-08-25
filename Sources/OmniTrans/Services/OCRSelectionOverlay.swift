@@ -1,6 +1,9 @@
 import Cocoa
 import Carbon
-import Vision
+@preconcurrency import Vision
+@preconcurrency import CoreVideo
+import os
+import DisplayGeometry
 
 extension Notification.Name {
     /// Posted when the SCStream screen capture fails (e.g. missing Screen
@@ -15,35 +18,57 @@ extension Notification.Name {
     static let omniTransOCRDone = Notification.Name("OmniTransOCRDone")
 }
 
+// MARK: - OCR 结果模型
+
+/// OCR 识别出的一行文字及其在屏幕上的区域。
+struct OCRLineResult: Sendable {
+    let text: String
+    let confidence: Float
+    /// 该行在屏幕上的区域（**AppKit 全局坐标**，bottom-left origin）。
+    /// 由 Vision 归一化 boundingBox 经 `DisplayGeometry` 映射而来，
+    /// 供原位替换/区域定位使用。
+    let appKitFrame: CGRect
+}
+
+/// 一次 OCR 的完整结果：拼接文本 + 每行文字的区域坐标。
+struct OCRResult: Sendable {
+    let text: String
+    let lines: [OCRLineResult]
+}
+
 /// Full-screen transparent overlay for drag-to-select OCR capture.
 /// Activated by Opt+F hotkey — user drags a rectangle, OCR runs on release.
 @MainActor
 final class OCRSelectionOverlay {
     static let shared = OCRSelectionOverlay()
 
+    nonisolated private static let log = OSLog(subsystem: AppLogging.subsystem, category: "OCRSelection")
+
     private var window: NSWindow?
     private var overlayView: OverlayView?
-    private var onComplete: ((String?) -> Void)?
+    private var onComplete: ((OCRResult?) -> Void)?
     /// AppKit screen rect where the overlay was placed, for coordinate conversion
     private var screenFrame: CGRect = .zero
     private var _overlayWindowID: CGWindowID = 0
     /// Capture service — runtime-dispatched between SCK (macOS 15+) and CGWindowList (macOS 14).
     private let captureService: CaptureServiceProtocol = CaptureServiceFactory.makeService()
+    /// C: 代际守卫 —— 防止连续触发导致旧 OCR 结果串给新回调（方案 C）。
+    private let generationGuard = OCRGenerationGuard()
 
     private init() {}
 
     /// Show overlay and call completion with OCR'd text (nil if cancelled)
-    func beginCapture(completion: @escaping (String?) -> Void) {
+    func beginCapture(completion: @escaping (OCRResult?) -> Void) {
         guard window == nil else { return }
+        // C: 新一轮 OCR 接管 —— 旧代际的结果将被丢弃（方案 C）
+        generationGuard.next()
         onComplete = completion
 
-        // Use the screen containing the mouse cursor — not NSScreen.main —
-        // so the overlay always appears on the correct display in multi-
-        // monitor setups (especially when the external monitor isn't the
-        // "main" screen).
+        // 屏幕选择统一走 DisplayGeometry（AppKit 坐标匹配 NSScreen.frame），
+        // 不依赖 NSScreen.main —— 确保 overlay 出现在鼠标所在的外接屏上。
         let mouseLocation = NSEvent.mouseLocation
-        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) })
-                ?? NSScreen.main else {
+        guard let screen = DisplayGeometry.screen(containing: mouseLocation)
+                ?? DisplayGeometry.nearestScreen(to: mouseLocation) else {
             completion(nil)
             return
         }
@@ -53,7 +78,7 @@ final class OCRSelectionOverlay {
             self?.captureRegion(rect)
         }
 
-        let w = NSWindow(
+        let w = KeyableBorderlessWindow(
             contentRect: screenFrame,
             styleMask: .borderless,
             backing: .buffered,
@@ -92,6 +117,8 @@ final class OCRSelectionOverlay {
         )
 
         let windowID = _overlayWindowID
+        // C: 记录本次 OCR 的代际号，回调时校验，避免过期结果串台（方案 C）
+        let generation = generationGuard.current
 
         // ═══ Immediate dismiss: remove gray overlay before OCR starts ═══
         // The SCContentFilter already excludes this window from the GPU
@@ -106,8 +133,10 @@ final class OCRSelectionOverlay {
         Task.detached { [captureService, weak self] in
             guard let self else { return }
             guard let pixelBuffer = await captureService.capture(appKitRect: appKitRect, excludingWindowID: windowID) else {
-                print("[OCR] ❌ capture returned nil — appKitRect=\(appKitRect) windowID=\(windowID)")
+                os_log(.error, log: Self.log, "capture returned nil — appKitRect=%@ windowID=%u", NSStringFromRect(appKitRect), windowID)
                 await MainActor.run {
+                    // C: 若新一轮 OCR 已接管，丢弃本次（过期）结果（方案 C）
+                    guard self.generationGuard.isValid(generation) else { return }
                     NotificationCenter.default.post(
                         name: .omniTransOCRCaptureFailed,
                         object: nil
@@ -120,16 +149,24 @@ final class OCRSelectionOverlay {
                 return
             }
 
-            let text = self.performOCR(on: pixelBuffer)
-            print("[OCR] Vision result: \(text != nil ? "\"\(text!.prefix(80))\"" : "nil") — bufferSize=\(CVPixelBufferGetWidth(pixelBuffer))×\(CVPixelBufferGetHeight(pixelBuffer))")
+            let result = await self.performOCR(on: pixelBuffer, appKitRect: appKitRect)
+            if let result {
+                os_log(.debug, log: Self.log, "Vision result: \"%@\" bufferSize=%dx%d",
+                       String(result.text.prefix(80)), CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer))
+            } else {
+                os_log(.debug, log: Self.log, "Vision result: nil bufferSize=%dx%d",
+                       CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer))
+            }
             await MainActor.run {
-                if text == nil {
+                // C: 若新一轮 OCR 已接管，丢弃本次（过期）结果（方案 C）
+                guard self.generationGuard.isValid(generation) else { return }
+                if result == nil {
                     NotificationCenter.default.post(
                         name: .omniTransOCRNoTextFound,
                         object: nil
                     )
                 }
-                self.onComplete?(text)
+                self.onComplete?(result)
                 self.onComplete = nil
                 // DON'T dismiss here — overlay is already gone.
                 // Post done notification; AppDelegate will dismiss the
@@ -164,8 +201,8 @@ final class OCRSelectionOverlay {
     ///
     /// Declared `nonisolated` so Vision processing runs off the main actor,
     /// preventing UI stalls during neural-network inference.
-    nonisolated private func performOCR(on pixelBuffer: CVPixelBuffer) -> String? {
-        return autoreleasepool { () -> String? in
+    nonisolated private func performOCR(on pixelBuffer: CVPixelBuffer,
+                                        appKitRect: CGRect) async -> OCRResult? {
             let bufW = CVPixelBufferGetWidth(pixelBuffer)
             let bufH = CVPixelBufferGetHeight(pixelBuffer)
             let mode = OCRHardwareMode.current
@@ -177,48 +214,42 @@ final class OCRSelectionOverlay {
             // If probe determined .fast-only, skip with 0.3s fail-fast.
             let useAccurate = (mode != .fast)
             if useAccurate {
-                if let text = attemptOCR(pixelBuffer: pixelBuffer,
-                                         level: .accurate,
-                                         languages: Self.primaryLanguages + Self.secondaryLanguages,
-                                         label: "accurate+all",
-                                         timeout: nil) {
-                    return text
+                if let result = await attemptOCR(pixelBuffer: pixelBuffer,
+                                                 appKitRect: appKitRect,
+                                                 level: .accurate,
+                                                 languages: Self.primaryLanguages + Self.secondaryLanguages) {
+                    return result
                 }
-                print("[OCR] ⚠️ .accurate failed despite probe — falling through to .fast")
+                os_log(.debug, log: Self.log, ".accurate failed despite probe — falling through to .fast")
             }
 
             // ── Attempt 2: .fast + all languages (with language correction) ──
-            if let text = attemptOCR(pixelBuffer: pixelBuffer,
-                                     level: .fast,
-                                     languages: Self.primaryLanguages + Self.secondaryLanguages,
-                                     label: "fast+all",
-                                     timeout: nil) {
-                print("[OCR] ⚠️ Using fallback fast+all — language correction ON")
-                return text
+            if let result = await attemptOCR(pixelBuffer: pixelBuffer,
+                                             appKitRect: appKitRect,
+                                             level: .fast,
+                                             languages: Self.primaryLanguages + Self.secondaryLanguages) {
+                os_log(.error, log: Self.log, "Using fallback fast+all — language correction ON")
+                return result
             }
 
             // ── Attempt 3: .fast + English only (with language correction) ──
-            if let text = attemptOCR(pixelBuffer: pixelBuffer,
-                                     level: .fast,
-                                     languages: ["en"],
-                                     label: "fast+en-only",
-                                     timeout: nil) {
-                print("[OCR] ⚠️ Using fallback fast+en-only — language correction ON")
-                return text
+            if let result = await attemptOCR(pixelBuffer: pixelBuffer,
+                                             appKitRect: appKitRect,
+                                             level: .fast,
+                                             languages: ["en"]) {
+                os_log(.error, log: Self.log, "Using fallback fast+en-only — language correction ON")
+                return result
             }
 
-            print("[OCR] ❌ All OCR attempts failed for buffer \(bufW)×\(bufH)")
+            os_log(.error, log: Self.log, "All OCR attempts failed for buffer %dx%d", bufW, bufH)
             return nil
-        }
     }
 
-    /// Run a single OCR attempt, optionally with a timeout.
+    /// Run a single OCR attempt.
     ///
     /// `VNImageRequestHandler.perform()` is synchronous — it blocks the calling
-    /// thread until Vision completes.  When `.accurate` triggers ANE model
-    /// compilation that hangs, we cannot cancel it via Swift concurrency.
-    /// Instead, we dispatch it to a dedicated background queue and use a
-    /// `DispatchSemaphore` with a timeout to unblock the caller.
+    /// thread until Vision completes.  It is dispatched to a dedicated serial
+    /// background queue so the calling Task (and the main actor) stay free.
     ///
     /// - Important: `.accurate` recognition is performed on raw pixel data
     ///   without any preprocessing — the neural network (Espresso CPU engine
@@ -226,14 +257,14 @@ final class OCRSelectionOverlay {
     ///   natural image statistics.  Aggressive contrast or desaturation
     ///   preprocessing distorts features and harms accuracy.
     ///
-    /// - Parameter timeout: Seconds to wait before giving up.  `nil` = no timeout.
+    /// （审计：原 timeout 参数所有调用点均传 nil，为死代码路径，已移除。
+    ///   硬件探测路径的超时门控保留在 OCRHardwareMode.swift 中。）
     nonisolated private func attemptOCR(
         pixelBuffer: CVPixelBuffer,
+        appKitRect: CGRect,
         level: VNRequestTextRecognitionLevel,
-        languages: [String],
-        label: String,
-        timeout: Double?
-    ) -> String? {
+        languages: [String]
+    ) async -> OCRResult? {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = level
         // Language correction is enabled ONLY for .fast mode.
@@ -245,84 +276,86 @@ final class OCRSelectionOverlay {
         request.recognitionLanguages = languages
         request.minimumTextHeight = 0.005
 
-        // Use a dedicated serial queue so concurrent `.accurate` attempts
-        // don't pile up on the global concurrent queue.
-        let queue = DispatchQueue(label: "ocr-\(label)")
-        var result: String?
-        let semaphore = DispatchSemaphore(value: 0)
+        // 专用串行队列执行同步的 Vision perform，避免并发 .accurate 堆积。
+        // CVBuffer 非 Sendable：用显式 Sendable 盒声明「后台执行期间生命周期由调用方保证」。
+        let queue = DispatchQueue(label: "ocr-queue")
+        let pb = PixelBufferBox(pixelBuffer)
 
-        queue.async {
-            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                print("[OCR] ⚠️ \(label) failed: \(error.localizedDescription)")
-                semaphore.signal()
-                return
-            }
-
-            let text = Self.extractOrderedText(from: request.results,
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                let handler = VNImageRequestHandler(cvPixelBuffer: pb.value, options: [:])
+                do {
+                    try handler.perform([request])
+                    let text = Self.buildResult(from: request.results,
+                                                appKitRect: appKitRect,
                                                 minConfidence: 0.2,
                                                 rowThreshold: 0.02)
-            result = text
-            semaphore.signal()
-        }
-
-        if let timeout {
-            _ = semaphore.wait(timeout: .now() + timeout)
-            if result == nil {
-                print("[OCR] ⏱ \(label) timed out after \(timeout)s")
+                    continuation.resume(returning: text)
+                } catch {
+                    os_log(.error, log: Self.log, "Vision perform failed: %@", error.localizedDescription)
+                    continuation.resume(returning: nil)
+                }
             }
-        } else {
-            semaphore.wait()
         }
-
-        return result
     }
 
-    /// Extracts text from `VNRecognizedTextObservation` results sorted
-    /// spatially (top→bottom, left→right) and joined with line breaks.
-    nonisolated private static func extractOrderedText(
+    /// 从 `VNRecognizedTextObservation` 构建 `OCRResult`：文字行按空间顺序
+    /// （上→下、左→右）排序拼接，并把每行的归一化 boundingBox 映射回屏幕
+    /// **AppKit 全局坐标**（bottom-left）。
+    ///
+    /// - Parameters:
+    ///   - observations: Vision 识别结果。
+    ///   - appKitRect: 捕获时使用的 AppKit 全局区域（bottom-left）；归一化
+    ///     坐标经 `DisplayGeometry` 映射回屏幕。
+    ///   - rowThreshold: 归一化行高阈值（相对整幅捕获图），用于行分组。
+    nonisolated private static func buildResult(
         from observations: [VNRecognizedTextObservation]?,
+        appKitRect: CGRect,
         minConfidence: Float,
-        rowThreshold: Float
-    ) -> String? {
+        rowThreshold: CGFloat
+    ) -> OCRResult? {
         guard let observations, !observations.isEmpty else { return nil }
 
-        let ordered = observations
-            .compactMap { obs -> (text: String, y: Float, x: Float)? in
-                guard let candidate = obs.topCandidates(1).first,
-                      candidate.confidence >= minConfidence
-                else { return nil }
-                let t = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !t.isEmpty else { return nil }
-                let bb = obs.boundingBox
-                return (t, Float(bb.origin.y), Float(bb.origin.x))
-            }
-            .sorted { a, b in
-                if abs(a.y - b.y) > rowThreshold { return a.y > b.y }
-                return a.x < b.x
-            }
+        let lines = observations.compactMap { obs -> OCRLineResult? in
+            guard let candidate = obs.topCandidates(1).first,
+                  candidate.confidence >= minConfidence
+            else { return nil }
+            let t = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty else { return nil }
+            let frame = DisplayGeometry.appKitGlobalRect(fromVisionNormalized: obs.boundingBox,
+                                                         within: appKitRect)
+            return OCRLineResult(text: t, confidence: candidate.confidence, appKitFrame: frame)
+        }
+        guard !lines.isEmpty else { return nil }
 
-        guard !ordered.isEmpty else { return nil }
+        // 空间排序：行（Y 相差超过阈值）按 Y 从大到小（屏幕上方优先），
+        // 同行按 X 从小到大。
+        let ordered = lines.sorted { a, b in
+            if abs(a.appKitFrame.minY - b.appKitFrame.minY) > rowThreshold * appKitRect.height {
+                return a.appKitFrame.minY > b.appKitFrame.minY
+            }
+            return a.appKitFrame.minX < b.appKitFrame.minX
+        }
 
         var result = ""
-        var lastY: Float = -1
+        var lastY: CGFloat = .greatestFiniteMagnitude
         var prevText = ""
         for item in ordered {
             if item.text == prevText { continue }
             prevText = item.text
-            if lastY >= 0, abs(item.y - lastY) > rowThreshold {
+            if lastY != .greatestFiniteMagnitude,
+               abs(item.appKitFrame.minY - lastY) > rowThreshold * appKitRect.height {
                 result += "\n"
             } else if !result.isEmpty {
                 result += " "
             }
             result += item.text
-            lastY = item.y
+            lastY = item.appKitFrame.minY
         }
 
         let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty else { return nil }
+        return OCRResult(text: trimmed, lines: ordered)
     }
 
     private func dismiss() {
@@ -330,15 +363,24 @@ final class OCRSelectionOverlay {
         window?.orderOut(nil)
         window = nil
         overlayView = nil
-        // Aggressively reclaim Vision ANE / GPU resident memory
+        // Aggressively reclaim Vision ANE / GPU resident memory.
+        // （审计：原实现在主队列与后台队列各调度一次 purge，后台那次又 hop 回
+        //   MainActor，实际执行两次全量清理；现在只保留一次，且延迟到下一
+        //   runloop 避免拖慢 OCR 结果弹窗的首帧。）
         DispatchQueue.main.async {
             MemoryPurgeHelper.shared.purgeBackendCache()
         }
-        // Also hint to the kernel on a background queue for deeper reclaim
-        DispatchQueue.global(qos: .utility).async {
-            Task { @MainActor in MemoryPurgeHelper.shared.purgeBackendCache() }
-        }
     }
+}
+
+// MARK: - Borderless Key Window
+
+/// `.borderless` 窗口默认 `canBecomeKey == false`，导致 overlay 永远无法成为
+/// key window、`keyDown`（ESC 取消）收不到事件。子类化重写为 `true`
+/// 以保证 ESC 可取消框选（审计 B1）。
+private final class KeyableBorderlessWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 
 // MARK: - Overlay NSView (handles drag drawing)
@@ -397,6 +439,9 @@ private final class OverlayView: NSView {
         // on every mouseDragged event at 5K resolution.
         layer?.shouldRasterize = true
         layer?.rasterizationScale = window?.backingScaleFactor ?? 2.0
+        // 尺寸 label 的 contentsScale 跟随 overlay 所在屏（外接屏可能与
+        // 主屏缩放率不同），避免文字模糊。
+        if let window { sizeLabel.contentsScale = window.backingScaleFactor }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -471,4 +516,13 @@ private final class OverlayView: NSView {
         sizeLabel.frame = CGRect(x: labelX, y: labelY, width: labelW + 8, height: 18)
         sizeLabel.isHidden = labelY <= rect.minY
     }
+}
+
+// MARK: - CVBuffer Sendable Box
+
+/// CVBuffer（`CVPixelBuffer`）非 Sendable 的显式包装：由调用方保证在后台
+/// 队列执行期间缓冲区生命周期有效（消除 `@Sendable` 闭包捕获告警）。
+private final class PixelBufferBox: @unchecked Sendable {
+    let value: CVPixelBuffer
+    init(_ value: CVPixelBuffer) { self.value = value }
 }

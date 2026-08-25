@@ -25,7 +25,7 @@ actor HistoryActor {
     static let shared = HistoryActor()
 
     /// Logger for persistence errors — uses the app's subsystem.
-    private static let log = OSLog(subsystem: "com.omnitrans.app", category: "HistoryActor")
+    private static let log = OSLog(subsystem: AppLogging.subsystem, category: "HistoryActor")
 
     /// In-memory buffer — mirrored to UserDefaults (≤50) and JSONL (unbounded).
     private var pending: [HistoryEntry] = []
@@ -228,13 +228,18 @@ actor HistoryActor {
     /// Rewrites the JSONL archive with only the newest `cap` entries.
     /// Used by `flushNow()` and `evictMemoryCache()` to enforce `maxHistoryCount`.
     /// Entries are deduplicated (adjacent same-provider+output) before writing.
+    ///
+    /// （审计 B4）读取阶段即按 `cap` 截断 —— 旧实现 `loadFromArchive()` 无 limit
+    /// 全量解码后再截断，大归档文件（数万条）会产生内存尖峰；现在流式读取时
+    /// 只保留最新 `cap` 条的滑动窗口，内存占用 O(cap)。
     private func rewriteArchive(cappedTo cap: Int) {
         let url = archiveURL()
         closeArchive()
 
-        // Read all entries (already deduped by loadFromArchive), then cap
-        let allEntries = loadFromArchive()
-        let capped = Array(allEntries.prefix(cap))
+        // Read entries (streaming, bounded to cap), then dedup adjacent duplicates
+        let recentEntries = loadFromArchive(limit: cap)
+        let deduped = deduplicateAdjacent(recentEntries)
+        let capped = Array(deduped.prefix(cap))
 
         do {
             var data = Data()
@@ -280,6 +285,9 @@ actor HistoryActor {
     /// Reads entries from the JSONL archive using chunked I/O to avoid
     /// loading the entire file into memory at once.
     /// Returns newest-first (reverse line order).
+    ///
+    /// `limit` 同时作为**流式截断窗口**：解码过程中只保留最新的 `limit` 条，
+    /// 更旧的行被即时丢弃（审计 B4），内存占用 O(limit) 而非 O(文件大小)。
     private func loadFromArchive(limit: Int = Int.max) -> [HistoryEntry] {
         let url = archiveURL()
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
@@ -307,7 +315,11 @@ actor HistoryActor {
 
                 if !lineData.isEmpty {
                     if let entry = try? decoder.decode(HistoryEntry.self, from: Data(lineData)) {
+                        // 流式窗口截断：超过 limit 的最旧条目即时丢弃（文件头部是最旧条目）
                         entries.append(entry)
+                        if entries.count > limit {
+                            entries.removeFirst(entries.count - limit)
+                        }
                     }
                     // Silently skip corrupted lines (json decode failure)
                 }

@@ -29,7 +29,7 @@ enum PinningConfig {
 ///   `Sendable` in Swift 6, yet `URLSessionDelegate` callbacks are always
 ///   invoked on the session's delegate queue — never concurrently.
 final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    nonisolated(unsafe) static let shared = PinningDelegate()
+    static let shared = PinningDelegate()
 
     func urlSession(
         _ session: URLSession,
@@ -116,6 +116,10 @@ let sharedURLSession: URLSession = {
 /// Guarantees thread safety without locks; cooperatively cancels stale tasks.
 actor TranslationActor {
 
+    /// 共享单例 —— 所有翻译请求复用同一 actor，保证 `activeStreamTask` 的
+    /// 「取消上一请求」语义跨调用一致，避免每次请求新建实例（审计 M4）。
+    static let shared = TranslationActor()
+
     /// Active translation task — cancelled on new request.
     private var activeStreamTask: Task<Void, Never>?
 
@@ -153,14 +157,28 @@ actor TranslationActor {
         decoder: JSONDecoder = JSONDecoder(),
         extractText: @escaping (T) -> String?
     ) async throws {
+        // B11: 不再用 `try?` 静默吞掉解码错误 —— 记录每行失败并统计连续失败，
+        // 超过阈值即抛出，避免「流式无输出且无任何日志」的静默故障。
+        var consecutiveFailures = 0
         for try await line in bytes.lines {
             try Task.checkCancellation()
             guard line.hasPrefix("data: "), !line.contains("[DONE]") else { continue }
             let jsonData = Data(line.utf8.dropFirst(6))
-            guard let chunk = try? decoder.decode(T.self, from: jsonData),
-                  let text = extractText(chunk), !text.isEmpty
-            else { continue }
-            throttle.yield(text)
+            do {
+                let chunk = try decoder.decode(T.self, from: jsonData)
+                guard let text = extractText(chunk), !text.isEmpty else { continue }
+                consecutiveFailures = 0
+                await throttle.yield(text)
+            } catch {
+                consecutiveFailures += 1
+                let preview = String(data: jsonData, encoding: .utf8)?.prefix(120) ?? "?"
+                NetworkLogger.log("SSE", "解码失败 #\(consecutiveFailures): \(preview) — \(error.localizedDescription)")
+                if consecutiveFailures >= 8 {
+                    throw TranslationService.TranslationError.apiError(
+                        "SSE 流解码连续失败（\(consecutiveFailures) 次），已中止"
+                    )
+                }
+            }
         }
     }
 
@@ -338,7 +356,7 @@ actor TranslationActor {
         _ p: APIProvider, _ c: AsyncThrowingStream<String, Error>.Continuation,
         isDictionaryMode: Bool = false, context: CapturedContext? = nil
     ) async throws {
-        let hint = isDictionaryMode ? buildDictionaryHint(tgt: tgt, context: context) : buildHint(src: src, tgt: tgt, context: context)
+        let hint = isDictionaryMode ? buildDictionaryHint(src: src, tgt: tgt, context: context) : buildHint(src: src, tgt: tgt, context: context)
         guard let url = URL(string: "\(p.baseURL)/chat/completions") else {
             throw TranslationService.TranslationError.malformedURL("\(p.baseURL)/chat/completions")
         }
@@ -373,7 +391,7 @@ actor TranslationActor {
         try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: OAIStreamChunk) in
             chunk.choices?.first?.delta?.content
         }
-        t.flush()
+        await t.flush()
     }
 
     // ── Anthropic SSE ──
@@ -383,7 +401,7 @@ actor TranslationActor {
         _ p: APIProvider, _ c: AsyncThrowingStream<String, Error>.Continuation,
         isDictionaryMode: Bool = false, context: CapturedContext? = nil
     ) async throws {
-        let hint = isDictionaryMode ? buildDictionaryHint(tgt: tgt, context: context) : buildHint(src: src, tgt: tgt, context: context)
+        let hint = isDictionaryMode ? buildDictionaryHint(src: src, tgt: tgt, context: context) : buildHint(src: src, tgt: tgt, context: context)
         guard let url = URL(string: "\(p.baseURL)/v1/messages") else {
             throw TranslationService.TranslationError.malformedURL("\(p.baseURL)/v1/messages")
         }
@@ -414,7 +432,7 @@ actor TranslationActor {
         try await parseSSEStream(bytes: bytes, throttle: t) { (event: AnthStreamEvent) in
             event.type == "content_block_delta" ? event.delta?.text : nil
         }
-        t.flush()
+        await t.flush()
     }
 
     // ── Gemini SSE ──
@@ -424,7 +442,7 @@ actor TranslationActor {
         _ p: APIProvider, _ c: AsyncThrowingStream<String, Error>.Continuation,
         isDictionaryMode: Bool = false, context: CapturedContext? = nil
     ) async throws {
-        let hint = isDictionaryMode ? buildDictionaryHint(tgt: tgt, context: context) : buildHint(src: src, tgt: tgt, context: context)
+        let hint = isDictionaryMode ? buildDictionaryHint(src: src, tgt: tgt, context: context) : buildHint(src: src, tgt: tgt, context: context)
         guard let url = URL(string: "\(p.baseURL)/models/\(p.modelName):streamGenerateContent?alt=sse") else {
             throw TranslationService.TranslationError.malformedURL("\(p.baseURL)/models/\(p.modelName):streamGenerateContent?alt=sse")
         }
@@ -450,7 +468,7 @@ actor TranslationActor {
         try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: GemStreamChunk) in
             chunk.candidates?.first?.content?.parts?.first?.text
         }
-        t.flush()
+        await t.flush()
     }
 
     // MARK: - Mock Stream (Traditional MT → single-token stream)
@@ -673,7 +691,7 @@ actor TranslationActor {
             targetLanguage: targetLang
         )
         let urlString = "https://mt.cn-hangzhou.aliyuncs.com/?\(signedQuery)"
-        print("[AlibabaMT] URL: \(urlString.redactSensitiveParams().prefix(200))...") // S2
+        NetworkLogger.log("AlibabaMT", "URL: \(urlString.redactSensitiveParams().prefix(200))...") // S2
         guard let url = URL(string: urlString) else {
             throw TranslationService.TranslationError.malformedURL(provider.baseURL)
         }
@@ -683,7 +701,7 @@ actor TranslationActor {
 
         let data = try await executeMTRequest(req, label: "Aliyun MT")
         let body = String(data: data, encoding: .utf8) ?? ""
-        print("[AlibabaMT] body: \(body.prefix(300))")
+        NetworkLogger.log("AlibabaMT", "body: \(body.prefix(300))")
 
         if let translated = body.xmlTagValue("Translated") { return translated }
         if let code = body.xmlTagValue("Code"), let msg = body.xmlTagValue("Message") {
@@ -716,7 +734,7 @@ actor TranslationActor {
 
         let data = try await executeMTRequest(req, label: "Volcengine MT")
         let body = String(data: data, encoding: .utf8) ?? ""
-        print("[VolcengineMT] body: \(body.prefix(300))") // S2
+        NetworkLogger.log("VolcengineMT", "body: \(body.prefix(300))") // S2
 
         if let jsonData = body.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
@@ -737,28 +755,29 @@ actor TranslationActor {
 
     // MARK: - Helpers
 
-    private func buildDictionaryHint(tgt: TranslationLanguage,
+    private func buildDictionaryHint(src: TranslationLanguage, tgt: TranslationLanguage,
                                       context: CapturedContext? = nil) -> String {
-        let langName = tgt.rawValue
+        let sourceName = src == .auto ? "Auto-Detected" : src.rawValue
+        let targetName = tgt.rawValue
 
         let baseHint = """
-You are an expert lexicographer. Analyze the __SOURCE_LANG__ query and output a highly structured dictionary entry in __TARGET_LANG__.
+You are an expert lexicographer. Analyze the \(sourceName) query and output a highly structured dictionary entry in \(targetName).
 
 Expected JSON Schema:
 {
   "is_word": true,
   "phonetic": "/IPA notation/",
   "definitions": [
-    {"pos": "n.", "meaning": "definition exclusively in \(langName)"}
+    {"pos": "n.", "meaning": "definition exclusively in \(targetName)"}
   ],
   "examples": [
-    {"en": "example in source language", "zh": "translation in \(langName)"}
+    {"en": "example in source language", "zh": "translation in \(targetName)"}
   ]
 }
 
 <Rules>
-- "meaning" MUST be exclusively in \(langName).
-- "zh" (example translation) MUST be exclusively in \(langName). Include the query in the source example.
+- "meaning" MUST be exclusively in \(targetName).
+- "zh" (example translation) MUST be exclusively in \(targetName). Include the query in the source example.
 - "pos": Standardize using n., v., adj., adv., prep., conj., pron.
 - "phonetic": Use IPA notation or \"\" if inapplicable.
 - Provide at least 2 examples.
@@ -769,11 +788,11 @@ Output EXACTLY and ONLY valid JSON.
 Do NOT wrap the response in Markdown code blocks (no ```json). No explanations.
 """
 
-        // ── Dictionary context: force 300 chars regardless of intensity setting ──
+        // ── Dictionary context: respect context_intensity setting ──
         let ctxOn = UserDefaults.standard.bool(forKey: "is_context_aware")
         guard ctxOn, let ctx = context, ctx.hasContext else { return baseHint }
 
-        let cap = 300
+        let cap = ContextAwareService.contextCharLimit
         let leading = String(ctx.leadingContext.suffix(cap))
         let trailing = String(ctx.trailingContext.prefix(cap))
 
@@ -837,7 +856,10 @@ Mandatory Adjustments:
 ///   • Slow arrival (> 40 ms)       → 80 ms batch  (accumulate enough for fluent update)
 /// - During window drag (`isUserDraggingWindow`), the interval is capped at 120 ms
 ///   to avoid main-thread contention with AppKit event tracking.
-private final class ThrottledStream {
+/// 自适应限流流：将 SSE token 批量刷入 continuation，避免每 token 触发 SwiftUI 重绘。
+/// 使用 `actor` 隔离 `buffer`/`flushTask`，消除对「Task 从 actor 上下文创建即继承隔离」
+/// 这一隐性约定的依赖（审计 M1）；否则一旦从非隔离上下文调用即产生数据竞争。
+private actor ThrottledStream {
     private var buffer = ""
     private var flushTask: Task<Void, Never>?
     private let continuation: AsyncThrowingStream<String, Error>.Continuation
