@@ -6,7 +6,7 @@
 # 修复要点：
 #   - DEVELOPER_DIR 动态检测（Xcode-beta > Xcode > xcode-select），兼容 CLT
 #   - 产物路径兼容 Xcode 27/Swift 6.4 的 .build/out/Products/Release 布局
-#   - 显式 MACOSX_DEPLOYMENT_TARGET=14.0，与 Package.swift / Info.plist 一致
+#   - 显式 MACOSX_DEPLOYMENT_TARGET=15.0，与 Package.swift / Info.plist 一致
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"

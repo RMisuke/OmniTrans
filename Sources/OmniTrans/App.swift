@@ -4,18 +4,18 @@ import Carbon
 import DisplayGeometry
 
 // MARK: - App Entry Point
-
+// （审计修复）不再使用 SwiftUI App 生命周期 —— `Settings { EmptyView() }` 场景在
+// 部分 macOS 版本会急切实例化并显示一个空白的「OmniTrans Settings」窗口。
+// accessory 菜单栏应用不需要任何 Scene，改为手动 NSApplication 入口，
+// 启动时零窗口。
 @main
-struct OmniTransApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-
-    var body: some Scene {
-        // （审计 C1）不再创建 0×0 占位 WindowGroup —— accessory 菜单栏应用
-        // 启动时不需要任何窗口。`Settings` 场景仅在用户显式打开时才实例化
-        // 窗口，消除原占位窗口「创建 → 遍历查找 → 关闭」的启动开销与闪烁。
-        Settings {
-            EmptyView()
-        }
+enum OmniTransEntry {
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.run()
     }
 }
 
@@ -60,10 +60,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         MemoryPurgeHelper.shared.registerMemoryWarningObserver()
         // （审计 C2）移除 MacOSNativeProvider.prewarmCache() —— 用常见词预热
         // 对真实查询命中率几乎为零，纯耗电；词典缓存改为按需填充。
-
-        // ── OCR 硬件探测（惰性化）──
-        // 不再在启动时立即运行（最多占用 ANE 6s）；改为首次 OCR 触发时执行，
-        // 与用户的框选拖拽时间重叠。探测完成前 fallback 到 .fast（安全模式）。
 
 #if DEBUG
         // ── 多屏布局诊断 ── 仅 Debug 构建运行，Release 不做无用功（审计 B3）──
@@ -602,10 +598,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startOCRSelection() {
-        // （审计 C3）首次 OCR 时惰性触发硬件探测 —— 与用户拖拽框选的数百毫秒
-        // 重叠；runIfNeeded 幂等，后续调用立即返回。
-        Task { await OCRHardwareDiagnostic.shared.runIfNeeded() }
-
         // 方案 A：框选开始即反馈，取词事件响应及时
         setOCRStatus(.selecting)
         OCRSelectionOverlay.shared.beginCapture { [weak self] result in

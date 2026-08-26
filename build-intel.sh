@@ -7,7 +7,7 @@
 #   - 原脚本直接调用 `swift build`（未设 DEVELOPER_DIR），在 CLT 环境下会触发
 #     "spec already registered" 构建系统错误；改为经共享环境统一走 xcrun
 #   - 产物路径兼容 Xcode 27/Swift 6.4 的 .build/out/Products/Release 布局
-#   - 显式 MACOSX_DEPLOYMENT_TARGET=14.0
+#   - 显式 MACOSX_DEPLOYMENT_TARGET=15.0
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"

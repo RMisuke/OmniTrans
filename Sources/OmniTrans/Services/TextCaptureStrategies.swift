@@ -1,9 +1,6 @@
 import Cocoa
 import Carbon
 import os
-@preconcurrency import Vision
-@preconcurrency import ScreenCaptureKit
-import DisplayGeometry
 
 // MARK: - Protocol
 
@@ -72,165 +69,42 @@ struct AXCaptureStrategy: TextCaptureStrategy {
               !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return s
     }
-}
+}// MARK: - Strategy 3: ScreenCaptureKit OCR（委托统一识别管线）
 
-// MARK: - Strategy 3: ScreenCaptureKit OCR (modern, non-deprecated)
-
-/// Uses `SCScreenshotManager.captureImage` + `VNRecognizeTextRequest`
-/// to perform regional OCR without any deprecated APIs.
-///
-/// Uses `.accurate` exclusively — `.fast`'s character-feature classifier
-/// produces pervasive Latin-character substitution errors (e.g. `a`→`4`,
-/// `e`→`¢`, `m`→`rn`) that cannot be filtered by confidence threshold.
-/// The image is converted to grayscale before inference to cut VRAM ~75 %
-/// for the larger neural model.
+/// 鼠标附近区域 OCR 兜底策略 —— 划词链路（Clipboard → AX → OCR）的最后一级。
+/// 捕获/预处理/竞速识别全部委托 `OCRCapturePipeline` 的同步桥接入口，
+/// 本策略只负责「以鼠标为中心的多尺寸递增重试」。
 struct ScreenCaptureOCRCaptureStrategy: TextCaptureStrategy {
 
-    /// Recognition languages ordered by priority — English first.
-    private static let languages = ["en", "zh-Hans", "zh-Hant", "ja", "ko"]
+    /// 以鼠标为中心的候选区域尺寸序列 —— 从小到大递增：
+    /// 小区域快且噪声少；失败则扩大范围重试。
+    private static let passes: [(width: CGFloat, height: CGFloat)] = [
+        (240, 50), (400, 90), (560, 140),
+    ]
+
+    /// 单次尝试的超时上限（秒）。小区域竞速识别通常亚秒级完成。
+    private static let perPassTimeout: TimeInterval = 10
 
     func tryCapture() -> String? {
-        return autoreleasepool {
-            // NSEvent.mouseLocation 是 AppKit 全局坐标（bottom-left）。
-            // 保持 AppKit 坐标系，不做 CG 翻转 —— 旧代码 `cgScreenHeight - mouse.y`
-            // 假设所有屏幕底部对齐于全局 y=0（依赖主屏布局），外接屏在主屏
-            // 上方/下方/左侧/右侧时必然失配，导致取图偏移或取错屏。
-            let mouse = NSEvent.mouseLocation
+        // NSEvent.mouseLocation 是 AppKit 全局坐标（bottom-left）。
+        // 保持 AppKit 坐标系，不做 CG 翻转 —— 与 NSScreen.frame 一致，
+        // 外接屏在主屏任意方向时均正确。
+        let mouse = NSEvent.mouseLocation
 
-            let passes: [(width: CGFloat, height: CGFloat, minConfidence: Float)] = [
-                (240, 50,  0.35), (400, 90, 0.25), (560, 140, 0.15),
-            ]
-
-            for (w, h, minConf) in passes {
-                // AppKit 全局 rect（bottom-left），与 NSScreen.frame 坐标系一致
-                let rect = CGRect(x: mouse.x - w/2, y: mouse.y - h/2, width: w, height: h)
-
-                guard let cgImage = captureScreen(appKitRect: rect) else { continue }
-
-                // Grayscale cuts VRAM ~75% for the neural model
-                guard let processedImage = toGrayscale(cgImage) else { continue }
-
-                let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .accurate
-                request.usesLanguageCorrection = false
-                request.recognitionLanguages = Self.languages
-                request.minimumTextHeight = 0.02
-
-                do {
-                    try VNImageRequestHandler(cgImage: processedImage, options: [:]).perform([request])
-                } catch { continue }
-
-                if let obs = request.results, !obs.isEmpty,
-                   let text = Self.extractOrderedText(from: obs, minConfidence: minConf),
-                   !text.isEmpty {
-                    return text
-                }
-            }
-            return nil
+        for pass in Self.passes {
+            let rect = CGRect(x: mouse.x - pass.width/2,
+                              y: mouse.y - pass.height/2,
+                              width: pass.width,
+                              height: pass.height)
+            guard let text = OCRCapturePipeline.captureAndRecognizeSync(
+                appKitRect: rect,
+                excludingWindowID: 0,
+                timeout: Self.perPassTimeout)
+            else { continue }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
         }
-    }
-
-    // MARK: - Text extraction helper
-
-    /// Extracts spatially‑ordered text from VN observations.
-    private static func extractOrderedText(
-        from observations: [VNRecognizedTextObservation]?,
-        minConfidence: Float
-    ) -> String? {
-        guard let observations, !observations.isEmpty else { return nil }
-        let filtered = observations
-            .compactMap { obs -> (text: String, y: Float, x: Float)? in
-                guard let c = obs.topCandidates(1).first,
-                      c.confidence >= minConfidence
-                else { return nil }
-                let t = c.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !t.isEmpty else { return nil }
-                let bb = obs.boundingBox
-                return (t, Float(bb.origin.y), Float(bb.origin.x))
-            }
-            .sorted { a, b in
-                if abs(a.y - b.y) > 0.03 { return a.y > b.y }
-                return a.x < b.x
-            }
-        guard !filtered.isEmpty else { return nil }
-
-        var result = ""
-        var lastY: Float = -1
-        for item in filtered {
-            if lastY >= 0, abs(item.y - lastY) > 0.03 { result += "\n" }
-            if !result.isEmpty && result.last != "\n" { result += " " }
-            result += item.text
-            lastY = item.y
-        }
-        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    // MARK: - Screen Capture (ScreenCaptureKit, non-deprecated)
-
-    /// Captures a screen region using `SCScreenshotManager`.
-    /// Uses a semaphore to bridge the async API into the synchronous
-    /// `tryCapture()` interface required by the strategy protocol.
-    ///
-    /// - Parameter appKitRect: **AppKit 全局 rect**（bottom-left），由
-    ///   `NSEvent.mouseLocation` 直接构造，不做 CG 翻转。
-    private func captureScreen(appKitRect: CGRect) -> CGImage? {
-        // 用 `OSAllocatedUnfairLock`（Sendable）替代 NSLock + 捕获可变 var，
-        // 满足 Swift 6 严格并发（消除 lock/unlock 与 mutation 告警）。
-        let box = OSAllocatedUnfairLock(initialState: nil as CGImage?)
-        let semaphore = DispatchSemaphore(value: 0)
-
-        Task.detached(priority: .userInitiated) {
-            defer { semaphore.signal() }
-            do {
-                let content = try await SCShareableContent.current
-
-                // ── 屏幕选择：AppKit 坐标匹配 NSScreen.frame（bottom-left 一致）──
-                let midPoint = CGPoint(x: appKitRect.midX, y: appKitRect.midY)
-                guard let screen = DisplayGeometry.screen(containing: midPoint)
-                        ?? DisplayGeometry.nearestScreen(to: midPoint) else { return }
-
-                // ── CGDirectDisplayID 精确关联 SCDisplay，杜绝坐标系错配 ──
-                guard let displayID = DisplayGeometry.displayID(for: screen),
-                      let display = DisplayGeometry.scDisplay(in: content, matching: displayID)
-                else { return }
-
-                // ── 统一坐标转换：AppKit 全局 → display-local（top-left）──
-                let scale = DisplayGeometry.scaleFactor(for: display, screen: screen)
-                let sourceRect = DisplayGeometry.displayLocalSourceRect(forAppKitGlobal: appKitRect,
-                                                                        screenFrame: screen.frame)
-                let pixel = DisplayGeometry.outputPixelSize(forLocalRect: sourceRect, scale: scale)
-
-                let filter = SCContentFilter(display: display, excludingWindows: [])
-                let config = SCStreamConfiguration()
-                config.showsCursor = false
-                config.pixelFormat = kCVPixelFormatType_32BGRA
-                config.sourceRect = sourceRect
-                config.width  = pixel.width
-                config.height = pixel.height
-
-                let captured = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-                box.withLock { $0 = captured }
-            } catch { /* silent */ }
-        }
-
-        _ = semaphore.wait(timeout: .now() + 0.5)
-        return box.withLock { $0 }
-    }
-
-    // MARK: - Grayscale conversion
-
-    private func toGrayscale(_ image: CGImage) -> CGImage? {
-        let width = image.width, height = image.height
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-        guard let ctx = CGContext(
-            data: nil, width: width, height: height,
-            bitsPerComponent: 8, bytesPerRow: width,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else { return nil }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return ctx.makeImage()
+        return nil
     }
 }
 

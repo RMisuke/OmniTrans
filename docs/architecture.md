@@ -219,26 +219,27 @@ TranslationEngineFactory.makeEngine()
         StreamingTextView 渲染
 ```
 
-### 5.2 OCR 流程
+### 5.2 OCR 流程（2026-08 重构后）
 
 ```
 用户按 ⌥F
     │
     ▼
-OCRSelectionOverlay.beginCapture()
-    │
-    ├── 全屏半透明叠加层
-    ├── 用户拖拽矩形选区
+OCRSelectionOverlay.beginCapture()   ← 纯 UI：框选叠加层 + 代际守卫
     │
     ▼
-ScreenCaptureService.capture() → SCStream 单帧 CVPixelBuffer
-    │
-    ▼
-Vision VNRecognizeTextRequest
+OCRCapturePipeline.captureAndRecognize()      （Sources/OmniTrans/OCR/）
+    ├── SCStreamRegionCapture.capture() → SCStream 单帧 CVPixelBuffer
+    ├── ImagePreprocessor.prepare()     → 面积预算 ≤4M px 自适应缩放
+    ├── RacingLanguageStrategy          → en 与 zh-Hans+en 双轨竞速
+    │     （macOS 15 RecognizeTextRequest，高质量首达即采纳并原生取消落败方）
+    └── OCRResultAssembler.assemble()   → 行排序拼接 + AppKit 全局坐标映射
     │
     ▼
 AppState.resetForNew() → translate()
 ```
+
+基准数据见 `plans/ocr-refactor-benchmarks.md`。
 
 ### 5.3 原位替换流程
 

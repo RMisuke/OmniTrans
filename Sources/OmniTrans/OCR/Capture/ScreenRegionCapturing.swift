@@ -4,29 +4,31 @@ import Cocoa
 import os
 import DisplayGeometry
 
-// MARK: - Capture Service Protocol
+// MARK: - 区域捕获协议
 
-protocol CaptureServiceProtocol: Sendable {
-    /// Captures a screen region and returns the raw `CVPixelBuffer` for
-    /// zero-copy handoff to Vision.  Callers must lock the buffer (read-only)
-    /// for the duration of Vision processing and unlock immediately after.
+/// 屏幕区域捕获抽象 —— 把「屏幕像素 → CVPixelBuffer」与识别引擎解耦，
+/// 便于测试注入 mock 与未来替换捕获后端（如多显示器独立流）。
+protocol ScreenRegionCapturing: Sendable {
+    /// 捕获一块屏幕区域，返回 BGRA `CVPixelBuffer` 供零拷贝直通 Vision。
+    ///
+    /// - Parameters:
+    ///   - appKitRect: **AppKit 全局坐标**（bottom-left）的目标区域。
+    ///   - excludingWindowID: 从捕获中排除的窗口（OCR 框选 overlay 自身）。
+    /// - Returns: BGRA 像素缓冲；失败返回 nil（权限缺失/拓扑变化等）。
     func capture(appKitRect: CGRect, excludingWindowID: CGWindowID) async -> CVPixelBuffer?
 }
 
 // MARK: - Shareable Content Cache
 
 /// 缓存 `SCShareableContent` —— 该枚举调用是 ScreenCaptureKit 最昂贵的同步操作
-/// （需向 WindowServer 枚举全部窗口/显示器，典型耗时 100–500ms），每次截图都重新
-/// 枚举是 OCR 首帧延迟的最大来源（审计 A1）。
+/// （需向 WindowServer 枚举全部窗口/显示器，典型耗时 100–500ms）。
 ///
 /// 失效策略：
 /// 1. **屏幕拓扑变化** —— 监听 `NSApplication.didChangeScreenParametersNotification`
 ///    （插拔显示器 / 分辨率调整 / Space 切换布局变化）立即失效。
-/// 2. **TTL 兜底** —— 30 秒后过期，防止未覆盖到的窗口列表漂移
-///    （如目标窗口在两次 OCR 之间被关闭导致 excludingWindows 匹配失败——
-///     该情况只影响排除列表，不影响 display 关联，故长 TTL 安全）。
-actor SCShareableContentCache {
-    static let shared = SCShareableContentCache()
+/// 2. **TTL 兜底** —— 30 秒后过期，防止未覆盖到的窗口列表漂移。
+actor SCContentCache {
+    static let shared = SCContentCache()
 
     private var cached: SCShareableContent?
     private var cachedAt: ContinuousClock.Instant = .now
@@ -70,29 +72,25 @@ actor SCShareableContentCache {
     }
 }
 
-// MARK: - SCStream Single-Frame Capture Helper (macOS 14+)
+// MARK: - SCStream Single-Frame Capture
 
-/// Uses `SCStream` + custom `SCStreamOutput` to capture exactly one frame
-/// as a `CVPixelBuffer`, then stops the stream.  This avoids the
-/// `CGImage`-backed `SCScreenshotManager.captureImage` path entirely,
-/// eliminating the CPU-side pixel copy / colour-space conversion that
-/// `CGImage` imposes on high-DPI displays.
+/// 基于 `SCStream` + 自定义 `SCStreamOutput` 的单帧区域捕获实现。
 ///
-/// The returned buffer uses `kCVPixelFormatType_32BGRA` (set in the
-/// `SCStreamConfiguration`) — the native Vision-friendly format —
-/// and can be handed directly to `VNImageRequestHandler(cvPixelBuffer:)`.
-final class ScreenCaptureService: CaptureServiceProtocol {
+/// 与旧实现的差异：仅去掉 `CaptureServiceProtocol` 工厂壳，核心路径不变 ——
+/// 单帧流直出 `CVPixelBuffer`（BGRA），完全绕开 `CGImage` 路径的 CPU 端
+/// 像素拷贝/色彩空间转换，零拷贝交接给 Vision。
+final class SCStreamRegionCapture: ScreenRegionCapturing {
 
     nonisolated private static let log = OSLog(subsystem: AppLogging.subsystem, category: "Capture")
 
     func capture(appKitRect: CGRect, excludingWindowID: CGWindowID) async -> CVPixelBuffer? {
         do {
-            // ── 使用缓存的 shareable content（审计 A1：省去每帧全量枚举）──
-            let content = try await SCShareableContentCache.shared.content()
+            // ── 使用缓存的 shareable content（省去每帧全量枚举）──
+            let content = try await SCContentCache.shared.content()
 
             // ── 屏幕选择：AppKit 坐标匹配 NSScreen.frame（bottom-left 一致）──
             // 绝不用 SCDisplay.frame.contains() 判断 —— 那是 top-left CG 坐标，
-            // 与 AppKit 坐标混用会令外接屏（上/下/左/右）回退到主屏。
+            // 与 AppKit 坐标混用会令外接屏回退到主屏。
             let midPoint = CGPoint(x: appKitRect.midX, y: appKitRect.midY)
             guard let screen = DisplayGeometry.screen(containing: midPoint)
                     ?? DisplayGeometry.nearestScreen(to: midPoint) else { return nil }
@@ -103,8 +101,6 @@ final class ScreenCaptureService: CaptureServiceProtocol {
             else { return nil }
 
             // ── 统一坐标转换：AppKit 全局 → display-local（top-left）──
-            // DisplayGeometry 在单个屏幕 frame 内完成 Y-flip，兼容负坐标与
-            // 任意排列方向；缩放因子动态读取 SCDisplay.scaleFactor。
             let scale = DisplayGeometry.scaleFactor(for: display, screen: screen)
             let sourceRect = DisplayGeometry.displayLocalSourceRect(forAppKitGlobal: appKitRect,
                                                                     screenFrame: screen.frame)
@@ -120,7 +116,6 @@ final class ScreenCaptureService: CaptureServiceProtocol {
             config.width  = pixel.width
             config.height = pixel.height
             config.queueDepth = 1
-            // 不捕获音频通道（默认即无，显式声明避免系统默认值漂移带来的额外开销）
             config.capturesAudio = false
 
             os_log(.debug, log: Self.log, "OCR capture region=local%@ scale=%.2f output=%dx%d",
@@ -128,8 +123,7 @@ final class ScreenCaptureService: CaptureServiceProtocol {
 
             return try await captureSingleFrame(filter: filter, configuration: config)
         } catch let error as SCStreamError {
-            // SCStreamError: -3808 = user-declined screen capture permission;
-            // -3815 = stream already started; others = transient.
+            // -3808 = user-declined screen capture permission; -3815 = stream already started.
             let code = error.code
             if code.rawValue == -3808 {
                 os_log(.error, log: Self.log, "Screen Recording permission denied — grant in System Settings → Privacy → Screen Recording")
@@ -143,13 +137,10 @@ final class ScreenCaptureService: CaptureServiceProtocol {
         }
     }
 
-    /// Creates an ephemeral `SCStream`, attaches a single-shot output handler,
-    /// starts the stream, waits for the first `CVPixelBuffer`, then stops.
+    /// 创建临时 `SCStream`，等待首帧 `CVPixelBuffer` 后停止流。
     ///
-    /// Wrapped in a 3-second timeout — if `SCStream.startCapture()` succeeds
-    /// but never produces a frame (known SCK issue during display topology
-    /// changes, GPU starvation, or window-server congestion), the continuation
-    /// is resumed with `nil` rather than hanging the calling `Task` forever.
+    /// 包裹 3 秒超时 —— 若 `startCapture()` 成功但始终无帧（显示器拓扑变化 /
+    /// GPU 饥饿期间已知的 SCK 问题），continuation 以 nil 收尾而非永久挂起。
     private func captureSingleFrame(
         filter: SCContentFilter,
         configuration: SCStreamConfiguration
@@ -160,10 +151,8 @@ final class ScreenCaptureService: CaptureServiceProtocol {
         try stream.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: .global(qos: .userInitiated))
         try await stream.startCapture()
 
-        // 任务组元素类型用 `PixelBufferBox?`（Sendable），避免 CVBuffer 非 Sendable
-        // 导致的 TaskGroup 关联类型告警；最终经 `result?.value` 解包回 CVPixelBuffer。
         return try await withThrowingTaskGroup(of: PixelBufferBox?.self) { group in
-            // Frame task — resumes when the first buffer arrives (or on error)
+            // 帧任务：首帧到达（或出错）即恢复
             group.addTask {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PixelBufferBox?, Error>) in
                     streamOutput.onFrame = { @Sendable box in
@@ -176,22 +165,19 @@ final class ScreenCaptureService: CaptureServiceProtocol {
                 }
             }
 
-            // Timeout task — fires after 3 s (was 1.5s — M1 SCStream
-            // need more time during display congestion)
+            // 超时任务：3s 无帧则放弃（M1 在显示拥塞期需要更多时间）
             group.addTask {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 os_log(.debug, log: Self.log, "Frame capture timed out after 3.0s")
-                // Stop the stream best-effort; don't wait for completion
                 Task { try? await stream.stopCapture() }
                 return nil
             }
 
-            // Return whichever completes first
+            // 返回先完成者
             let result = try await group.next() ?? nil
             group.cancelAll()
 
-            // Fire-and-forget stream teardown — stopCapture() can block
-            // indefinitely on some macOS versions; we never await it.
+            // Fire-and-forget 流销毁 —— stopCapture() 在部分 macOS 版本上可能无限阻塞。
             Task.detached { try? await stream.stopCapture() }
 
             return result?.value
@@ -201,15 +187,7 @@ final class ScreenCaptureService: CaptureServiceProtocol {
 
 // MARK: - Single-Frame SCStreamOutput
 
-/// Captures the first `CVPixelBuffer` from an `SCStream` and fires the
-/// completion callback exactly once, then stops the stream.
-///
-/// Uses `@unchecked Sendable` with internal synchronization via an
-/// `NSLock`-guarded flag to satisfy Swift 6 concurrency safety while
-/// allowing the mutable state required by the `SCStreamOutput` delegate
-/// pattern.  `markFired()` performs an atomic check-and-set so that
-/// `didOutputSampleBuffer` and `didStopWithError` cannot both resume
-/// the continuation.
+/// 捕获 `SCStream` 首帧 `CVPixelBuffer` 并精确触发一次回调后停止流。
 private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
     nonisolated(unsafe) var onFrame: (@Sendable (PixelBufferBox) -> Void)?
     nonisolated(unsafe) var onError: (@Sendable (Error) -> Void)?
@@ -218,8 +196,7 @@ private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecke
     private nonisolated(unsafe) var _hasFired = false
     private let _lock = NSLock()
 
-    /// Atomically checks whether the output has already fired.
-    /// Returns `true` if it has; otherwise sets the flag and returns `false`.
+    /// 原子 check-and-set：`didOutputSampleBuffer` 与 `didStopWithError` 不可能同时 resume。
     private func markFired() -> Bool {
         _lock.lock()
         defer { _lock.unlock() }
@@ -238,10 +215,8 @@ private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecke
             return
         }
 
-        // Fire-and-forget stopCapture — SCStream.stopCapture() can block
-        // indefinitely on certain macOS versions; we never await it.
+        // stopCapture 可能无限阻塞 —— fire-and-forget，永不 await。
         Task.detached { try? await stream.stopCapture() }
-        // CVBuffer 非 Sendable：经 PixelBufferBox 包装后跨线程传递（审计并发告警）。
         onFrame?(PixelBufferBox(pixelBuffer))
     }
 
@@ -251,17 +226,14 @@ private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecke
     }
 }
 
+// MARK: - CVBuffer Sendable Box
+
 /// CVBuffer（`CVPixelBuffer`）非 Sendable 的显式包装：由调用方保证在跨线程
-/// 回调期间缓冲区生命周期有效（消除 `@Sendable` 闭包捕获告警）。
-private final class PixelBufferBox: @unchecked Sendable {
+/// 回调期间缓冲区生命周期有效。
+///
+/// 仅在捕获层内部使用；新 Vision Swift API 的 async `perform(on:)` 路径
+/// 不再需要手工包装（框架自身保证缓冲区在请求生命周期内有效）。
+final class PixelBufferBox: @unchecked Sendable {
     let value: CVPixelBuffer
     init(_ value: CVPixelBuffer) { self.value = value }
-}
-
-// MARK: - Capture Service Factory
-
-enum CaptureServiceFactory {
-    static func makeService() -> CaptureServiceProtocol {
-        ScreenCaptureService()
-    }
 }

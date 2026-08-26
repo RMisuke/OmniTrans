@@ -19,8 +19,8 @@ set -euo pipefail
 OMNI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$OMNI_ROOT"
 
-# ── 1. 部署目标（默认 14.0，与 Package.swift platforms [.macOS(.v14)] 一致）──
-export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+# ── 1. 部署目标（默认 15.0，与 Package.swift platforms [.macOS(.v15)] 一致）──
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
 
 # ── 2. 工具链选择 ──
 # 优先级：显式 DEVELOPER_DIR > Xcode-beta > Xcode > xcode-select 默认（可能是 CLT）。
@@ -92,7 +92,7 @@ omni_swift_build_release() {
 # ── 6. 最小 Info.plist（含阿里云 ATS 例外）──
 omni_make_info_plist() {
     local app_dir="$1" bundle_id="$2" version="${3:-0.6}"
-    local minos="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+    local minos="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
     cat > "$app_dir/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
