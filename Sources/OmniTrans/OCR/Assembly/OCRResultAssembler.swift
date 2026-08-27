@@ -47,6 +47,8 @@ enum OCRResultAssembler {
         }
 
         // ── 行拼接 ──
+        // CJK-aware separator: CJK scripts use no separator between same-line items,
+        // while Latin scripts use space separation.
         var text = ""
         var lastY: CGFloat = .greatestFiniteMagnitude
         var prevText = ""
@@ -57,7 +59,17 @@ enum OCRResultAssembler {
                abs(item.appKitFrame.minY - lastY) > rowThreshold * appKitRect.height {
                 text += "\n"
             } else if !text.isEmpty {
-                text += " "
+                // Use no separator for CJK text (they don't need spaces between items)
+                let isCJK = item.text.unicodeScalars.contains { scalar in
+                    // CJK Unified Ideographs + Hiragana + Katakana + Hangul
+                    (0x4E00...0x9FFF).contains(scalar.value) ||
+                    (0x3040...0x309F).contains(scalar.value) ||
+                    (0x30A0...0x30FF).contains(scalar.value) ||
+                    (0xAC00...0xD7AF).contains(scalar.value)
+                }
+                if !isCJK {
+                    text += " "
+                }
             }
             text += item.text
             lastY = item.appKitFrame.minY

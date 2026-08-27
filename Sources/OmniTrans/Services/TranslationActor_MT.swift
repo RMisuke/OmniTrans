@@ -6,12 +6,39 @@ import CryptoKit
 extension String {
     /// Decodes HTML entities like `"` → `"`, `'` → `'`, etc.
     func htmlEntityDecoded() -> String {
-        guard let data = self.data(using: .utf8) else { return self }
-        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-            .documentType: NSAttributedString.DocumentType.html,
-            .characterEncoding: String.Encoding.utf8.rawValue
+        var result = self
+        let named: [(String, String)] = [
+            ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+            ("&quot;", "\""), ("&apos;", "'"), ("&#39;", "'"),
+            ("&nbsp;", " "), ("&mdash;", "\u{2014}"), ("&ndash;", "\u{2013}"),
+            ("&hellip;", "\u{2026}"), ("&laquo;", "\u{00AB}"), ("&raquo;", "\u{00BB}"),
         ]
-        return (try? NSAttributedString(data: data, options: options, documentAttributes: nil).string) ?? self
+        for (entity, replacement) in named {
+            result = result.replacingOccurrences(of: entity, with: replacement)
+        }
+        // Decimal numeric references: &#123;
+        if let decRe = try? NSRegularExpression(pattern: "&#([0-9]+);") {
+            let range = NSRange(result.startIndex..., in: result)
+            for m in decRe.matches(in: result, range: range).reversed() {
+                if let r = Range(m.range(at: 1), in: result),
+                   let v = UInt32(result[r]),
+                   let s = Unicode.Scalar(v) {
+                    result.replaceSubrange(Range(m.range, in: result)!, with: String(s))
+                }
+            }
+        }
+        // Hex numeric references: &#x1A;
+        if let hexRe = try? NSRegularExpression(pattern: "&#x([0-9a-fA-F]+);") {
+            let range = NSRange(result.startIndex..., in: result)
+            for m in hexRe.matches(in: result, range: range).reversed() {
+                if let r = Range(m.range(at: 1), in: result),
+                   let v = UInt32(result[r], radix: 16),
+                   let s = Unicode.Scalar(v) {
+                    result.replaceSubrange(Range(m.range, in: result)!, with: String(s))
+                }
+            }
+        }
+        return result
     }
 
     /// Redacts sensitive query parameters (AccessKeyId, SecretKey, Signature, key, api_key)

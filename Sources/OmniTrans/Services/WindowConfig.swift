@@ -50,7 +50,8 @@ struct WindowConfig: Sendable {
     func makeGlassBackdrop() -> NSVisualEffectView {
         let glass = NSVisualEffectView()
         glass.frame = NSRect(x: 0, y: 0, width: width, height: height)
-        glass.material = .hudWindow
+        // v0.8 哑光化：实底窗口背景替代全窗 behind-window 深色模糊。
+        glass.material = .windowBackground
         glass.blendingMode = .behindWindow
         glass.state = .active
         glass.wantsLayer = true

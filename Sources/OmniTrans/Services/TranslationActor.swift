@@ -417,8 +417,8 @@ actor TranslationActor {
             maxTokens: p.maxTokens,
             temperature: p.temperature,
             stream: true,
-            system: nil, // hint baked into user message below (preserving existing behavior)
-            messages: [.init(role: "user", content: "\(hint)\n\n\(text)")]
+            system: hint,
+            messages: [.init(role: "user", content: text)]
         )
         req.httpBody = try JSONEncoder().encode(requestBody)
 
@@ -618,11 +618,14 @@ actor TranslationActor {
 
     /// Minimal hint for non-streaming path — no context injection (MT/fallback).
     private func nonStreamingHint(src: TranslationLanguage, tgt: TranslationLanguage) -> String {
-        if src == .auto {
-            return "Translate to \(tgt.languageCode). Output translation only."
-        } else {
-            return "Translate \(src.languageCode) to \(tgt.languageCode). Output translation only."
-        }
+        let sourceName = src == .auto ? "Auto-Detected" : src.rawValue
+        let targetName = tgt.rawValue
+        return """
+    You are an expert bilingual translator.
+    Translate the following text from \(sourceName) into \(targetName).
+    Preserve all formatting, proper nouns, brand names, and code snippets.
+    Output ONLY the translated text with no introductions or explanations.
+    """
     }
 
     // ── Google Cloud Translation v2 ──
@@ -788,28 +791,12 @@ Output EXACTLY and ONLY valid JSON.
 Do NOT wrap the response in Markdown code blocks (no ```json). No explanations.
 """
 
-        // ── Dictionary context: respect context_intensity setting ──
-        let ctxOn = UserDefaults.standard.bool(forKey: "is_context_aware")
-        guard ctxOn, let ctx = context, ctx.hasContext else { return baseHint }
-
-        let cap = ContextAwareService.contextCharLimit
-        let leading = String(ctx.leadingContext.suffix(cap))
-        let trailing = String(ctx.trailingContext.prefix(cap))
-
-        let contextInstruction = """
-<ContextOptimization>
-The query is used within the following specific context:
-<Prefix>\(leading)</Prefix>
-<Query>\(ctx.selectedText)</Query>
-<Suffix>\(trailing)</Suffix>
-
-Mandatory Adjustments:
-1. "definitions" Array Index 0: MUST be the exact meaning and part of speech used in this specific context.
-2. "examples" Array Index 0: MUST heavily reflect or directly utilize this contextual usage to help the user understand its current application.
-</ContextOptimization>
-"""
-
-        return baseHint + contextInstruction
+        // ── Unified context injection via ContextAwareService ──
+        // Uses the same injection path as translation prompts for consistency.
+        let contextBlock = ContextAwareService.buildDictionaryContextBlock(
+            query: context?.selectedText ?? "", context: context, targetLang: tgt
+        )
+        return baseHint + contextBlock
     }
 
     private func buildHint(src: TranslationLanguage, tgt: TranslationLanguage,

@@ -117,7 +117,7 @@ struct OnboardingView: View {
             Text("欢迎使用 OmniTrans")
                 .font(.system(size: 26, weight: .bold))
                 .foregroundColor(AppTheme.textPrimary)
-            Text("菜单栏常驻 · 9 种翻译引擎 · 零第三方依赖 · 纯 Swift 原生")
+            Text("菜单栏常驻 · 9 种翻译引擎 · 零第三方依赖 · 纯 Swift 原生 · OCR 即时识别")
                 .font(.system(size: 15))
                 .foregroundColor(AppTheme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -128,19 +128,19 @@ struct OnboardingView: View {
                     icon: "text.bubble.fill",
                     color: .blue,
                     title: "划词翻译",
-                    desc: "选中任意文本，按下 \(HotkeyManager.hotkeyLabel()) 即刻弹出悬浮翻译窗，支持流式输出"
+                    desc: "选中任意文本，按下 \(HotkeyManager.hotkeyLabel()) 即刻弹出悬浮翻译窗，支持 SSE 流式实时输出"
                 )
                 OnboardRow(
                     icon: "rectangle.dashed",
                     color: .orange,
                     title: "OCR 框选翻译",
-                    desc: "按下 \(HotkeyManager.ocrHotkeyLabel()) 框选屏幕任意区域，VisionOCR 识别文字后自动翻译"
+                    desc: "按下 \(HotkeyManager.ocrHotkeyLabel()) 框选屏幕任意区域，Vision OCR 零拷贝识别文字后自动翻译"
                 )
                 OnboardRow(
                     icon: "arrow.triangle.swap",
                     color: .green,
                     title: "原位替换",
-                    desc: "按下 \(HotkeyManager.replaceHotkeyLabel()) 将译文直接粘贴替换原文，无需手动操作"
+                    desc: "按下 \(HotkeyManager.replaceHotkeyLabel()) 将译文直接粘贴替换原文，精准定位无需手动操作"
                 )
             }
             .padding(.horizontal, 40)
@@ -166,17 +166,17 @@ struct OnboardingView: View {
                 OnboardRow(
                     icon: "key.horizontal", color: .green,
                     title: "AES-256 本地加密",
-                    desc: "API 密钥使用 AES-256-GCM 文件加密（弃用 Keychain），密钥绑定 IOPlatformUUID"
+                    desc: "API 密钥使用 AES-256-GCM 本地加密存储，密钥绑定硬件 UUID，不依赖系统 Keychain"
                 )
                 OnboardRow(
                     icon: "network.slash", color: .indigo,
                     title: "无数据收集",
-                    desc: "翻译请求通过 HTTPS 直连 API 服务商，不经过任何中间服务器。软件无埋点，不上传任何数据"
+                    desc: "翻译请求通过 HTTPS 直连 API 服务商，不经过任何中间服务器。零埋点、零遥测、不上传任何数据"
                 )
                 OnboardRow(
                     icon: "hand.raised.slash.fill", color: .orange,
                     title: "按需授权",
-                    desc: "权限仅用于取词翻译与 OCR 识别，不记录屏幕内容"
+                    desc: "权限仅用于划词取词翻译与 OCR 框选识别，不记录、不存储任何屏幕内容"
                 )
             }
             .padding(.horizontal, 40)
@@ -202,12 +202,12 @@ struct OnboardingView: View {
                 OnboardRow(
                     icon: "hand.tap.fill", color: .blue,
                     title: "辅助功能权限",
-                    desc: "用于读取划词选中的文本内容。系统弹窗已自动打开，请在隐私设置中勾选 OmniTrans"
+                    desc: "用于读取划词选中的文本内容。系统授权弹窗已自动打开，请在隐私设置中勾选 OmniTrans"
                 )
                 OnboardRow(
                     icon: "rectangle.inset.filled", color: .orange,
                     title: "屏幕录制权限",
-                    desc: "用于 OCR 框选识别屏幕上的文字。首次使用 OCR 时将自动弹出系统授权弹窗"
+                    desc: "用于 OCR 框选识别屏幕上的文字。采用零拷贝 CVPixelBuffer 直通 Vision 引擎，首次使用时自动弹出系统授权弹窗"
                 )
                 OnboardRow(
                     icon: "info.circle.fill", color: .secondary,
@@ -239,7 +239,7 @@ struct OnboardingView: View {
                 OnboardRow(
                     icon: "apple.logo", color: .blue,
                     title: "完全离线 · 零延迟",
-                    desc: "基于 Apple 芯片 ANE 神经网络引擎，翻译不消耗大模型 Token，无网络流量"
+                    desc: "基于 Apple 芯片 Neural Engine 神经网络引擎，翻译不消耗大模型 Token，完全离线零网络流量"
                 )
                 OnboardRow(
                     icon: "arrow.down.to.line.compact", color: .orange,
@@ -280,7 +280,7 @@ struct OnboardingView: View {
                 OnboardRow(
                     icon: "cpu.fill", color: .blue,
                     title: "AI 大模型 + 兼容 API",
-                    desc: "OpenAI · Claude · Gemini · 通义千问 · DeepSeek · SenseNova 等，支持 OpenAI 兼容协议自定义接入"
+                    desc: "OpenAI · Claude · Gemini · 通义千问 · DeepSeek · SenseNova 等，支持任意 OpenAI 兼容协议自定义接入"
                 )
                 OnboardRow(
                     icon: "globe", color: .green,
@@ -295,7 +295,7 @@ struct OnboardingView: View {
                 OnboardRow(
                     icon: "arrow.triangle.branch", color: .orange,
                     title: "智能降级",
-                    desc: "按 API 配置列表顺序逐一下滑重试，失败即时切换 Provider，可手动关闭降级"
+                    desc: "按 API 配置列表顺序逐级降级重试，失败即时切换 Provider，支持手动开关降级策略"
                 )
                 OnboardRow(
                     icon: "rectangle.expand.vertical", color: .indigo,
@@ -305,7 +305,7 @@ struct OnboardingView: View {
                 OnboardRow(
                     icon: "gearshape.fill", color: .secondary,
                     title: "灵活配置",
-                    desc: "API 卡片拖动排序 · 三种快捷键可录制 · AES-256 加密 · 历史回溯 · 深色/浅色主题 · 剪贴板监听"
+                    desc: "API 卡片拖动排序 · 三种快捷键可自定义录制 · AES-256-GCM 加密 · JSONL 历史回溯 · 深色/浅色/系统主题 · 剪贴板监听"
                 )
             }
             .padding(.horizontal, 40)

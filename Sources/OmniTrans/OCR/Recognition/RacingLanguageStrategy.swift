@@ -46,6 +46,18 @@ actor RacePolicyMemory {
 /// ## 启发式降并发
 /// - 小区域（像素面积低于阈值）大概率是单行 UI 文字（常为中英混排），只跑 mixed 单轨。
 /// - 自适应记忆：连续多次英文轨获胜时，后续直接单跑英文轨（典型纯英文工作区）。
+///
+/// ## 韧性（E5RT 冷启动故障复现后的加固）
+/// - **失败重试**：ANE 管线未就绪时 Vision 抛瞬态错误（E5RT Code 13），
+///   单次失败立即重试一次即可恢复，用户无感。
+/// - **真实超时**：每次推理经 `withInferenceDeadline` 包裹 —— 到点即返回，
+///   挂起的 Vision 调用弃管。修复旧实现「solo 路径无超时、竞速路径的
+///   withTaskGroup 兜底被不响应取消的挂起调用卡死」的缺陷。
+/// - **超时不重试**：超时意味着管线大概率已卡死，重试只会延长卡死时间；
+///   仅对快速落错的瞬态错误（如 E5RT Code 13）自动重试。
+/// - **并发闸门 + 熔断**：所有推理经 `OCRInferenceGate` 串行化排队，
+///   连续超时触发 `OCRInferenceBreaker` 冷却期，防止连续识别时弃管任务
+///   无限堆积、反复撞击卡死的 ANE 管线。
 struct RacingLanguageStrategy: Sendable {
 
     nonisolated private static let log = OSLog(subsystem: AppLogging.subsystem, category: "OCRRace")
@@ -53,17 +65,31 @@ struct RacingLanguageStrategy: Sendable {
     private let recognizer: any TextRecognizing
     private let policyMemory: RacePolicyMemory
 
+    /// 单次推理的真实超时（弃管语义，见 `withInferenceDeadline`）。
+    /// 覆盖 E5RT 冷启动停滞（真机实测 ~40s）——到点即向调用方返回。
+    /// 20s → 12s：配合「超时后不再重试」策略，把最坏无反馈等待从 ~41s 压到 ~12s。
+    private let inferenceDeadline: Duration
+    /// 推理失败后的重试退避间隔。
+    private let retryBackoff: Duration
+    /// 单条轨道的最大尝试次数（1 = 不重试）。
+    private let maxAttempts: Int
+
     /// 小区域面积阈值：低于此值只跑 mixed 单轨（约 480×300 像素）。
     private static let smallAreaPixels = 150_000
     /// 早期采纳阈值：首条完成的轨道平均置信度 ≥ 此值即接受并取消另一轨。
     /// 纯中文内容上 en 轨乱码的置信度显著低于该阈值。
     private static let earlyAcceptConfidence: Float = 0.72
-    /// 整体兜底超时：极端情况下（推理挂起）仍保证调用方在时限内得到响应。
-    private static let overallTimeout: Duration = .seconds(20)
 
-    init(recognizer: any TextRecognizing, policyMemory: RacePolicyMemory = RacePolicyMemory()) {
+    init(recognizer: any TextRecognizing,
+         policyMemory: RacePolicyMemory = RacePolicyMemory(),
+         inferenceDeadline: Duration = .seconds(12),
+         retryBackoff: Duration = .seconds(1),
+         maxAttempts: Int = 2) {
         self.recognizer = recognizer
         self.policyMemory = policyMemory
+        self.inferenceDeadline = inferenceDeadline
+        self.retryBackoff = retryBackoff
+        self.maxAttempts = maxAttempts
     }
 
     /// 竞速识别主入口。返回 nil 表示两条轨道均无有效文字。
@@ -82,19 +108,71 @@ struct RacingLanguageStrategy: Sendable {
         return await race(buffer: buffer)
     }
 
+    // MARK: - 闸门 + 超时 + 重试的单次识别
+
+    /// 执行一次识别：并发闸门 + 真实超时包裹 + 瞬态失败自动重试（E5RT 冷启动故障加固）。
+    private func recognizeResilient(_ track: LanguageTrack,
+                                    _ buffer: CVPixelBuffer) async -> Result<[RecognizedLine], Error> {
+        // 熔断器冷却期内直接快速失败 —— 让 UI 立即提示「引擎繁忙」，
+        // 而不是每次都撞满整个超时时长。
+        guard await OCRInferenceBreaker.shared.allowAttempt() else {
+            return .failure(InferenceGateError.busy)
+        }
+
+        // 只读共享盒：消除 sending 闭包对非 Sendable CVPixelBuffer 的捕获告警。
+        let box = PixelBufferBox(buffer)
+        let recognizer = self.recognizer
+        let deadline = inferenceDeadline
+
+        for attempt in 1...max(1, maxAttempts) {
+            // 并发闸门：排队超过时限（或任务被取消）→ 快速失败。
+            // 防止弃管任务无限堆积占满协作线程池（连续识别卡死的根因之一）。
+            do {
+                try await OCRInferenceGate.shared.acquire()
+            } catch {
+                OCRMetrics.recordInferenceFailure(track: track, attempt: attempt, error: error)
+                return .failure(error)
+            }
+            let result = await withInferenceDeadline(deadline) {
+                try await recognizer.recognize(box.value, track: track)
+            }
+            // 到点即释放许可（不等底层操作自然落错）—— 停滞调用可挂 ~40s，
+            // 等它会让一次停滞锁死闸门；残留争抢由熔断器冷却期兜底。
+            OCRInferenceGate.shared.release()
+
+            switch result {
+            case .success:
+                await OCRInferenceBreaker.shared.recordSuccess()
+                return result
+            case .failure(let error):
+                OCRMetrics.recordInferenceFailure(track: track, attempt: attempt, error: error)
+                if error is InferenceDeadlineError {
+                    await OCRInferenceBreaker.shared.recordTimeout()
+                    // 超时弃管后不重试 —— 管线大概率已卡死，再跑一轮只是把卡死时间翻倍。
+                    return result
+                }
+                guard attempt < maxAttempts, !Task.isCancelled else { return result }
+                OCRMetrics.recordInferenceRetry(track: track, attempt: attempt)
+                try? await Task.sleep(for: retryBackoff)
+            }
+        }
+        // 循环必经 return；防御性兜底
+        return .failure(InferenceDeadlineError.exceeded)
+    }
+
     // MARK: - 单轨执行
 
     private mutating func runSolo(_ track: LanguageTrack, buffer: CVPixelBuffer) async -> [RecognizedLine]? {
         let state = OCRMetrics.begin(.inference)
         defer { OCRMetrics.end(.inference, state) }
-        do {
-            let lines = try await recognizer.recognize(buffer, track: track)
+        switch await recognizeResilient(track, buffer) {
+        case .success(let lines):
             await policyMemory.record(winner: track)
             return lines.isEmpty ? nil : lines
-        } catch is CancellationError {
-            return nil
-        } catch {
-            os_log(.error, log: Self.log, "solo %@ failed: %@", track.rawValue, error.localizedDescription)
+        case .failure(let error):
+            if !(error is InferenceDeadlineError) {
+                os_log(.error, log: Self.log, "solo %@ failed: %@", track.rawValue, String(describing: error))
+            }
             return nil
         }
     }
@@ -108,7 +186,9 @@ struct RacingLanguageStrategy: Sendable {
 
     private mutating func race(buffer: CVPixelBuffer) async -> [RecognizedLine]? {
         let memory = policyMemory
-        let recognizer = self.recognizer
+        // mutating 方法内不可直接捕获 self —— 复制不可变副本供子任务捕获。
+        let runner = self
+        let deadline = inferenceDeadline
         // 双轨道**只读**共享同一像素缓冲：Vision 对输入缓冲区仅做只读锁定，
         // 并发安全；经 Sendable 盒显式声明该不变量（消除 sending 闭包告警）。
         let sharedBuffer = PixelBufferBox(buffer)
@@ -116,15 +196,17 @@ struct RacingLanguageStrategy: Sendable {
         let winner: TrackResult? = await withTaskGroup(of: TrackResult.self) { group in
             group.addTask(priority: .userInitiated) {
                 TrackResult(track: .english,
-                            result: await Self.runTrack(recognizer, .english, sharedBuffer.value))
+                            result: await runner.recognizeResilient(.english, sharedBuffer.value))
             }
             group.addTask(priority: .userInitiated) {
                 TrackResult(track: .mixed,
-                            result: await Self.runTrack(recognizer, .mixed, sharedBuffer.value))
+                            result: await runner.recognizeResilient(.mixed, sharedBuffer.value))
             }
-            // 整体兜底超时：到点后取消组内全部任务（新 Vision API 原生响应取消）。
+            // 整体兜底超时：到点后取消组内全部任务。
+            // （每条轨道自身已有 `withInferenceDeadline` 弃管式真实超时，
+            //  保证子任务必然落定，此处兜底才能真实生效。）
             group.addTask(priority: .utility) {
-                try? await Task.sleep(for: Self.overallTimeout)
+                try? await Task.sleep(for: deadline)
                 return TrackResult(track: .english, result: .failure(CancellationError()))
             }
 
@@ -163,18 +245,6 @@ struct RacingLanguageStrategy: Sendable {
         }
         await memory.record(winner: winner.track)
         return lines
-    }
-
-    private static func runTrack(_ recognizer: any TextRecognizing,
-                                 _ track: LanguageTrack,
-                                 _ buffer: CVPixelBuffer) async -> Result<[RecognizedLine], Error> {
-        let state = OCRMetrics.begin(.inference)
-        defer { OCRMetrics.end(.inference, state) }
-        do {
-            return .success(try await recognizer.recognize(buffer, track: track))
-        } catch {
-            return .failure(error)
-        }
     }
 
     /// 平均置信度（空数组返回 0）—— 竞速仲裁的质量度量。

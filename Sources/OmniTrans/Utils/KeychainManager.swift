@@ -171,26 +171,42 @@ enum KeychainManager {
     }
 
     private static func readAllFromKeychain() -> [UUID: KeychainFields] {
-        var query = baseQuery(account: "") as [String: Any]
-        query.removeValue(forKey: kSecAttrAccount as String)
-        query[kSecReturnAttributes as String] = true
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitAll
+        // Strategy: first fetch only attributes (no data) to get all account UUIDs,
+        // then read data per-item.  This avoids the errSecParam (-50) that some
+        // macOS versions return when kSecReturnData + kSecMatchLimitAll are combined.
+        var attrQuery = baseQuery(account: "") as [String: Any]
+        attrQuery.removeValue(forKey: kSecAttrAccount as String)
+        attrQuery[kSecReturnAttributes as String] = true
+        attrQuery[kSecReturnData as String] = false
+        attrQuery[kSecMatchLimit as String] = kSecMatchLimitAll
 
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let items = result as? [[String: Any]] else {
-            if status != errSecItemNotFound {
-                os_log(.error, log: log_, "keychain bulk read failed: %d", status)
+        var attrResult: AnyObject?
+        let attrStatus = SecItemCopyMatching(attrQuery as CFDictionary, &attrResult)
+        guard attrStatus == errSecSuccess, let attrItems = attrResult as? [[String: Any]] else {
+            if attrStatus != errSecItemNotFound {
+                os_log(.error, log: log_, "keychain attribute query failed: %d", attrStatus)
             }
             return [:]
         }
 
+        // Collect known UUID accounts
+        var accounts: [UUID] = []
+        for item in attrItems {
+            if let account = item[kSecAttrAccount as String] as? String,
+               let id = UUID(uuidString: account) {
+                accounts.append(id)
+            }
+        }
+
+        // Read data per-item (single-item queries never trigger -50)
         var out: [UUID: KeychainFields] = [:]
-        for item in items {
-            guard let account = item[kSecAttrAccount as String] as? String,
-                  let id = UUID(uuidString: account),
-                  let data = item[kSecValueData as String] as? Data,
+        for id in accounts {
+            var dataQuery = baseQuery(account: id.uuidString)
+            dataQuery[kSecReturnData as String] = true
+            dataQuery[kSecMatchLimit as String] = kSecMatchLimitOne
+            var dataResult: AnyObject?
+            guard SecItemCopyMatching(dataQuery as CFDictionary, &dataResult) == errSecSuccess,
+                  let data = dataResult as? Data,
                   let fields = KeychainFields.decode(from: data)
             else { continue }
             out[id] = fields

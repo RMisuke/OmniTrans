@@ -38,8 +38,9 @@ class OmniPanel: NSPanel {
     /// SwiftUI 内容承载视图引用（保留以复用而非重建）。
     private var hostingView: NSHostingView<AnyView>?
 
-    /// The material used for the window background.
-    var resolvedBlurMaterial: NSVisualEffectView.Material { .hudWindow }
+    /// 窗口背景材质 —— v0.8 哑光化：实底 `windowBackground` 替代深色
+    /// 毛玻璃（hudWindow），提升文字可读性与高级感。
+    var resolvedBlurMaterial: NSVisualEffectView.Material { .windowBackground }
 
     // MARK: - Shared initialisation
 
@@ -107,7 +108,7 @@ class OmniPanel: NSPanel {
         gLayer.cornerRadius    = Self.panelCornerRadius
         gLayer.cornerCurve     = .continuous
         gLayer.masksToBounds   = true
-        gLayer.borderColor     = NSColor.white.withAlphaComponent(0.12).cgColor
+        gLayer.borderColor     = NSColor.separatorColor.withAlphaComponent(0.6).cgColor
         gLayer.borderWidth     = 0.5
 
         wrapper.addSubview(glassBackdrop)

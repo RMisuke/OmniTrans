@@ -55,8 +55,8 @@ OmniTrans/
 
 ### 系统要求
 
-- macOS 14.0+
-- Xcode 16+ 或 Swift 6.4+ 命令行工具
+- macOS 15.0+
+- Xcode 27+ (Xcode-beta.app) 构建（Command Line Tools 因 xcSpec 注册冲突无法独立编译本项目）
 
 ### 构建
 
@@ -67,6 +67,8 @@ bash build-arm.sh
 ```
 
 构建产物：`.build/OmniTrans-arm64.app`
+
+> **注意**: 构建需要 Xcode-beta.app 或 Xcode.app 完整安装，不支持仅安装 Command Line Tools 的环境。
 
 ### 运行
 

@@ -30,11 +30,12 @@ private enum PanelTimestampFormatters {
     }()
 }
 
-// MARK: - Floating Panel Content v0.6
+// MARK: - Floating Panel Content v6.5
 
 struct FloatingPanelContent: View {
     @ObservedObject var state: AppState
     @Environment(TranslationSessionStore.self) private var session
+    @Environment(OCRWarmupState.self) private var ocrWarmup
 
     @FocusState var isInputFocused: Bool
     @State var confirmClearHistory = false
@@ -316,23 +317,25 @@ struct FloatingPanelContent: View {
 
     func updateStatusFromSession() {
         if session.errorMessage != nil {
+            // 有错误 → 红灯常亮
             isBreathing = false
-            setStatus(.red, persistent: 0)
-        } else if session.isTranslating {
+            statusColor = .red
+            statusVisible = true
+        } else if isProbingAPI || session.isTranslating {
+            // 正在探测或翻译中 → 黄灯闪烁
             isBreathing = true
-            setStatus(.yellow, persistent: 0)
-        } else if isProbingAPI {
-            isBreathing = true
-            setStatus(.yellow, persistent: 0)
+            statusColor = .yellow
+            statusVisible = true
         } else if apiConnectionFailed {
+            // API 连接失败 → 红灯常亮
             isBreathing = false
-            setStatus(.red, persistent: 0)
-        } else if !session.translatedText.isEmpty || session.dictionaryEntry != nil {
-            isBreathing = false
-            setStatus(.green, persistent: 5)
+            statusColor = .red
+            statusVisible = true
         } else {
+            // 空闲 / 上次探测成功 / 翻译完成 → 绿灯常亮
             isBreathing = false
-            setStatus(.green, persistent: 5)
+            statusColor = .green
+            statusVisible = true
         }
     }
 
@@ -371,19 +374,7 @@ struct FloatingPanelContent: View {
         }
     }
 
-    func setStatus(_ color: StatusColor, persistent seconds: Double) {
-        withAnimation(AppTheme.Motion.slow.resolveGated()) {
-            statusColor = color
-            statusVisible = true
-        }
-        if seconds > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [statusColor = color] in
-                if self.statusColor == statusColor {
-                    withAnimation(AppTheme.Motion.slow.resolveGated()) { self.statusVisible = false }
-                }
-            }
-        }
-    }
+    // setStatus removed — status is now always visible (green/red steady, yellow blinking)
 
     // MARK: - Top Bar
 
@@ -392,9 +383,10 @@ struct FloatingPanelContent: View {
             // ── 左侧: App 图标 + 模式标签 + 状态灯 ──
             appIconView
             Text(modeLabel)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(size: 12, weight: .bold))
                 .foregroundColor(.secondary)
             statusIndicator
+            warmupProgressBar
 
             Spacer()
 
@@ -421,6 +413,24 @@ struct FloatingPanelContent: View {
                     .font(.system(size: 14))
                     .foregroundColor(.accentColor)
             }
+        }
+    }
+
+    // MARK: - OCR Warmup Progress Bar
+
+    @ViewBuilder
+    private var warmupProgressBar: some View {
+        if ocrWarmup.isWarmingUp {
+            HStack(spacing: 4) {
+                ProgressView(value: ocrWarmup.progress)
+                    .frame(width: 36)
+                    .tint(.accentColor)
+                Text("OCR 引擎预热中…")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .leading)))
+            .animation(.easeInOut(duration: 0.35), value: ocrWarmup.isWarmingUp)
         }
     }
 
@@ -481,11 +491,11 @@ struct FloatingPanelContent: View {
                     }
                 } label: {
                     HStack(spacing: 3) {
-                        Image(systemName: "cpu").font(.system(size: 9))
+                        Image(systemName: "cpu").font(.system(size: 10))
                         Text(currentProviderName)
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(size: 10, weight: .medium))
                             .lineLimit(1)
-                        Image(systemName: "chevron.down").font(.system(size: 7))
+                        Image(systemName: "chevron.down").font(.system(size: 8))
                     }
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 7).padding(.vertical, 3)
@@ -507,7 +517,7 @@ struct FloatingPanelContent: View {
             }
         } label: {
             Image(systemName: pinned ? "pin.fill" : "pin")
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundColor(pinned ? .accentColor : .secondary)
                 .rotationEffect(.degrees(pinned ? 45 : 0))
                 .frame(width: 22, height: 22)
@@ -550,11 +560,20 @@ struct FloatingPanelContent: View {
         }
         .padding(AppTheme.spaceMD)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.radiusLG, style: .continuous)
+            RoundedRectangle(cornerRadius: FloatingPanelLayout.inputSurfaceRadius, style: .continuous)
                 .fill(Color(nsColor: .textBackgroundColor))
-                .shadow(color: .black.opacity(0.12), radius: 4, x: 0, y: 1)
         )
-        .padding(.horizontal, 16).padding(.vertical, 4)
+        // v0.8.1：聚焦时强调色描边渐显（focus ring），失焦回 hairline。
+        // 描边代替投影表达层级 —— 哑光画布规范。
+        .overlay(
+            RoundedRectangle(cornerRadius: FloatingPanelLayout.inputSurfaceRadius, style: .continuous)
+                .strokeBorder(
+                    isInputFocused ? AppTheme.accentAction.opacity(0.55) : AppTheme.MaterialPolicy.cardStroke,
+                    lineWidth: isInputFocused ? 1.5 : 1
+                )
+                .animation(AppTheme.Motion.buttonHover.resolveGated(), value: isInputFocused)
+        )
+        .padding(.horizontal, FloatingPanelLayout.contentHorizontalInset).padding(.vertical, 4)
     }
 
     private var clearInputButton: some View {
@@ -601,7 +620,7 @@ struct FloatingPanelContent: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.accentColor)
                 TextField("搜索翻译历史…", text: $historySearchText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
@@ -613,9 +632,9 @@ struct FloatingPanelContent: View {
                             confirmClearHistory = false
                         }
                         .foregroundColor(.red)
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         Button("取消") { confirmClearHistory = false }
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                     }
                 } else {
                     Button {
@@ -625,8 +644,8 @@ struct FloatingPanelContent: View {
                         }
                     } label: {
                         HStack(spacing: 3) {
-                            Image(systemName: "trash").font(.system(size: 9))
-                            Text("清除历史").font(.system(size: 10))
+                            Image(systemName: "trash").font(.system(size: 10))
+                            Text("清除历史").font(.system(size: 11))
                         }
                         .foregroundColor(.red)
                     }
@@ -634,14 +653,15 @@ struct FloatingPanelContent: View {
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
+            // v0.8.1：强调色描边 + 浅色强调填充 —— 搜索栏是历史模式的
+            // 视觉焦点，与普通卡片拉开层级（哑光画布规范中的例外强调）。
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(nsColor: .textBackgroundColor))
-                    .shadow(color: .black.opacity(0.12), radius: 4, x: 0, y: 1)
+                RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
+                    .fill(AppTheme.accentAction.opacity(0.06))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(AppTheme.cardBorder, lineWidth: 1)
+                RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
+                    .strokeBorder(AppTheme.accentAction.opacity(0.35), lineWidth: 1)
             )
             .padding(.bottom, 8)
 
@@ -655,24 +675,18 @@ struct FloatingPanelContent: View {
 
             if !filtered.isEmpty {
                 ScrollView {
-                    LazyVStack(spacing: AppTheme.spaceXS) {
+                    LazyVStack(spacing: FloatingPanelLayout.listRowSpacing) {
                         ForEach(filtered) { entry in
                             historyCard(entry)
                         }
                     }
+                    // v0.8.1：底部预留滚动指示器空间，避免末行被遮挡。
+                    .padding(.bottom, 4)
                 }
                 .frame(maxHeight: 250)
-                .mask(
-                    LinearGradient(
-                        gradient: Gradient(stops: [
-                            .init(color: .clear, location: 0),
-                            .init(color: .black, location: 0.02),
-                            .init(color: .black, location: 1)
-                        ]),
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
+                // v0.8.1 Bug 修复：删除顶部渐变 alpha mask ——
+                // 它把滚动进入顶端的第一张卡片文字裁成残影。
+                // 改靠 ScrollView 默认边界自然裁剪。
             } else {
                 Text(historySearchText.isEmpty ? "暂无翻译历史" : "无匹配结果")
                     .font(.system(size: 12))
@@ -699,7 +713,7 @@ struct FloatingPanelContent: View {
                     Spacer()
                     if entry.isDictionaryMode {
                         Text("词典")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.accentColor)
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(Capsule().fill(Color.accentColor.opacity(0.12)))
@@ -713,20 +727,23 @@ struct FloatingPanelContent: View {
                 }
                 HStack {
                     Text(entry.providerName)
-                        .font(.system(size: 9))
+                        .font(.system(size: 10))
                         .foregroundColor(.accentColor)
                     Spacer()
                     Text(formattedTime(entry.timestamp))
-                        .font(.system(size: 9))
+                        .font(.system(size: 10))
                         .foregroundColor(.secondary.opacity(0.7))
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(AppTheme.spaceMD)
             .background(
-                RoundedRectangle(cornerRadius: AppTheme.radiusLG, style: .continuous)
+                RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
                     .fill(Color(nsColor: .textBackgroundColor))
-                    .shadow(color: .black.opacity(0.10), radius: 2, x: 0, y: 1)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
+                    .strokeBorder(AppTheme.MaterialPolicy.cardStroke, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -739,7 +756,7 @@ struct FloatingPanelContent: View {
             Spacer()
             ProgressView().scaleEffect(0.8)
             Text(session.isDictionaryMode ? "正在查询词典…" : "正在翻译…")
-                .font(.system(size: 12)).foregroundColor(.secondary)
+                .font(.system(size: 13)).foregroundColor(.secondary)
             Spacer()
         }
         .frame(maxWidth: .infinity, minHeight: 120)
@@ -752,7 +769,7 @@ struct FloatingPanelContent: View {
             Spacer()
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 24)).foregroundColor(.orange)
-            Text(error).font(.system(size: 12)).foregroundColor(.secondary)
+            Text(error).font(.system(size: 13)).foregroundColor(.secondary)
                 .multilineTextAlignment(.center).padding(.horizontal, 20)
             Button("重试") { state.retryTranslate() }
                 .buttonStyle(.borderedProminent).controlSize(.small)
@@ -773,11 +790,14 @@ struct FloatingPanelContent: View {
         }
         .padding(AppTheme.spaceMD)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.radiusLG, style: .continuous)
+            RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
                 .fill(Color(nsColor: .textBackgroundColor))
-                .shadow(color: .black.opacity(0.12), radius: 4, x: 0, y: 1)
         )
-        .padding(.horizontal, 16)
+        .overlay(
+            RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
+                .strokeBorder(AppTheme.MaterialPolicy.cardStroke, lineWidth: 1)
+        )
+        .padding(.horizontal, FloatingPanelLayout.contentHorizontalInset)
         .frame(minHeight: 80, maxHeight: panelSize == "dynamic" ? .infinity : 280)
     }
 
@@ -797,9 +817,9 @@ struct FloatingPanelContent: View {
                     if session.isFromLocalCache {
                         HStack(spacing: 4) {
                             Image(systemName: "cylinder.split.1x2.fill")
-                                .font(.system(size: 10))
+                                .font(.system(size: 11))
                             Text("本地词典")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.system(size: 11, weight: .medium))
                         }
                         .foregroundColor(.secondary)
                     }
@@ -809,7 +829,7 @@ struct FloatingPanelContent: View {
                 ForEach(entry.definitions) { def in
                     HStack(alignment: .top, spacing: 8) {
                         Text(def.pos)
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 4).padding(.vertical, 1)
                             .background(Capsule().fill(Color.accentColor))
@@ -832,18 +852,21 @@ struct FloatingPanelContent: View {
                 if session.isFromLocalCache && !session.cachedModelName.isEmpty {
                     Rectangle().fill(.quaternary).frame(height: 1)
                     Text("由 \(session.cachedModelName) 生成于 \(formattedCacheTimestamp)")
-                        .font(.system(size: 9))
+                        .font(.system(size: 10))
                         .foregroundColor(.secondary.opacity(0.6))
                 }
             }
         }
         .padding(AppTheme.spaceMD)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.radiusLG, style: .continuous)
+            RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
                 .fill(Color(nsColor: .textBackgroundColor))
-                .shadow(color: .black.opacity(0.12), radius: 4, x: 0, y: 1)
         )
-        .padding(.horizontal, 16)
+        .overlay(
+            RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
+                .strokeBorder(AppTheme.MaterialPolicy.cardStroke, lineWidth: 1)
+        )
+        .padding(.horizontal, FloatingPanelLayout.contentHorizontalInset)
         .frame(minHeight: 80, maxHeight: panelSize == "dynamic" ? .infinity : 280)
     }
 
@@ -866,9 +889,9 @@ struct FloatingPanelContent: View {
             } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "globe")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                     Text(state.targetLang.rawValue)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                 }
                 .contentShape(Rectangle())
             }
@@ -885,10 +908,10 @@ struct FloatingPanelContent: View {
             } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "brain.head.profile")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .scaleEffect(brainPulse ? 1.25 : 1.0)
                     Text(isContextAware ? "context on" : "context off")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                 }
                 .foregroundColor(isContextAware ? AppTheme.accentAction : AppTheme.textCaptionGray)
                 .contentShape(Rectangle())
@@ -910,9 +933,9 @@ struct FloatingPanelContent: View {
                 if hasResult { state.retryTranslate() } else { commitTranslation() }
             } label: {
                 HStack(spacing: 3) {
-                    Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 10))
+                    Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 11))
                     Text(hasResult ? (session.dictionaryEntry != nil || session.isDictionaryMode ? "重新查词" : "重新翻译") : modeLabel)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                 }
                 .padding(.horizontal, 10).padding(.vertical, 5)
             }
@@ -921,25 +944,23 @@ struct FloatingPanelContent: View {
             .disabled(inputText.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || session.isTranslating)
         }
         .padding(.horizontal, 12).padding(.vertical, 6)
+        // v0.8.1：实底 + hairline 描边，去投影 —— 与内容卡片同一套
+        // 表面规格；工具条是面板内唯一允许玻璃的白名单区域
+        // （macOS 26 上可升级 Liquid Glass）。
         .background(
             RoundedRectangle(cornerRadius: AppTheme.hudCornerRadius, style: .continuous)
                 .fill(Color(nsColor: .textBackgroundColor))
-                .shadow(color: .black.opacity(0.12), radius: 4, x: 0, y: 1)
         )
         .overlay(RoundedRectangle(cornerRadius: AppTheme.hudCornerRadius, style: .continuous)
-            .stroke(AppTheme.cardBorder, lineWidth: 0.5))
+            .strokeBorder(AppTheme.MaterialPolicy.cardStroke, lineWidth: 1))
         .padding(.horizontal, 12).padding(.bottom, 12)
     }
 
+    /// v0.8.1：统一胶囊工具按钮（ToolbarCapsuleButton），
+    /// 替代裸 borderless 图标 —— 命中区与视觉重量与主按钮一致。
     private func toolbarBtn(_ icon: String, _ help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon).font(.system(size: 10))
-                .frame(width: 22, height: 22).contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .pressableAnimation()
-        .help(help)
-        .disabled(session.translatedText.isEmpty && session.dictionaryEntry == nil)
+        ToolbarCapsuleButton(systemImage: icon, helpText: help, action: action)
+            .disabled(session.translatedText.isEmpty && session.dictionaryEntry == nil)
     }
 
     // MARK: - Helpers

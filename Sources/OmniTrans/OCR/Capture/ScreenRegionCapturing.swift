@@ -72,6 +72,63 @@ actor SCContentCache {
     }
 }
 
+// MARK: - SCStream 活跃锁
+
+/// 活跃 SCStream 保护 —— 同一时刻只允许一个 SCStream 在运行。
+///
+/// ## 为什么需要
+///  在部分 macOS 版本上可能无限阻塞（真机日志已证实）。
+/// 旧实现 fire-and-forget stopCapture，连续捕获时多个未停止的 SCStream 堆积，
+/// 耗尽 ScreenCaptureKit 服务端内部连接上限，后续 `startCapture()` 失败或挂起，
+/// 用户侧表现为「解析中」→ 超时 →「屏幕捕获失败」。
+///
+/// 此锁确保前一个流完全停止后才创建新流，从根源杜绝 SCStream 资源泄露。
+private actor ActiveStreamGate {
+    static let shared = ActiveStreamGate()
+    private var activeCount = 0
+    /// Track when the active stream was acquired for diagnostics.
+    private var acquiredAt: ContinuousClock.Instant?
+
+    nonisolated private static let log = OSLog(subsystem: AppLogging.subsystem, category: "Capture")
+
+    /// 等待直到有空闲槽位，然后占用一个。
+    /// 最多等 3s（与帧超时对齐），超时后仍然放行（防御性兜底）。
+    func acquire() async {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while activeCount > 0 {
+            guard ContinuousClock.now < deadline else {
+                let heldSecs = acquiredAt.map { $0.duration(to: .now).formatted(.units(allowed: [.seconds])) } ?? "unknown"
+                os_log(.error, log: Self.log,
+                       "ActiveStreamGate: forced through after 3s — previous stream held for %{public}@ (activeCount=%d)",
+                       heldSecs, activeCount)
+                // Reset state: assume the old stream is stuck and will be cleaned up
+                // by its timeout/cancellation handler.  Forcibly reset to avoid
+                // cascading blocks for subsequent capture attempts.
+                activeCount = 0
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        activeCount += 1
+        acquiredAt = .now
+        if activeCount > 1 {
+            os_log("ActiveStreamGate: concurrent streams detected (count=%d) — may cause resource contention",
+                   log: Self.log, type: .error, activeCount)
+        }
+    }
+
+    /// 释放一个槽位。
+    func release() {
+        if let acquiredAt, acquiredAt.duration(to: .now).components.seconds > 1 {
+            let held = acquiredAt.duration(to: .now).formatted(.units(allowed: [.seconds]))
+            os_log(.info, log: Self.log,
+                   "ActiveStreamGate: stream released after %{public}@", held)
+        }
+        activeCount = max(0, activeCount - 1)
+        if activeCount == 0 { acquiredAt = nil }
+    }
+}
+
 // MARK: - SCStream Single-Frame Capture
 
 /// 基于 `SCStream` + 自定义 `SCStreamOutput` 的单帧区域捕获实现。
@@ -121,18 +178,36 @@ final class SCStreamRegionCapture: ScreenRegionCapturing {
             os_log(.debug, log: Self.log, "OCR capture region=local%@ scale=%.2f output=%dx%d",
                    NSStringFromRect(sourceRect), scale, pixel.width, pixel.height)
 
-            return try await captureSingleFrame(filter: filter, configuration: config)
+            // ── 活跃流保护：确保前一个 SCStream 已完全停止 ──
+            await ActiveStreamGate.shared.acquire()
+            let result = try await captureSingleFrame(filter: filter, configuration: config)
+            await ActiveStreamGate.shared.release()
+            return result
         } catch let error as SCStreamError {
-            // -3808 = user-declined screen capture permission; -3815 = stream already started.
+            // 错误码依据 SDK 头文件 SCError.h（旧注释曾把 -3801/-3808 写反，已纠正）：
+            // -3801 = UserDeclined（用户未授权屏幕录制）；-3808 = AttemptToStopStreamState。
             let code = error.code
-            if code.rawValue == -3808 {
+            if code.rawValue == -3801 {
                 os_log(.error, log: Self.log, "Screen Recording permission denied — grant in System Settings → Privacy → Screen Recording")
+                // Post a specific notification so the UI can show an actionable alert
+                NotificationCenter.default.post(name: .omniTransOCRPermissionDenied, object: nil)
             } else {
                 os_log(.error, log: Self.log, "Stream error %d: %@", code.rawValue, error.localizedDescription)
             }
+            await ActiveStreamGate.shared.release()
             return nil
         } catch {
             os_log(.error, log: Self.log, "Capture failed: %@", error.localizedDescription)
+            // Detect permission denial from non-SCStreamError paths
+            // (e.g. SCShareableContent.current throws NSError with SCStreamErrorDomain code -3801)
+            let nsError = error as NSError
+            if nsError.domain == "SCStreamError" && nsError.code == -3801 {
+                NotificationCenter.default.post(name: .omniTransOCRPermissionDenied, object: nil)
+            } else if String(describing: error).contains("-3801") ||
+                        String(describing: error).localizedCaseInsensitiveContains("declined") {
+                NotificationCenter.default.post(name: .omniTransOCRPermissionDenied, object: nil)
+            }
+            await ActiveStreamGate.shared.release()
             return nil
         }
     }
@@ -141,6 +216,11 @@ final class SCStreamRegionCapture: ScreenRegionCapturing {
     ///
     /// 包裹 3 秒超时 —— 若 `startCapture()` 成功但始终无帧（显示器拓扑变化 /
     /// GPU 饥饿期间已知的 SCK 问题），continuation 以 nil 收尾而非永久挂起。
+    ///
+    /// ## stopCapture 等待策略
+    /// 帧到达/超时后，**同步等待** stopCapture 完成（最多 1s），而非旧的
+    /// fire-and-forget。旧策略导致连续捕获时多个 SCStream 堆积，耗尽系统
+    /// ScreenCaptureKit 内部连接上限（根因修复）。
     private func captureSingleFrame(
         filter: SCContentFilter,
         configuration: SCStreamConfiguration
@@ -151,78 +231,86 @@ final class SCStreamRegionCapture: ScreenRegionCapturing {
         try stream.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: .global(qos: .userInitiated))
         try await stream.startCapture()
 
-        return try await withThrowingTaskGroup(of: PixelBufferBox?.self) { group in
-            // 帧任务：首帧到达（或出错）即恢复
+        // ── 阶段 1：等待首帧（或 3s 帧超时）──
+        let result: PixelBufferBox? = try await withThrowingTaskGroup(of: PixelBufferBox?.self) { group in
+            // 帧任务：首帧到达（或出错/取消）即恢复
             group.addTask {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PixelBufferBox?, Error>) in
-                    streamOutput.onFrame = { @Sendable box in
-                        continuation.resume(returning: box)
-                    }
-                    streamOutput.onError = { error in
-                        continuation.resume(throwing: error)
-                    }
-                    streamOutput.stream = stream
-                }
+                try await streamOutput.waitFirstFrame()
             }
 
             // 超时任务：3s 无帧则放弃（M1 在显示拥塞期需要更多时间）
             group.addTask {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 os_log(.debug, log: Self.log, "Frame capture timed out after 3.0s")
-                Task { try? await stream.stopCapture() }
                 return nil
             }
 
             // 返回先完成者
-            let result = try await group.next() ?? nil
+            let first = try await group.next() ?? nil
             group.cancelAll()
-
-            // Fire-and-forget 流销毁 —— stopCapture() 在部分 macOS 版本上可能无限阻塞。
-            Task.detached { try? await stream.stopCapture() }
-
-            return result?.value
+            return first
         }
+
+        // ── 阶段 2：等待 stopCapture 完成（最多 1s 超时保护）──
+        // 旧实现 fire-and-forget stopCapture → 连续捕获时多个 SCStream 堆积
+        // → 耗尽 ScreenCaptureKit 服务端内部连接上限 → 后续 startCapture 失败。
+        // 现在同步等待 stop 完成，确保每次捕获结束后流被完全释放。
+        await withTaskGroup(of: Void.self) { stopGroup in
+            stopGroup.addTask { try? await stream.stopCapture() }
+            stopGroup.addTask {
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s 超时
+            }
+            _ = await stopGroup.next()
+            stopGroup.cancelAll()
+        }
+
+        return result?.value
     }
 }
 
 // MARK: - Single-Frame SCStreamOutput
 
-/// 捕获 `SCStream` 首帧 `CVPixelBuffer` 并精确触发一次回调后停止流。
+/// 捕获 `SCStream` 首帧 `CVPixelBuffer`。
+///
+/// 帧/错误/任务取消三路竞速由 `OnceGate` 保证 continuation **恰好恢复一次**：
+/// 修复旧实现「超时取消后 continuation 永不恢复」的泄漏。
+/// 停流职责上移至 `captureSingleFrame` 的幂等 stop 逻辑，本类不再触碰流。
 private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
-    nonisolated(unsafe) var onFrame: (@Sendable (PixelBufferBox) -> Void)?
-    nonisolated(unsafe) var onError: (@Sendable (Error) -> Void)?
-    nonisolated(unsafe) var stream: SCStream?
 
-    private nonisolated(unsafe) var _hasFired = false
-    private let _lock = NSLock()
+    private let gate = OnceGate()
+    private let state = OSAllocatedUnfairLock<CheckedContinuation<PixelBufferBox?, Error>?>(initialState: nil)
 
-    /// 原子 check-and-set：`didOutputSampleBuffer` 与 `didStopWithError` 不可能同时 resume。
-    private func markFired() -> Bool {
-        _lock.lock()
-        defer { _lock.unlock() }
-        if _hasFired { return true }
-        _hasFired = true
-        return false
+    /// 等待首帧；任务被取消时以 nil 收尾（不悬挂 continuation）。
+    func waitFirstFrame() async throws -> PixelBufferBox? {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                state.withLock { $0 = continuation }
+            }
+        } onCancel: {
+            finish(.success(nil))
+        }
+    }
+
+    private func finish(_ result: Result<PixelBufferBox?, Error>) {
+        guard gate.tryEnter() else { return }
+        state.withLock { continuation in
+            continuation?.resume(with: result)
+            continuation = nil
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
-        guard !markFired() else { return }
-
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            onError?(NSError(domain: "SCK", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "No pixel buffer in sample"]))
+            finish(.failure(NSError(domain: "SCK", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "No pixel buffer in sample"])))
             return
         }
-
-        // stopCapture 可能无限阻塞 —— fire-and-forget，永不 await。
-        Task.detached { try? await stream.stopCapture() }
-        onFrame?(PixelBufferBox(pixelBuffer))
+        finish(.success(PixelBufferBox(pixelBuffer)))
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        guard !markFired() else { return }
-        onError?(error)
+        finish(.failure(error))
     }
 }
 

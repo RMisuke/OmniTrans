@@ -12,7 +12,9 @@ import SwiftUI
 /// - 浮动面板由 [`FloatingWindowManager`](Sources/OmniTrans/Services/FloatingWindowManager.swift) 管理，
 ///   不再使用 `FloatingPanel.shared`（OmniPanel 子类）。
 /// - 首选项窗口由 [`SettingsWindowManager`](Sources/OmniTrans/Services/SettingsWindowManager.swift) 管理。
-/// - `SettingsPanel`（OmniPanel 子类）保留用于菜单栏下拉场景。
+/// ## v0.8 收敛
+/// - 删除 `SettingsPanel`（菜单栏下拉面板）死代码路径 ——
+///   窗口层收敛为两条路径：浮动面板 + 独立首选项窗口。
 @MainActor
 final class WindowManager {
 
@@ -20,9 +22,6 @@ final class WindowManager {
 
     let floating = FloatingWindowManager.shared
     let settingsWindow = SettingsWindowManager.shared
-
-    /// 菜单栏下拉设置面板（OmniPanel 子类，保留兼容）。
-    let settingsPanel = SettingsPanel()
 
     // MARK: - Floating Panel
 
@@ -52,48 +51,9 @@ final class WindowManager {
         }
     }
 
-    // MARK: - Settings (菜单栏 NSPanel)
-
-    private func refreshSettingsPanelContent() {
-        settingsPanel.setContent(
-            SettingsPanelContent(state: AppState.shared)
-        )
-    }
-
-    func showSettingsPanel() {
-        refreshSettingsPanelContent()
-        positionSettingsBelowMenuBar()
-        settingsPanel.show()
-    }
-
-    func hideSettingsPanel() {
-        settingsPanel.orderOut(nil)
-    }
-
-    // MARK: - Positioning
-
-    private func positionSettingsBelowMenuBar() {
-        guard let screen = NSScreen.main else {
-            settingsPanel.center()
-            return
-        }
-        let pw = SettingsPanel.panelWidth
-        let ph = SettingsPanel.panelHeight
-        var ox = screen.frame.midX - pw / 2
-        var oy = screen.frame.maxY - ph - 4
-        if ox < screen.frame.minX + 8 { ox = screen.frame.minX + 8 }
-        if ox + pw > screen.frame.maxX - 8 { ox = screen.frame.maxX - pw - 8 }
-        if oy < screen.frame.minY + 40 { oy = screen.frame.minY + 40 }
-        settingsPanel.setFrame(
-            NSRect(x: ox, y: oy, width: pw, height: ph),
-            display: false
-        )
-    }
-
     // MARK: - Teardown
 
     func dismissAll() {
         floating.hide(animated: false)
-        settingsPanel.orderOut(nil)
     }
 }

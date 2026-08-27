@@ -1,7 +1,7 @@
 import Foundation
 import Carbon
 
-let kAppVersion = "0.6"
+let kAppVersion = "6.5"
 
 @MainActor
 final class AppState: ObservableObject {
@@ -173,6 +173,25 @@ final class AppState: ObservableObject {
         providers.sort { $0.kind == .macOSNative && $1.kind != .macOSNative }; ProviderStorageManager.saveProviders(providers)
     }
 
+    /// 防抖保存 pending 任务（编辑字段逐字符触发时合并为一次磁盘写入）。
+    private var debouncedSaveItem: DispatchWorkItem?
+
+    /// 防抖保存：合并短时间内的连续保存请求（默认 500ms 窗口）。
+    /// 用于 `updateProvider` 这类逐字符触发的编辑路径。
+    func scheduleDebouncedSave(interval: TimeInterval = 0.5) {
+        debouncedSaveItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.save() }
+        debouncedSaveItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: item)
+    }
+
+    /// 立即冲刷防抖保存（应用退出前调用，防止丢失未落盘的编辑）。
+    func flushPendingSave() {
+        debouncedSaveItem?.cancel()
+        debouncedSaveItem = nil
+        save()
+    }
+
     func deleteProvider(_ p: APIProvider) {
         guard !p.isBuiltIn else { return }
         providers.removeAll { $0.id == p.id }
@@ -199,7 +218,9 @@ final class AppState: ObservableObject {
     func updateProvider(_ updated: APIProvider) {
         guard !updated.isBuiltIn else { return }
         if let i = providers.firstIndex(where: { $0.id == updated.id }) {
-            providers[i] = updated; save()
+            providers[i] = updated
+            // 编辑字段逐字符触发 —— 防抖写盘，避免每键一次磁盘 IO。
+            scheduleDebouncedSave()
         }
         if updated.isEnabled, selectedProviderID == nil { selectedProviderID = updated.id }
     }
@@ -551,14 +572,9 @@ final class AppState: ObservableObject {
         // This avoids ~log₂(N) heap reallocations during streaming token concatenation.
         session.translatedText.reserveCapacity(max(1024, text.count * 2))
 
-        // Deferred memory purge after OCR / large-text operations:
-        // OCR's Vision C++ buffers can keep 60MB+ resident; delay 2s then
-        // tell kernel to reclaim free pages back to baseline (~60MB).
-        if text.count > 500 || !isDictionaryMode {
-            DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 2.0) {
-                Task { @MainActor in MemoryPurgeHelper.shared.purgeBackendCache() }
-            }
-        }
+        // 刻意不做延迟内存清理：resetForNew 在每次翻译/OCR 后都会触发，
+        // malloc_zone_pressure_relief 会把 Vision 内部缓冲反复「清零」导致下次识别冷建
+        // （连续识别卡死主因之一）。清理职责收归系统内存压力事件统一处理。
     }
 
 

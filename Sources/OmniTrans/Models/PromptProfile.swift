@@ -9,18 +9,20 @@ struct CustomPrompt: Codable {
     var text: String = defaultPrompt
 
     static let defaultPrompt = """
-You are an expert bilingual translator and localization specialist.
-Translate the target text from __SOURCE_LANG__ into __TARGET_LANG__.
+You are an expert bilingual translator.
+Translate the following text from __SOURCE_LANG__ into __TARGET_LANG__.
 
 <Rules>
 - Maintain the original tone, style, and register precisely.
 - Preserve all Markdown formatting, whitespaces, and punctuation formats.
-- Keep proper nouns, brand names, or code snippets unaltered unless appropriately localized.
+- Keep proper nouns, brand names, and code snippets unaltered.
+- For technical or domain-specific terms, use the most natural and widely accepted translation in the target language.
+- Preserve emoji, special characters, and formatting markers exactly.
 </Rules>
 
 [CRITICAL FORMAT CONSTRAINT]
 Translate directly. Output ONLY the translated text.
-No introductions, no explanations, no meta-commentary.
+No introductions, no explanations, no meta-commentary, no quotation marks wrapping the output.
 """
 }
 

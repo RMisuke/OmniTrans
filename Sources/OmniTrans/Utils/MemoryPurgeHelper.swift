@@ -7,7 +7,9 @@ import OSLog
 /// - Tells malloc to return free pages to the kernel
 /// - On system memory warnings, evicts HistoryActor's in-memory cache
 ///   and forces a UserDefaults flush (≤50 entries).
-/// - Called at key lifecycle points (panel hide, OCR completion, app background)
+/// - On OCR idle (30s after completion): deferred gentle reclaim — balances
+///   keeping Vision buffers warm during rapid OCR vs reclaiming when idle.
+/// - On new OCR start: cancels pending deferred purge to preserve buffers.
 @MainActor
 final class MemoryPurgeHelper {
     static let shared = MemoryPurgeHelper()
@@ -17,6 +19,16 @@ final class MemoryPurgeHelper {
 
     /// DispatchSource for system-level memory pressure events.
     private var memoryPressureSource: DispatchSourceMemoryPressure?
+
+    /// OCR idle deferred purge timer — fires 30s after last OCR completes.
+    /// Cancelled immediately on new OCR start, so Vision buffers stay warm
+    /// during rapid sequential recognitions.
+    private var idlePurgeWorkItem: DispatchWorkItem?
+
+    /// OCR idle delay before deferred purge.  Long enough to skip purge
+    /// between rapid sequential OCRs, short enough to reclaim promptly
+    /// when the user actually stops.
+    private static let idlePurgeDelay: TimeInterval = 30.0
 
     /// OSLog 句柄 —— 与全工程统一 subsystem（审计 M4）。
     private let memPurgeLog = OSLog(subsystem: AppLogging.subsystem, category: "MemoryPurge")
@@ -29,11 +41,13 @@ final class MemoryPurgeHelper {
     /// critical / warning events.  Evicts `HistoryActor`'s in-memory cache
     /// and triggers a full backend purge.
     ///
+    /// Also registers OCR idle/start observers for deferred reclaim.
     /// Should be called once during app launch (e.g. from `AppDelegate`).
     func registerMemoryWarningObserver() {
         guard !warningObserverRegistered else { return }
         warningObserverRegistered = true
 
+        // ── System memory pressure ──
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.warning, .critical],
             queue: .global(qos: .utility)
@@ -49,11 +63,59 @@ final class MemoryPurgeHelper {
         }
         source.resume()
         memoryPressureSource = source
+
+        // ── OCR idle deferred purge ──
+        // 新一轮 OCR 开始 → 取消待执行的延迟清理（保留 Vision 缓冲）。
+        NotificationCenter.default.addObserver(
+            forName: .omniTransOCRLoading, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cancelIdlePurge() }
+        }
+        // OCR 完成/失败 → 调度延迟清理。
+        NotificationCenter.default.addObserver(
+            forName: .omniTransOCRDone, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.scheduleIdlePurge() }
+        }
+    }
+
+    // MARK: - OCR Idle Deferred Purge
+
+    /// Schedule a deferred purge after `idlePurgeDelay` seconds.
+    /// If already scheduled, this is a no-op (coalesces rapid OCR completions).
+    private func scheduleIdlePurge() {
+        guard idlePurgeWorkItem == nil else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.idlePurgeWorkItem = nil
+            os_log(.info, log: self.memPurgeLog,
+                   "OCR idle %.0fs — deferred backend purge", Self.idlePurgeDelay)
+            self.purgeBackendCache()
+        }
+        idlePurgeWorkItem = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.idlePurgeDelay, execute: item)
+    }
+
+    /// Cancel any pending deferred purge (called on new OCR start).
+    private func cancelIdlePurge() {
+        guard let item = idlePurgeWorkItem else { return }
+        item.cancel()
+        idlePurgeWorkItem = nil
     }
 
     // MARK: - Backend Cache Purge
 
     /// Full purge: off-screen render caches + malloc zone pressure relief.
+    ///
+    /// Call sites:
+    /// - System memory pressure events (critical / warning)
+    /// - OCR idle deferred purge (5s after last OCR completes)
+    ///
+    /// Deliberately **not** called on every OCR completion or panel hide —
+    /// doing so destroys Vision internal buffers (~60MB) that cost ~1-2s
+    /// to rebuild, causing consecutive OCR recognitions to regress to cold
+    /// start latency.
     func purgeBackendCache() {
         // 1. Flush CoreAnimation's offscreen render caches
         CATransaction.flush()

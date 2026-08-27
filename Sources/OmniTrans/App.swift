@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftUI
 import AppKit
 import Carbon
 import DisplayGeometry
@@ -43,8 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let windowManager = WindowManager()
     private var statusItem: NSStatusItem?
     private var onboardingWindow: NSWindow?
-    /// 当前 OCR 忙碌状态（方案 A）——驱动菜单栏「解析中…」稳定反馈。
+    /// 当前 OCR 忙碌状态（方案 A）——驱动菜单栏「正在识别…」稳定反馈。
     private var ocrBusyState: OCRBusyState = .idle
+    /// 「正在识别…」看门狗 —— 超时强制复位 UI，杜绝永久转圈。
+    private var ocrParsingWatchdog: Task<Void, Never>?
     /// OCR 状态提示 popover（`.applicationDefined`，不因点击外部/失焦自动关闭）。
     private var ocrStatusPopover: NSPopover?
     private var hotkeysDisabledItem: NSMenuItem?
@@ -53,6 +56,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+
+        // ── 安装精简主菜单（Bug 修复）──
+        // accessory 应用默认没有 mainMenu，而 NSTextField 的 ⌘C/⌘V/⌘X/⌘A
+        // 快捷键依赖主菜单「编辑」项的 key equivalent 路由到响应者链。
+        // 没有它，设置页所有输入框都无法粘贴（用户可直接输入但 ⌘V 无效）。
+        installMinimalMainMenu()
 
         // Register all UserDefaults defaults once at startup.
         ConfigurationStore.registerDefaults()
@@ -83,18 +92,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // ── OCR failure feedback (see OCRSelectionOverlay) ──
         for name in [NSNotification.Name("OmniTransOCRCaptureFailed"),
-                     NSNotification.Name("OmniTransOCRNoTextFound")] {
+                     NSNotification.Name("OmniTransOCRNoTextFound"),
+                     NSNotification.Name("OmniTransOCREngineBusy")] {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 guard let self else { return }
                 let msg: String
-                if note.name.rawValue == "OmniTransOCRCaptureFailed" {
-                    msg = "屏幕捕获失败，请检查「系统设置 → 隐私与安全性 → 屏幕录制」权限"
-                } else {
-                    msg = "所选区域未识别到文字"
+                switch note.name.rawValue {
+                case "OmniTransOCRCaptureFailed":
+                    msg = "屏幕捕获失败，请在「系统设置 → 隐私与安全性 → 屏幕录制」中授权 OmniTrans"
+                case "OmniTransOCREngineBusy":
+                    msg = "OCR 引擎繁忙，请稍后再试"
+                default:
+                    msg = "所选区域未检测到文字，请重新框选"
                 }
                 MainActor.assumeIsolated {
                     self.showStatusBarBubble(message: msg, duration: 3.0)
                 }
+            }
+        }
+
+        // ── OCR permission denied — actionable alert with "Open Settings" button ──
+        NotificationCenter.default.addObserver(forName: Notification.Name("OmniTransOCRPermissionDenied"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.showPermissionDeniedAlert()
+            }
+        }
+
+        // ── OCR warmup complete → proactive bubble ──
+        NotificationCenter.default.addObserver(forName: .ocrWarmupComplete, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.showStatusBarBubble(message: "OCR 引擎预热完毕，可以使用", duration: 3.0)
             }
         }
 
@@ -106,7 +133,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.showHistoryWorkspace()
             }
         }
-        HotkeyManager.shared.onOCRHotkey = { [weak self] in self?.startOCRSelection() }
+        HotkeyManager.shared.onOCRHotkey = { [weak self] in
+            let warmup = OCRWarmupState.shared
+            if warmup.isWarmingUp {
+                self?.showStatusBarBubble(message: "OCR 引擎预热中，请稍候…", duration: 3.0)
+                return
+            }
+            if warmup.warmupFailed {
+                // 预热失败 → 手动重试预热，而非触发 OCR
+                warmup.retryWarmup()
+                self?.showStatusBarBubble(message: "OCR 引擎重新预热中…", duration: 3.0)
+                return
+            }
+            self?.startOCRSelection()
+        }
         HotkeyManager.shared.onReplaceHotkey = {
             let text = AppState.shared.translatedText
             guard !text.isEmpty else { return }
@@ -130,6 +170,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Pre-warm TCP/TLS to current provider on cold start
         HotkeyManager.shared.preConnectCurrentProvider()
 
+        // ── ANE 冷启动预热（E5RT 故障修复）──
+        // 实测启动后 1–2 分钟内 ANE 文字识别管线未就绪，用户首次 OCR
+        // 会失败/停滞。启动即后台预热（失败自动重试至就绪），把冷启动
+        // 成本移出用户路径。详见 Sources/OmniTrans/OCR/ANEWarmup.swift。
+        Task.detached(priority: .utility) {
+            await OCRCapturePipeline.warmUpANE()
+        }
+
         setupStatusItem()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -150,9 +198,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // and the system flushes file buffers during normal exit.
         // No blocking on the main thread — Swift 6 forbids it.
         Task { await HistoryActor.shared.flushNow() }
+        // 冲刷 provider 编辑的防抖保存，防止退出时丢失未落盘修改。
+        AppState.shared.flushPendingSave()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    // MARK: - Minimal Main Menu（编辑快捷键基础设施）
+
+    /// 安装仅含 App 菜单 + 「编辑」菜单的隐藏主菜单。
+    ///
+    /// ## 原理
+    /// accessory 应用不显示菜单栏，但 `NSApp.mainMenu` 的菜单项 key equivalent
+    /// 仍参与按键路由。编辑项 action 为 nil target —— 由响应者链自动解析到
+    /// 当前第一响应者（NSTextField/NSTextView），一处修复即恢复全部文本控件的
+    /// ⌘Z/⌘X/⌘C/⌘V/⌘A。
+    private func installMinimalMainMenu() {
+        let mainMenu = NSMenu()
+
+        // ── App 菜单 ──
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "关于 OmniTrans",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "隐藏 OmniTrans",
+                        action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "退出 OmniTrans",
+                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        // ── 编辑菜单 ──
+        let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        NSApp.mainMenu = mainMenu
+    }
 
     // MARK: - Status Bar
 
@@ -508,26 +601,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func showStatusBarBubble(message: String, duration: TimeInterval) {
         guard let button = statusItem?.button, let _ = button.window else { return }
 
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = true
-        let controller = NSViewController()
-        controller.view = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 60))
-        let label = NSTextField(wrappingLabelWithString: message)
-        label.frame = controller.view.bounds.insetBy(dx: 12, dy: 8)
-        label.font = NSFont.systemFont(ofSize: 12)
-        label.textColor = NSColor.secondaryLabelColor
-        label.isEditable = false
-        label.isBordered = false
-        label.drawsBackground = false
-        label.autoresizingMask = [NSView.AutoresizingMask.width, .height]
-        controller.view.addSubview(label)
-        popover.contentViewController = controller
+        let popover = makeAdaptiveStatusPopover(
+            message: message,
+            font: NSFont.systemFont(ofSize: 12),
+            textColor: .secondaryLabelColor,
+            alignment: .natural,
+            maxWidth: 320,
+            behavior: .transient,
+            animates: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
             popover.close()
         }
+    }
+
+    /// 构造尺寸随文本自适应的状态栏气泡：宽度按文本实测（封顶 maxWidth），
+    /// 高度随换行行数自适应。短消息（如「OCR 引擎预热中，请稍候…」）不再留大片空白。
+    private func makeAdaptiveStatusPopover(message: String,
+                                           font: NSFont,
+                                           textColor: NSColor,
+                                           alignment: NSTextAlignment,
+                                           maxWidth: CGFloat,
+                                           behavior: NSPopover.Behavior,
+                                           animates: Bool) -> NSPopover {
+        let label = NSTextField(wrappingLabelWithString: message)
+        label.font = font
+        label.textColor = textColor
+        label.isEditable = false
+        label.isBordered = false
+        label.drawsBackground = false
+        label.alignment = alignment
+
+        let paddingH: CGFloat = 24  // 左右各 12
+        let paddingV: CGFloat = 14  // 上下各 7
+        let singleLine = label.sizeThatFits(
+            NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude))
+        let contentWidth = min(singleLine.width, max(60, maxWidth - paddingH))
+        let contentHeight = ceil(label.sizeThatFits(
+            NSSize(width: contentWidth, height: CGFloat.greatestFiniteMagnitude)).height)
+
+        let view = NSView(frame: NSRect(x: 0, y: 0,
+                                        width: ceil(contentWidth) + paddingH,
+                                        height: contentHeight + paddingV))
+        label.frame = view.bounds.insetBy(dx: 12, dy: 7)
+        label.autoresizingMask = [.width, .height]
+        view.addSubview(label)
+
+        let controller = NSViewController()
+        controller.view = view
+        let popover = NSPopover()
+        popover.behavior = behavior
+        popover.animates = animates
+        popover.contentViewController = controller
+        return popover
     }
 
     private func fire(text: String?, context: CapturedContext? = nil) {
@@ -542,8 +669,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // ── OCR 状态反馈（方案 A）──
 
     /// 更新菜单栏 OCR 状态反馈：
-    /// - `.selecting`：popover 提示「拖选屏幕区域…」（框选阶段）
-    /// - `.parsing`：statusItem 标题「解析中…」（稳定主通道，点击/失焦不丢失）
+    /// - `.selecting`：popover 提示「请拖选屏幕区域…」（框选阶段）
+    /// - `.parsing`：statusItem 标题「正在识别…」（稳定主通道，点击/失焦不丢失）
     /// - `.idle`：还原图标与标题，关闭 popover
     private func setOCRStatus(_ state: OCRBusyState) {
         guard let button = statusItem?.button else { return }
@@ -551,16 +678,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch state {
         case .selecting:
             dismissOCRStatusPopover()
+            cancelParsingWatchdog()
             button.title = ""
-            showOCRStatusPopover(message: "拖选屏幕区域…")
+            showOCRStatusPopover(message: "请拖选屏幕区域…")
         case .parsing:
             dismissOCRStatusPopover()
-            button.title = "解析中…"
+            button.title = "正在识别…"
+            startParsingWatchdog()
         case .idle:
             dismissOCRStatusPopover()
+            cancelParsingWatchdog()
             button.title = ""
             applyStatusBarIcon(to: button)
         }
+    }
+
+    // MARK: - Parsing Watchdog（端到端兑底）
+
+    /// 「正在识别…」看门狗：管线各阶段虽已有自身超时，但任何一路延迟叠加都可能
+    /// 让 Done 通知迟迟不到。60s 仍处于 parsing 则强制回 idle 并提示，
+    /// 保证用户永远不会面对无上限的转圈。
+    private func startParsingWatchdog() {
+        cancelParsingWatchdog()
+        ocrParsingWatchdog = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(60))
+            guard let self, !Task.isCancelled, self.ocrBusyState == .parsing else { return }
+            self.setOCRStatus(.idle)
+            self.showStatusBarBubble(message: "OCR 识别超时，请重新框选", duration: 3.0)
+        }
+    }
+
+    private func cancelParsingWatchdog() {
+        ocrParsingWatchdog?.cancel()
+        ocrParsingWatchdog = nil
     }
 
     /// 复位 OCR 状态（回到空闲）。
@@ -569,25 +719,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 显示 OCR 状态 popover（`.applicationDefined`：不因点击外部/失焦自动关闭）。
+    /// 尺寸随文本自适应，不再使用固定 200×40。
     private func showOCRStatusPopover(message: String) {
         guard let button = statusItem?.button else { return }
         dismissOCRStatusPopover()
-        let popover = NSPopover()
-        popover.behavior = .applicationDefined
-        popover.animates = false
-        let controller = NSViewController()
-        controller.view = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 40))
-        let label = NSTextField(wrappingLabelWithString: message)
-        label.frame = controller.view.bounds.insetBy(dx: 12, dy: 8)
-        label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        label.textColor = NSColor.labelColor
-        label.isEditable = false
-        label.isBordered = false
-        label.drawsBackground = false
-        label.alignment = .center
-        label.autoresizingMask = [.width, .height]
-        controller.view.addSubview(label)
-        popover.contentViewController = controller
+        let popover = makeAdaptiveStatusPopover(
+            message: message,
+            font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            textColor: .labelColor,
+            alignment: .center,
+            maxWidth: 240,
+            behavior: .applicationDefined,
+            animates: false)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         ocrStatusPopover = popover
     }
@@ -597,7 +740,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ocrStatusPopover = nil
     }
 
+    /// Shows an actionable alert when screen recording permission is denied.
+    /// Includes a button to open System Settings > Privacy > Screen Recording.
+    private func showPermissionDeniedAlert() {
+        let alert = NSAlert()
+        alert.messageText = "需要屏幕录制权限"
+        alert.informativeText = "OCR 功能需要屏幕录制权限才能捕获屏幕内容。\n请在系统设置 → 隐私与安全性 → 屏幕录制中为 OmniTrans 授权。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "打开系统设置")
+        alert.addButton(withTitle: "取消")
+        alert.icon = NSImage(systemSymbolName: "rectangle.dashed.badge.record", accessibilityDescription: nil)
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            // Open System Settings > Privacy & Security > Screen Recording
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
     private func startOCRSelection() {
+        // 预热未完成或失败时拦截 OCR 框选
+        let warmup = OCRWarmupState.shared
+        guard !warmup.isWarmingUp, !warmup.warmupFailed else {
+            showStatusBarBubble(message: "OCR 引擎预热中，请稍候…", duration: 3.0)
+            return
+        }
         // 方案 A：框选开始即反馈，取词事件响应及时
         setOCRStatus(.selecting)
         OCRSelectionOverlay.shared.beginCapture { [weak self] result in

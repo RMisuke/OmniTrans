@@ -115,13 +115,19 @@ private struct RawDict: Codable {
 
 /// Detects whether a query string is a single‑word lookup.
 enum WordDetector {
+    /// Detects whether a query is suitable for dictionary lookup.
+    /// Relaxed from the original 30-char limit to 50 to support longer compound words
+    /// and non-Latin scripts (CJK continuous text, agglutinative languages).
     static func isWord(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count < 30,
-              !trimmed.contains(" "), !trimmed.contains("\n"),
+        guard !trimmed.isEmpty, trimmed.count <= 50,
+              !trimmed.contains("\n"),
               trimmed.rangeOfCharacter(from: .letters) != nil
         else { return false }
-        return true
+        // Allow hyphens and periods in compound words (e.g. state-of-the-art, Dr.)
+        let cleaned = trimmed.replacingOccurrences(of: "-", with: "")
+                             .replacingOccurrences(of: ".", with: "")
+        return !cleaned.isEmpty
     }
 }
 

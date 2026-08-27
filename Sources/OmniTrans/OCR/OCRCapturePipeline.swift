@@ -26,25 +26,74 @@ struct OCRCapturePipeline: Sendable {
     /// 默认共享实例（生产路径）。
     static let shared = OCRCapturePipeline()
 
+    /// ANE 冷启动预热入口 —— app 启动时在后台调用一次。
+    /// 详见 `ANEWarmup`：把 E5RT 管线编译/加载成本移出用户首次 OCR 路径。
+    static func warmUpANE() async {
+        await ANEWarmup.run(recognizer: VisionTextRecognizer())
+    }
+
     /// 完整执行一次「框选区域 → 识别结果」。
     ///
-    /// - Parameters:
-    ///   - appKitRect: **AppKit 全局坐标**（bottom-left）的目标区域。
-    ///   - excludingWindowID: 从捕获中排除的窗口（overlay 自身）。
-    /// - Returns: 识别结果；区域无文字返回 nil。
-    /// - Throws: `OCRError.captureFailed` —— 屏幕捕获失败（区别于「无文字」）。
+    /// 外层套 45s 端到端硬上限作最后兑底保险（正常路径各阶段已有自身上界：
+    /// 捕获 3s 帧超时、推理闸门 + deadline）—— 保证调用方在有限时间内
+    /// 必然拿到确定结果，UI 的「解析中」状态不会永久滞留。
     mutating func captureAndRecognize(appKitRect: CGRect,
                                       excludingWindowID: CGWindowID) async throws -> OCRResult? {
+        let runner = self
+        let outcome = await withInferenceDeadline(.seconds(45)) { () -> Result<OCRResult?, Error> in
+            var r = runner
+            do {
+                return .success(try await r.performCaptureAndRecognize(appKitRect: appKitRect,
+                                                                       excludingWindowID: excludingWindowID))
+            } catch {
+                return .failure(error)
+            }
+        }
+        switch outcome {
+        case .success(let inner):
+            switch inner {
+            case .success(let result): return result
+            case .failure(let error): throw error
+            }
+        case .failure(InferenceDeadlineError.exceeded):
+            throw OCRError.captureFailed("OCR pipeline exceeded 45s end-to-end deadline")
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    /// 管线主体（无总超时包裹），由 `captureAndRecognize` 兑底调用。
+    private mutating func performCaptureAndRecognize(appKitRect: CGRect,
+                                                     excludingWindowID: CGWindowID) async throws -> OCRResult? {
         let totalStart = ContinuousClock.now
 
-        // ── 1. 捕获 ──
+        // ── 1. 捕获（含恢复性重试）──
+        // 首次捕获失败（帧超时 / SCStream 资源争抢）后等待 0.5s 再试一次，
+        // 给前一个累积的 SCStream 释放系统资源的窗口。仅重试一次，避免延长总超时。
         let captureState = OCRMetrics.begin(.capture)
-        guard let buffer = await captureService.capture(appKitRect: appKitRect,
-                                                        excludingWindowID: excludingWindowID) else {
+        var buffer = await captureService.capture(appKitRect: appKitRect,
+                                                   excludingWindowID: excludingWindowID)
+        if buffer == nil {
+            os_log(.info, log: Self.log,
+                   "Capture returned nil (frame timeout?) — waiting 0.5s for recovery, then retrying")
             OCRMetrics.end(.capture, captureState)
-            throw OCRError.captureFailed("SCStream returned no frame for \(appKitRect)")
+            try? await Task.sleep(for: .milliseconds(500))
+            let retryState = OCRMetrics.begin(.capture)
+            buffer = await captureService.capture(appKitRect: appKitRect,
+                                                   excludingWindowID: excludingWindowID)
+            if buffer == nil {
+                OCRMetrics.end(.capture, retryState)
+                throw OCRError.captureFailed("SCStream returned no frame for \(appKitRect) (after retry)")
+            }
+            OCRMetrics.end(.capture, retryState)
+        } else {
+            OCRMetrics.end(.capture, captureState)
         }
-        OCRMetrics.end(.capture, captureState)
+
+        guard let buffer else {
+            // Defensive: should be unreachable after the capture+retry block above
+            throw OCRError.captureFailed("Internal error: buffer nil after capture retry")
+        }
 
         // ── 2. 预处理（面积预算降采样，预算内零拷贝直通）──
         let processed = try ImagePreprocessor.prepare(buffer)

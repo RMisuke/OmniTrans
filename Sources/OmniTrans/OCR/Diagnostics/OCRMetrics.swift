@@ -54,4 +54,48 @@ enum OCRMetrics {
                cancelledOtherTrack ? 1 : 0,
                textLength)
     }
+
+    // MARK: - E5RT 故障与韧性埋点
+    //
+    // 诊断入口（Console.app 按 subsystem 过滤即可看到完整证据链）：
+    // ```
+    // log stream --predicate 'subsystem == "<bundle-id>" AND category == "OCRMetrics"'
+    // ```
+    // 注意错误描述一律 %{public}@ —— 系统框架错误（如 E5RT Code 13）
+    // 默认 <private>，不显式声明公开则 Console 里完全不可读。
+
+    private static let metricsLog = OSLog(subsystem: AppLogging.subsystem, category: "OCRMetrics")
+
+    /// 单次推理失败（含 E5RT 冷启动故障、超时弃管、Vision 底层错误）。
+    static func recordInferenceFailure(track: LanguageTrack?, attempt: Int, error: Error) {
+        signposter.emitEvent("OCR.InferenceFailure",
+                             "track \(track?.rawValue ?? "none", privacy: .public) attempt \(attempt) kind \(String(describing: error), privacy: .public)")
+        os_log(.error, log: metricsLog,
+               "OCR inference failed (track=%@ attempt=%d): %{public}@",
+               track?.rawValue ?? "none", attempt, String(describing: error))
+    }
+
+    /// 推理失败后的自动重试。
+    static func recordInferenceRetry(track: LanguageTrack?, attempt: Int) {
+        signposter.emitEvent("OCR.InferenceRetry",
+                             "track \(track?.rawValue ?? "none", privacy: .public) afterAttempt \(attempt)")
+        os_log(.info, log: metricsLog,
+               "OCR inference retry (track=%@ after failed attempt %d)",
+               track?.rawValue ?? "none", attempt)
+    }
+
+    /// ANE 冷启动预热进度（成功即停；失败重试期间每次尝试都有记录）。
+    static func recordWarmup(attempt: Int, success: Bool, error: Error?) {
+        if success {
+            signposter.emitEvent("OCR.ANEWarmupReady", "attempt \(attempt)")
+            os_log(.info, log: metricsLog,
+                   "OCR ANE warmup ready (attempt %d) — pipeline operational", attempt)
+        } else {
+            signposter.emitEvent("OCR.ANEWarmupFailed",
+                                 "attempt \(attempt) error \(error.map { String(describing: $0) } ?? "unknown", privacy: .public)")
+            os_log(.error, log: metricsLog,
+                   "OCR ANE warmup attempt %d failed: %{public}@",
+                   attempt, error.map { String(describing: $0) } ?? "unknown")
+        }
+    }
 }

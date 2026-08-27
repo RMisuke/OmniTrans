@@ -8,6 +8,9 @@ extension Notification.Name {
     /// Posted when the SCStream screen capture fails (e.g. missing Screen
     /// Recording permission, display disconnected).
     static let omniTransOCRCaptureFailed = Notification.Name("OmniTransOCRCaptureFailed")
+    /// Posted when screen recording permission is specifically denied.
+    /// Triggers an actionable alert with "Open System Settings" button.
+    static let omniTransOCRPermissionDenied = Notification.Name("OmniTransOCRPermissionDenied")
     /// Posted when screen capture succeeds but Vision OCR finds no text
     /// (e.g. blank region, unsupported script, or too-low contrast).
     static let omniTransOCRNoTextFound = Notification.Name("OmniTransOCRNoTextFound")
@@ -15,6 +18,9 @@ extension Notification.Name {
     static let omniTransOCRLoading = Notification.Name("OmniTransOCRLoading")
     /// Posted when OCR completes (or fails) — dismisses the loading indicator.
     static let omniTransOCRDone = Notification.Name("OmniTransOCRDone")
+    /// Posted when OCR is rejected by the inference gate / circuit breaker —
+    /// engine busy (previous recognition still running or cooling down).
+    static let omniTransOCREngineBusy = Notification.Name("OmniTransOCREngineBusy")
 }
 
 /// Full-screen transparent overlay for drag-to-select OCR capture.
@@ -38,6 +44,9 @@ final class OCRSelectionOverlay {
     private var _overlayWindowID: CGWindowID = 0
     /// C: 代际守卫 —— 防止连续触发导致旧 OCR 结果串给新回调（方案 C）。
     private let generationGuard = OCRGenerationGuard()
+    /// 当前正在执行的管线任务句柄 —— 新一代 OCR 开始时取消上一轮未完成的
+    /// 推理（配合 `withInferenceDeadline` 的 onCancel 传播），不再只丢结果不取消工作。
+    private var activePipelineTask: Task<Void, Never>?
 
     private init() {}
 
@@ -46,6 +55,10 @@ final class OCRSelectionOverlay {
         guard window == nil else { return }
         // C: 新一轮 OCR 接管 —— 旧代际的结果将被丢弃（方案 C）
         generationGuard.next()
+        // 取消上一轮仍在跑的管线任务：弃管的 Vision 调用若已停滞则自然落错，
+        // 正常路径立即终止推理，不再与新一轮识别争抢 ANE。
+        activePipelineTask?.cancel()
+        activePipelineTask = nil
         onComplete = completion
 
         // 屏幕选择统一走 DisplayGeometry（AppKit 坐标匹配 NSScreen.frame），
@@ -117,7 +130,7 @@ final class OCRSelectionOverlay {
 
         // Task.detached avoids inheriting @MainActor isolation so that capture
         // + OCR run fully off the main thread.
-        Task.detached { [weak self] in
+        let task = Task.detached { [weak self] in
             guard let self else { return }
             var pipeline = OCRCapturePipeline.shared
             do {
@@ -136,6 +149,7 @@ final class OCRSelectionOverlay {
                     }
                     self.onComplete?(result)
                     self.onComplete = nil
+                    self.activePipelineTask = nil
                     // DON'T dismiss here — overlay is already gone.
                     // Post done notification; AppDelegate will dismiss the
                     // loading indicator when it shows the floating panel.
@@ -145,14 +159,21 @@ final class OCRSelectionOverlay {
                 await MainActor.run {
                     // C: 若新一轮 OCR 已接管，丢弃本次（过期）结果（方案 C）
                     guard self.generationGuard.isValid(generation) else { return }
-                    NotificationCenter.default.post(name: .omniTransOCRCaptureFailed, object: nil)
+                    if error is InferenceGateError {
+                        // 闸门拒绝 / 熔断冷却 —— 引擎繁忙，而非权限或捕获问题
+                        NotificationCenter.default.post(name: .omniTransOCREngineBusy, object: nil)
+                    } else {
+                        NotificationCenter.default.post(name: .omniTransOCRCaptureFailed, object: nil)
+                    }
                     // Ensure loading indicator is dismissed on failure
                     NotificationCenter.default.post(name: .omniTransOCRDone, object: nil)
                     self.onComplete?(nil)
                     self.onComplete = nil
+                    self.activePipelineTask = nil
                 }
             }
         }
+        activePipelineTask = task
     }
 
     private func dismiss() {
@@ -160,11 +181,12 @@ final class OCRSelectionOverlay {
         window?.orderOut(nil)
         window = nil
         overlayView = nil
-        // Aggressively reclaim Vision ANE / GPU resident memory.
-        // 只调度一次清理，且延迟到下一 runloop 避免拖慢 OCR 结果弹窗的首帧。
-        DispatchQueue.main.async {
-            MemoryPurgeHelper.shared.purgeBackendCache()
-        }
+        // 注意：这里刻意**不做**内存清理。
+        // 旧实现在每次 OCR 结束后都调用 purgeBackendCache()，其中
+        // malloc_zone_pressure_relief 会回收 Vision 内部缓冲区 (~60MB)，
+        // 等于把启动时预热好的引擎状态反复「清零」，下一次识别重新冷建 ——
+        // 连续识别频繁卡死的主因之一。清理职责收归系统内存压力事件
+        // （MemoryPurgeHelper 的 memoryPressure monitor）统一处理。
     }
 }
 

@@ -97,4 +97,37 @@ enum ContextAwareService {
 
         return basePrompt + "\n\n" + contextBlock
     }
+
+    /// Builds a dictionary-specific context block for LLM dictionary prompts.
+    /// Uses the same intensity-driven character limit as translation prompts,
+    /// but formats the context for dictionary-specific injection.
+    static func buildDictionaryContextBlock(
+        query: String, context: CapturedContext?, targetLang: TranslationLanguage
+    ) -> String {
+        let enabled: Bool = {
+            if UserDefaults.standard.object(forKey: "is_context_aware") == nil { return true }
+            return UserDefaults.standard.bool(forKey: "is_context_aware")
+        }()
+        guard enabled else { return "" }
+        guard let ctx = context, ctx.hasContext else { return "" }
+
+        let cap = contextCharLimit
+        let leading = String(ctx.leadingContext.prefix(cap))
+        let trailing = String(ctx.trailingContext.prefix(cap))
+
+        return """
+
+    <ContextOptimization>
+    The query is used within the following specific context:
+    <Prefix>\(leading)</Prefix>
+    <Query>\(ctx.selectedText)</Query>
+    <Suffix>\(trailing)</Suffix>
+
+    Mandatory Adjustments:
+    1. "definitions" Array Index 0: MUST be the exact meaning and part of speech used in this specific context.
+    2. "examples" Array Index 0: MUST heavily reflect or directly utilize this contextual usage to help the user understand its current application.
+    </ContextOptimization>
+    """
+    }
+
 }

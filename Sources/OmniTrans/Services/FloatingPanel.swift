@@ -216,8 +216,9 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
             guard let self else { return }
             Task { @MainActor in
                 self.orderOut(nil)
-                // 延迟缓存清理，避免阻塞 hide 动画的第一帧
-                MemoryPurgeHelper.shared.purgeBackendCache()
+                // 刻意不做内存清理：面板隐藏是高频路径，malloc_zone_pressure_relief
+                // 会把 Vision 内部缓冲反复「清零」，下次 OCR 重新冷建（连续识别卡死主因之一）。
+                // 清理职责收归 MemoryPurgeHelper 的系统内存压力事件。
             }
         }
     }

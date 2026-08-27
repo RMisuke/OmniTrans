@@ -157,4 +157,18 @@ enum FloatingPanelLayout {
 
     /// API 连通性探测最小间隔（秒）。
     static let apiProbeMinInterval: TimeInterval = 30
+
+    // MARK: - v0.8.1 Surface Tokens（哑光画布表面规格）
+
+    /// 标准表面圆角（搜索栏/历史卡片/结果卡片/工具条）。
+    static let surfaceRadius: CGFloat = 12
+
+    /// 输入卡片圆角（比标准表面大一号，突出主输入区）。
+    static let inputSurfaceRadius: CGFloat = 14
+
+    /// 历史列表行间距（8pt 基准节奏）。
+    static let listRowSpacing: CGFloat = 8
+
+    /// 内容区统一水平边距（距面板边缘）。
+    static let contentHorizontalInset: CGFloat = 16
 }

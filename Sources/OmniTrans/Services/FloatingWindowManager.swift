@@ -44,6 +44,7 @@ final class FloatingWindowManager {
             panel.embedSwiftUI(
                 FloatingPanelContent(state: state)
                     .environment(state.session)
+                    .environment(OCRWarmupState.shared)
                     .withTheme()
             )
             didSetup = true

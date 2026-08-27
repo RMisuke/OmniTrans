@@ -98,10 +98,10 @@ struct ProviderSettingsView: View {
                 Image(systemName: iconForKind(provider.kind)).font(.system(size: 13)).foregroundColor(.accentColor).frame(width: 18)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
-                        Text(provider.name.isEmpty ? "未命名" : provider.name).font(.system(size: 12, weight: .semibold))
+                        Text(provider.name.isEmpty ? "未命名" : provider.name).font(.system(size: 13, weight: .semibold))
                         kindBadge(provider.kind)
                     }
-                    Text(provider.modelName).font(.system(size: 10)).foregroundColor(.secondary)
+                    Text(provider.modelName).font(.system(size: 11)).foregroundColor(.secondary)
                 }
                 Spacer()
                 if case .success(let ms) = testResult {
@@ -287,11 +287,8 @@ struct ProviderSettingsView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
-    private func editorField(_ label: String, @ViewBuilder field: () -> some View) -> some View {
-        HStack(spacing: 8) {
-            Text(label).font(.system(size: 11, weight: .medium)).foregroundColor(.secondary).frame(width: 56, alignment: .leading)
-            field()
-        }
+    private func editorField(_ label: String, @ViewBuilder field: @escaping () -> some View) -> some View {
+        FormRow(label: label, labelWidth: 56, control: field)
     }
 
     // MARK: - Bindings
@@ -309,7 +306,7 @@ struct ProviderSettingsView: View {
     // MARK: - Helpers
 
     private func kindBadge(_ kind: ProviderKind) -> some View {
-        Text(kind.rawValue).font(.system(size: 8, weight: .bold)).foregroundColor(.accentColor)
+        Text(kind.rawValue).font(.system(size: 9, weight: .bold)).foregroundColor(.accentColor)
             .padding(.horizontal, 4).padding(.vertical, 1)
             .background(Color.accentColor.opacity(0.1)).clipShape(Capsule())
     }
@@ -336,14 +333,14 @@ struct ProviderSettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     templateSection("AI 大语言模型") {
-                        tpl("Ollama (本地)", icon: "desktopcomputer", kind: .ollama, baseURL: "http://127.0.0.1:11434/v1", models: ["qwen2.5", "llama3.2"], desc: "【本地离线】macOS 本地运行开源模型，无需联网和 API Key")
+                        tpl("Ollama (本地)", icon: "desktopcomputer", kind: .ollama, baseURL: "http://127.0.0.1:11434/v1", models: ["qwen3", "llama3.2"], desc: "【本地离线】macOS 本地运行开源模型，无需联网和 API Key")
                         tpl("DeepSeek", icon: "d.square", kind: .openAICompat, baseURL: "https://api.deepseek.com/v1", models: ["deepseek-v4-flash", "deepseek-v4-pro"], desc: "【推荐】中文与技术文档翻译王牌，V4 闪电版极适合高频划词")
-                        tpl("Zhipu AI (智谱)", icon: "z.square", kind: .openAICompat, baseURL: "https://open.bigmodel.cn/api/paas/v4", models: ["glm-4-flash", "glm-4-9b-chat"], desc: "【免费战神】glm-4-flash 官方长期免费，极具性价比的免成本查词首选")
-                        tpl("SiliconFlow (硅基流动)", icon: "s.square", kind: .openAICompat, baseURL: "https://api.siliconflow.cn/v1", models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"], desc: "【一站式聚合】千万级 Token 免费赠送，聚合各大开源顶流模型")
-                        tpl("Google Gemini", icon: "star", kind: .openAICompat, baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", models: ["gemini-3.5-flash", "gemini-2.5-pro"], desc: "【原生兼容端点】3.5 Flash 响应极速，Pro 版百万超长上下文")
-                        tpl("OpenAI", icon: "brain", kind: .openAI, baseURL: "https://api.openai.com/v1", models: ["gpt-4o-mini", "gpt-4o"], desc: "【行业标杆】工业级稳定格式保留，复杂 Markdown 及代码注释翻译首选")
-                        tpl("Groq", icon: "g.square", kind: .openAICompat, baseURL: "https://api.groq.com/openai/v1", models: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"], desc: "【极致速度】基于 LPU 硬件加速，Token 返回速度飙破 400+/s")
-                        tpl("Alibaba Qwen (百炼)", icon: "a.square", kind: .openAICompat, baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", models: ["qwen-plus", "qwen-max"], desc: "【多语言专家】通义千问官方兼容端点，亚洲语言及日韩欧洲小语种表现极佳")
+                        tpl("Zhipu AI (智谱)", icon: "z.square", kind: .openAICompat, baseURL: "https://open.bigmodel.cn/api/paas/v4", models: ["glm-5", "glm-4-flash"], desc: "【旗舰开源】GLM-5 开源 SOTA；glm-4-flash 长期免费，免成本查词首选")
+                        tpl("SiliconFlow (硅基流动)", icon: "s.square", kind: .openAICompat, baseURL: "https://api.siliconflow.cn/v1", models: ["deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Pro"], desc: "【一站式聚合】千万级 Token 免费赠送，已上线 DeepSeek V4 全系")
+                        tpl("Google Gemini", icon: "star", kind: .openAICompat, baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", models: ["gemini-3-flash-preview", "gemini-3.1-pro"], desc: "【原生兼容端点】3 Flash 前沿智能极速响应，3.1 Pro 复杂任务旗舰")
+                        tpl("OpenAI", icon: "brain", kind: .openAI, baseURL: "https://api.openai.com/v1", models: ["gpt-5-mini", "gpt-5"], desc: "【行业标杆】GPT-5 系列，工业级稳定格式保留，复杂 Markdown 及代码注释翻译首选")
+                        tpl("Groq", icon: "g.square", kind: .openAICompat, baseURL: "https://api.groq.com/openai/v1", models: ["llama-3.3-70b-versatile", "moonshotai/kimi-k2-instruct"], desc: "【极致速度】LPU 硬件加速，Llama 3.3 与 Kimi K2 首 token 低至 500ms 内")
+                        tpl("Alibaba Qwen (百炼)", icon: "a.square", kind: .openAICompat, baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", models: ["qwen-plus", "qwen-max"], desc: "【多语言专家】通义千问 Qwen3 系官方兼容端点，亚洲语言及日韩欧洲小语种表现极佳")
                     }
                     Divider().padding(.horizontal, 20)
                     templateSection("机器翻译") {

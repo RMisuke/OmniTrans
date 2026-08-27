@@ -60,14 +60,22 @@ enum AppTheme {
 
     static let hairline = Color.primary.opacity(0.12)
 
-    // MARK: - Typography
+    // MARK: - Typography（v0.8 可读性优先 Scale）
+    //
+    // HIG 底线：正文 ≥13pt。旧 Scale 的 8–12pt 角标字体已全部上调。
 
-    static let fontSizeMicro    = 10.0
+    /// 角标/徽章最小字号（原 10，低于可读底线）。
+    static let fontSizeMicro    = 11.0
+    /// 次要说明文字。
     static let fontSizeFine     = 12.0
-    static let fontSizeCaption  = 14.0
-    static let fontSizeBody     = 17.0
-    static let fontSizeHeadline = 17.0
-    static let fontSizeTitle    = 21.0
+    /// 说明性文字。
+    static let fontSizeCaption  = 13.0
+    /// 正文。
+    static let fontSizeBody     = 15.0
+    /// 标题行。
+    static let fontSizeHeadline = 15.0
+    /// 页面标题。
+    static let fontSizeTitle    = 19.0
 
     // MARK: - Spacing (8px base)
 
@@ -118,6 +126,26 @@ enum AppTheme {
     static let radiusMD  : CGFloat = 11.0
     static let radiusLG  : CGFloat = 18.0
     static let radiusPill: CGFloat = 9999.0
+}
+
+// MARK: - Material Policy（v0.8 哑光画布 + 玻璃悬浮件）
+//
+// 双层模型：内容主体一律实底，半透明模糊仅限悬浮控件白名单。
+// 对比度与层级靠排版与留白表达，而非透明度堆叠 —— 减少模糊、提升高级感。
+extension AppTheme {
+    enum MaterialPolicy {
+        /// 内容画布背景 —— 实底 `windowBackgroundColor`，随浅色/深色自适应。
+        public static let canvasBackground = Color(nsColor: .windowBackgroundColor)
+
+        /// 卡片/表单行表面 —— 实底 `controlBackgroundColor` + hairline 描边。
+        public static let cardBackground = Color(nsColor: .controlBackgroundColor)
+
+        /// 悬浮控件条材质（白名单内唯一允许的玻璃）—— 薄雾而非深水。
+        public static let floatingControlMaterial: Material = .regularMaterial
+
+        /// 卡片描边。
+        public static var cardStroke: Color { AppTheme.hairline }
+    }
 }
 
 // MARK: - Indicator Colors
@@ -182,7 +210,14 @@ extension View {
     func nativeCardStyle() -> some View {
         self
             .padding(AppTheme.spaceMD)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: AppTheme.radiusLG, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: AppTheme.radiusLG, style: .continuous)
+                    .fill(AppTheme.MaterialPolicy.cardBackground)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppTheme.radiusLG, style: .continuous)
+                            .strokeBorder(AppTheme.MaterialPolicy.cardStroke)
+                    )
+            )
     }
 
     /// `nativeCardStyle` + O(1) shadow on the background shape.
@@ -193,8 +228,12 @@ extension View {
             .padding(AppTheme.spaceMD)
             .background(
                 RoundedRectangle(cornerRadius: AppTheme.radiusLG, style: .continuous)
-                    .fill(.regularMaterial)
-                    .shadow(color: .black.opacity(0.10), radius: 6, x: 0, y: 2)
+                    .fill(AppTheme.MaterialPolicy.cardBackground)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppTheme.radiusLG, style: .continuous)
+                            .strokeBorder(AppTheme.MaterialPolicy.cardStroke)
+                    )
+                    .shadow(color: .black.opacity(0.08), radius: 6, x: 0, y: 2)
             )
     }
 
@@ -256,6 +295,28 @@ extension View {
     /// 工作区内容标准内边距。
     func workspaceContentPadding() -> some View {
         self.padding(.horizontal, AppTheme.workspaceInset)
+    }
+
+    // MARK: ── v0.8 悬浮控件表面（macOS 26 Liquid Glass 渐进增强）──
+
+    /// 悬浮控件表面 —— 白名单内的玻璃使用点。
+    /// macOS 26+：系统 Liquid Glass；更早版本：实底 + hairline 描边回退。
+    @ViewBuilder
+    func floatingControlSurface<S: InsettableShape>(in shape: S) -> some View {
+        if #available(macOS 26.0, *) {
+            self.glassEffect(.regular, in: shape)
+        } else {
+            self
+                .background(AppTheme.MaterialPolicy.cardBackground, in: shape)
+                .overlay(shape.strokeBorder(AppTheme.MaterialPolicy.cardStroke))
+        }
+    }
+
+    /// 实底卡片表面（v0.8 默认表面）—— 替代一切内容区毛玻璃。
+    func solidCardSurface<S: InsettableShape>(in shape: S) -> some View {
+        self
+            .background(AppTheme.MaterialPolicy.cardBackground, in: shape)
+            .overlay(shape.strokeBorder(AppTheme.MaterialPolicy.cardStroke))
     }
 }
 

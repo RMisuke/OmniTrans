@@ -121,7 +121,9 @@ enum SlidingWindowContextCapture {
     /// Maximum characters captured on either side of the selection.
     /// This is the hard ceiling (500 chars at intensity 2); the actual
     /// capture radius is derived from `ContextAwareService.contextCharLimit`.
-    private static let maxContextChars = 500
+    /// Maximum context characters — derived from the user's intensity setting
+    /// at capture time, avoiding over-capture when intensity is low.
+    private static var maxContextChars: Int { ContextAwareService.contextCharLimit }
 
     /// Attempts to capture bidirectional context for `selectedText`.
     /// - Returns: `CapturedContext` with leading/trailing text, or `nil` if

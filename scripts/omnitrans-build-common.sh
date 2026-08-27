@@ -91,7 +91,7 @@ omni_swift_build_release() {
 
 # ── 6. 最小 Info.plist（含阿里云 ATS 例外）──
 omni_make_info_plist() {
-    local app_dir="$1" bundle_id="$2" version="${3:-0.6}"
+    local app_dir="$1" bundle_id="$2" version="${3:-6.5}"
     local minos="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
     cat > "$app_dir/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -125,7 +125,7 @@ PLIST
 
 # ── 7. 组装 .app（保留原有目录结构与命名：Contents/MacOS/OmniTrans + Resources/icons）──
 omni_assemble_app() {
-    local bin="$1" app_dir="$2" bundle_id="$3" version="${4:-0.6}"
+    local bin="$1" app_dir="$2" bundle_id="$3" version="${4:-6.5}"
     mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
     cp "$bin" "$app_dir/Contents/MacOS/OmniTrans"
     strip -u -r "$app_dir/Contents/MacOS/OmniTrans" 2>/dev/null || true
