@@ -58,31 +58,29 @@ struct OnboardingView: View {
             }
             Spacer()
 
-            // Previous button (subtle material background)
+            // Previous button — macOS 26+: Liquid Glass; 更早版本: 实底回退
             if page > 0 {
                 Button("上一步") {
                     withAnimation(AppTheme.Motion.slow.resolveGated()) { page -= 1 }
                 }
-                .buttonStyle(.borderless)
+                .liquidGlassButton()
                 .controlSize(.large)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Material.regularMaterial)
-                .cornerRadius(8)
             }
 
-            // Next / Start button
+            // Next / Start button — macOS 26+: Liquid Glass Prominent; 更早版本: borderedProminent
             if page < totalPages - 1 {
                 Button("下一步") {
                     withAnimation(AppTheme.Motion.slow.resolveGated()) { page += 1 }
                 }
-                .buttonStyle(.borderedProminent)
+                .liquidGlassProminentButton()
                 .controlSize(.large)
             } else {
                 Button("开始使用 OmniTrans") {
                     onDismiss()
                 }
-                .buttonStyle(.borderedProminent)
+                .liquidGlassProminentButton()
                 .controlSize(.large)
                 .keyboardShortcut(.return, modifiers: .command)
             }
@@ -96,6 +94,20 @@ struct OnboardingView: View {
     private func requestPermissions() {
         let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         AXIsProcessTrustedWithOptions(opts)
+    }
+
+    // MARK: - Open System Settings
+
+    private func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func openScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: - Page 0 — Welcome
@@ -202,17 +214,19 @@ struct OnboardingView: View {
                 OnboardRow(
                     icon: "hand.tap.fill", color: .blue,
                     title: "辅助功能权限",
-                    desc: "用于读取划词选中的文本内容。系统授权弹窗已自动打开，请在隐私设置中勾选 OmniTrans"
+                    desc: "用于读取划词选中的文本内容"
                 )
+                .onTapGesture { openAccessibilitySettings() }
                 OnboardRow(
                     icon: "rectangle.inset.filled", color: .orange,
                     title: "屏幕录制权限",
-                    desc: "用于 OCR 框选识别屏幕上的文字。采用零拷贝 CVPixelBuffer 直通 Vision 引擎，首次使用时自动弹出系统授权弹窗"
+                    desc: "用于 OCR 框选识别屏幕上的文字"
                 )
+                .onTapGesture { openScreenRecordingSettings() }
                 OnboardRow(
                     icon: "info.circle.fill", color: .secondary,
-                    title: "随时可在系统设置中修改",
-                    desc: "打开 系统设置 → 隐私与安全性 → 辅助功能 / 屏幕录制 即可管理"
+                    title: "权限管理",
+                    desc: "点击上方任意权限项可直接跳转到系统设置。也可以手动打开 系统设置 → 隐私与安全性 进行管理"
                 )
             }
             .padding(.horizontal, 40)

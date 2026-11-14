@@ -24,6 +24,8 @@ import os
 struct SettingsPanelContent: View {
     @ObservedObject var state: AppState
     @State var selectedTab = 0
+    /// Tab 悬停跟踪 — hover 时高亮对应 Tab。
+    @State var tabHoveredIdx: Int? = nil
 
     @State var wipeState: WipeStage = .idle
     @State var wipeCountdown = 10
@@ -96,10 +98,19 @@ struct SettingsPanelContent: View {
             //     在 safeArea 归零的场景（全屏/刘海屏）下，
             //     强制保留至少 28pt 防止 Tab 栏暴冲到标题栏。
             VStack(spacing: 0) {
-                animatedTabBar
-                    .frame(height: 48)
-                    .padding(.horizontal, 2)
-                    .padding(.top, 2)
+                if #available(macOS 26.0, *) {
+                    GlassEffectContainer {
+                        animatedTabBar
+                            .frame(height: 48)
+                            .padding(.horizontal, 2)
+                            .padding(.top, 2)
+                    }
+                } else {
+                    animatedTabBar
+                        .frame(height: 48)
+                        .padding(.horizontal, 2)
+                        .padding(.top, 2)
+                }
             }
             // v0.8：以 hairline 分割线替代「shadow 当分割线」——
             // 后者会在滚动时把上方内容染出灰边且参与误裁。
@@ -208,48 +219,26 @@ struct SettingsPanelContent: View {
     // MARK: - Tab Bar
 
     private var animatedTabBar: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 4) {
             ForEach(Array(tabItems.enumerated()), id: \.offset) { idx, item in
-                tabButton(idx: idx, item: item)
+                LiquidGlassTabButton(
+                    title: item.title,
+                    icon: item.icon,
+                    isSelected: selectedTab == idx,
+                    isHovered: tabHoveredIdx == idx,
+                    onHover: { tabHoveredIdx = $0 ? idx : nil },
+                    action: {
+                        withAnimation(AppTheme.Motion.tabSelect.resolveGated()) { selectedTab = idx }
+                    }
+                )
+                .frame(maxWidth: .infinity)
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        // v0.8：实底表面替代 `.regularMaterial`，去投影 —— 减少模糊堆叠。
-        .background(AppTheme.MaterialPolicy.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
-            .stroke(AppTheme.MaterialPolicy.cardStroke, lineWidth: 0.5))
+        // 容器内边距移入按钮内部，确保点击区域覆盖整个胶囊
+        .padding(8)
+        // macOS 26+: Liquid Glass Tab 栏表面；更早版本：实底回退
+        .liquidGlassToolbar(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .padding(.horizontal, 2).padding(.top, 2)
-    }
-
-    private func tabButton(idx: Int, item: (title: String, icon: String)) -> some View {
-        let isSelected = selectedTab == idx
-        return Button {
-            withAnimation(AppTheme.Motion.tabSelect.resolveGated()) { selectedTab = idx }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: item.icon)
-                    .font(.system(size: AppTheme.fontSizeFine, weight: .medium))
-                    .scaleEffect(isSelected ? 1.1 : 1.0)
-                Text(item.title)
-                    .font(.system(size: AppTheme.fontSizeFine, weight: isSelected ? .bold : .semibold))
-            }
-            .foregroundColor(isSelected ? .primary : .secondary)
-            .padding(.horizontal, 18).padding(.vertical, 10)
-            .background(
-                isSelected
-                    ? AnyShapeStyle(Color.accentColor.opacity(0.15))
-                    : AnyShapeStyle(.clear),
-                in: Capsule()
-            )
-            .scaleEffect(isSelected ? 1.0 : 0.97)
-        }
-        .buttonStyle(PressableButtonStyle())
-        // ── 扩大点击热区：额外 4pt padding + Rectangle 命中区域
-        //     确保 Tab 边缘点击也能触发切换，避免事件被吞。
-        .padding(4)
-        .contentShape(Rectangle())
-        .animation(AppTheme.Motion.tabSelect.resolveGated(), value: isSelected)
     }
 
     // MARK: - Content Area
@@ -280,3 +269,87 @@ struct SettingsPanelContent: View {
         ProviderSettingsView(state: state)
     }
 }
+
+// MARK: - Liquid Glass Tab Button
+
+/// 设置页 Tab 按钮 — macOS 26+ Liquid Glass，旧版 bordered 回退。
+/// 点击区域与外层胶囊轮廓完全对齐，自带 hover 高亮 + 按下 spring 反馈。
+private struct LiquidGlassTabButton: View {
+    let title: String
+    let icon: String
+    let isSelected: Bool
+    let isHovered: Bool
+    let onHover: (Bool) -> Void
+    let action: () -> Void
+
+    @ViewBuilder
+    private var label: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: AppTheme.fontSizeFine, weight: .medium))
+                .scaleEffect(isSelected ? 1.1 : 1.0)
+                .animation(.spring(response: 0.28, dampingFraction: 0.65), value: isSelected)
+            Text(title)
+                .font(.system(size: AppTheme.fontSizeFine, weight: isSelected ? .bold : .semibold))        }
+        .foregroundColor(isSelected ? .primary : .secondary)
+        .padding(.horizontal, 18).padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .background {
+            let capsule = Capsule()
+            if #available(macOS 26.0, *) {
+                // macOS 26+: Liquid Glass — 系统自动提供玻璃材质、悬停高亮、按压弹跳
+                Color.clear
+            } else {
+                // macOS 15–25: bordered capsule 回退 + 手动 hover 高亮
+                capsule
+                    .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
+                    .overlay(capsule.strokeBorder(isSelected ? Color.accentColor.opacity(0.25) : .clear, lineWidth: 1))
+                    .brightness(isHovered ? 0.06 : 0)
+                    .animation(AppTheme.Motion.buttonHover.resolveGated(), value: isHovered)
+            }
+        }
+    }
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Button(action: action) { label }
+                .buttonStyle(_LiquidGlassTabButtonStyle())
+                .onHover(perform: onHover)
+                .animation(AppTheme.Motion.tabSelect.resolveGated(), value: isSelected)
+        } else {
+            Button(action: action) { label }
+                .buttonStyle(_BorderedTabButtonStyle())
+                .onHover(perform: onHover)
+                .animation(AppTheme.Motion.tabSelect.resolveGated(), value: isSelected)
+        }
+    }
+}
+
+/// macOS 26+ Liquid Glass tab 按钮样式。
+/// 使用 `.glass` 提供系统级玻璃材质 + 自动悬停/按压动画。
+@available(macOS 26.0, *)
+private struct _LiquidGlassTabButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.93 : 1.0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
+    }
+}
+
+/// macOS 15–25: Bordered capsule tab 按钮样式。
+/// 带 spring 按压缩放 + 背景高亮反馈。
+private struct _BorderedTabButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.93 : 1.0)
+            .background(
+                configuration.isPressed
+                    ? AnyShapeStyle(Color.primary.opacity(0.08))
+                    : AnyShapeStyle(.clear),
+                in: Capsule()
+            )
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
+    }
+}
+

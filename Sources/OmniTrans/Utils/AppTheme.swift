@@ -318,6 +318,44 @@ extension View {
             .background(AppTheme.MaterialPolicy.cardBackground, in: shape)
             .overlay(shape.strokeBorder(AppTheme.MaterialPolicy.cardStroke))
     }
+
+    // MARK: ── v6.5 Liquid Glass 工具栏表面 ──
+
+    /// 工具栏/导航栏 Liquid Glass 表面 —— macOS 26+ 使用系统 Liquid Glass，
+    /// 更早版本回退到实底 + hairline 描边。
+    /// 适用于：顶栏、底栏、Tab 栏、搜索栏等导航/工具区域。
+    @ViewBuilder
+    func liquidGlassToolbar<S: InsettableShape>(in shape: S) -> some View {
+        if #available(macOS 26.0, *) {
+            self.glassEffect(.regular, in: shape)
+        } else {
+            self
+                .background(Material.ultraThinMaterial, in: shape)
+                .overlay(shape.strokeBorder(AppTheme.MaterialPolicy.cardStroke))
+        }
+    }
+
+    /// Liquid Glass 按钮样式适配 —— macOS 26+ 使用系统 .glass 样式，
+    /// 更早版本回退到 borderless + 实底背景。
+    @ViewBuilder
+    func liquidGlassButton() -> some View {
+        if #available(macOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.borderless)
+        }
+    }
+
+    /// Liquid Glass 突出按钮样式适配 —— macOS 26+ 使用 .glassProminent，
+    /// 更早版本回退到 .borderedProminent。
+    @ViewBuilder
+    func liquidGlassProminentButton() -> some View {
+        if #available(macOS 26.0, *) {
+            self.buttonStyle(.glassProminent)
+        } else {
+            self.buttonStyle(.borderedProminent)
+        }
+    }
 }
 
 // MARK: - Animation View Extensions

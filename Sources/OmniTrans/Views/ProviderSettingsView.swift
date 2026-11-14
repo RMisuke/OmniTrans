@@ -80,7 +80,8 @@ struct ProviderSettingsView: View {
             Toggle("", isOn: .constant(true)).toggleStyle(.switch).controlSize(.small).labelsHidden().disabled(true)
         }
         .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(AppTheme.MaterialPolicy.cardBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(AppTheme.MaterialPolicy.cardStroke, lineWidth: 0.5))
         .cardShadow()
     }
 
@@ -115,7 +116,8 @@ struct ProviderSettingsView: View {
                 deleteButton(provider, deleting: deleting)
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(AppTheme.MaterialPolicy.cardBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(AppTheme.MaterialPolicy.cardStroke, lineWidth: 0.5))
             .cardShadow()
             .onTapGesture(count: 2) {
                 withAnimation(AppTheme.Motion.cardExpand.resolveGated()) {

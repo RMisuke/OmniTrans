@@ -51,6 +51,9 @@ struct FloatingPanelContent: View {
     @State var brainPulse = false
     @State var pinned = false
 
+    /// 底栏当前悬停按钮标识（用于 hover 高亮反馈）。
+    @State var bottomBarHoveredBtn: String? = nil
+
     /// 动态测量的 Chrome 高度（topBar + inputCard + bottomBar + 间距）。
     /// 初始值 180 为估算回退，首次布局完成后通过 GeometryReader 更新。
     @State var chromeHeight: CGFloat = FloatingPanelLayout.chromeInitialEstimate
@@ -129,16 +132,17 @@ struct FloatingPanelContent: View {
     }
 
     /// 计算输入框动态行高。
+    /// 正常翻译模式：最少 1 行，最多 3 行（内容自适应）。
     var inputEditorHeight: (min: CGFloat, max: CGFloat) {
         let lh = lineHeight
         let ins = textContainerVerticalInset
         if session.isDictionaryMode || session.dictionaryEntry != nil {
-            return (lh + ins, lh + ins)  // 1 行 + 容器内边距
+            return (lh + ins, lh + ins)  // 1 行锁定（词典模式）
         }
         if showHistorySearch {
-            return (lh * 3 + ins, lh * 3 + ins)  // 3 行锁定
+            return (lh + ins, lh + ins)  // 1 行（搜索模式）
         }
-        return (lh * 3 + ins, lh * 5 + ins)  // 3–5 行动态 + 容器内边距
+        return (lh + ins, lh * 3 + ins)  // 1–3 行动态（翻译输入）
     }
 
     // MARK: - Dynamic Height (min 480, max 800)
@@ -224,15 +228,38 @@ struct FloatingPanelContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            topBar
-            inputCard
-                .padding(.bottom, 8)
+            if #available(macOS 26.0, *) {
+                GlassEffectContainer {
+                    VStack(spacing: 0) {
+                        topBar
+                        inputCard
+                            .padding(.bottom, 8)
+                    }
+                }
+            } else {
+                VStack(spacing: 0) {
+                    topBar
+                    inputCard
+                        .padding(.bottom, 8)
+                }
+            }
             middleArea
                 .frame(maxHeight: .infinity)
                 .animation(AppTheme.Motion.contentSwap.resolveGated(), value: displayMode)
                 .background(alignment: .center) { chromeHeightMeasurer }
-            bottomBar
-                .padding(.top, 4)
+            if #available(macOS 26.0, *) {
+                GlassEffectContainer {
+                    VStack(spacing: 0) {
+                        bottomBar
+                            .padding(.top, 4)
+                    }
+                }
+            } else {
+                VStack(spacing: 0) {
+                    bottomBar
+                        .padding(.top, 4)
+                }
+            }
         }
         .frame(minWidth: FloatingPanelLayout.panelWidth,
                idealWidth: FloatingPanelLayout.panelIdealWidth,
@@ -272,7 +299,7 @@ struct FloatingPanelContent: View {
             scheduleHeightUpdate()
         }
         .onChange(of: session.inputText) { _, _ in
-            if showHistorySearch { scheduleHeightUpdate() }
+            scheduleHeightUpdate()
         }
         .onChange(of: panelSize) { _, newValue in
             if newValue == "dynamic" {
@@ -316,27 +343,25 @@ struct FloatingPanelContent: View {
     // MARK: - Status Indicator
 
     func updateStatusFromSession() {
+        // 状态互斥：红 > 黄 > 绿，绝不同时出现两种颜色
         if session.errorMessage != nil {
-            // 有错误 → 红灯常亮
+            // 有错误 → 红灯常亮（最高优先级）
             isBreathing = false
             statusColor = .red
-            statusVisible = true
-        } else if isProbingAPI || session.isTranslating {
-            // 正在探测或翻译中 → 黄灯闪烁
-            isBreathing = true
-            statusColor = .yellow
-            statusVisible = true
         } else if apiConnectionFailed {
             // API 连接失败 → 红灯常亮
             isBreathing = false
             statusColor = .red
-            statusVisible = true
+        } else if isProbingAPI || session.isTranslating {
+            // 正在探测或翻译中 → 黄灯闪烁（中间态）
+            isBreathing = true
+            statusColor = .yellow
         } else {
             // 空闲 / 上次探测成功 / 翻译完成 → 绿灯常亮
             isBreathing = false
             statusColor = .green
-            statusVisible = true
         }
+        statusVisible = true
     }
 
     /// Runs an async API connectivity probe against the current provider.
@@ -499,7 +524,7 @@ struct FloatingPanelContent: View {
                     }
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 7).padding(.vertical, 3)
-                    .background(.quaternary, in: Capsule())
+                    .liquidGlassToolbar(in: Capsule())
                 }
                 .menuStyle(.borderlessButton)
                 .frame(minWidth: 100, maxWidth: 140)
@@ -627,14 +652,21 @@ struct FloatingPanelContent: View {
 
                 if confirmClearHistory {
                     HStack(spacing: 4) {
-                        Button("确认删除") {
+                        Button {
                             state.clearHistory()
                             confirmClearHistory = false
+                        } label: {
+                            Text("确认删除")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(Color.red))
                         }
-                        .foregroundColor(.red)
-                        .font(.system(size: 11, weight: .bold))
+                        .buttonStyle(PressableButtonStyle())
                         Button("取消") { confirmClearHistory = false }
                             .font(.system(size: 11))
+                            .buttonStyle(PressableButtonStyle())
                     }
                 } else {
                     Button {
@@ -649,20 +681,12 @@ struct FloatingPanelContent: View {
                         }
                         .foregroundColor(.red)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressableButtonStyle())
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
-            // v0.8.1：强调色描边 + 浅色强调填充 —— 搜索栏是历史模式的
-            // 视觉焦点，与普通卡片拉开层级（哑光画布规范中的例外强调）。
-            .background(
-                RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
-                    .fill(AppTheme.accentAction.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous)
-                    .strokeBorder(AppTheme.accentAction.opacity(0.35), lineWidth: 1)
-            )
+            // macOS 26+: Liquid Glass 搜索栏表面；更早版本：实底 + 强调描边
+            .liquidGlassToolbar(in: RoundedRectangle(cornerRadius: FloatingPanelLayout.surfaceRadius, style: .continuous))
             .padding(.bottom, 8)
 
             // Filtered history list
@@ -870,7 +894,7 @@ struct FloatingPanelContent: View {
         .frame(minHeight: 80, maxHeight: panelSize == "dynamic" ? .infinity : 280)
     }
 
-    // MARK: - Bottom Bar (macOS 26 Compact Transparent Dock)
+    // MARK: - Bottom Bar (macOS 26 Liquid Glass)
 
     private var bottomBar: some View {
         HStack(spacing: AppTheme.spaceXS) {
@@ -893,10 +917,16 @@ struct FloatingPanelContent: View {
                     Text(state.targetLang.rawValue)
                         .font(.system(size: 11, weight: .medium))
                 }
+                .padding(.horizontal, 8).padding(.vertical, 5)
                 .contentShape(Rectangle())
+                .brightness(bottomBarHoveredBtn == "lang" ? 0.12 : 0)
+                .scaleEffect(bottomBarHoveredBtn == "lang" ? 1.04 : 1.0)
+                .animation(AppTheme.Motion.buttonHover.resolveGated(), value: bottomBarHoveredBtn == "lang")
             }
             .menuStyle(.borderlessButton)
-            .buttonStyle(.borderless)
+            .frame(height: 26)
+            .liquidGlassButton()
+            .onHover { hovered in bottomBarHoveredBtn = hovered ? "lang" : nil }
 
             // ── 上下文感知开关 — micro-pulse on toggle ──
             Button {
@@ -911,21 +941,27 @@ struct FloatingPanelContent: View {
                         .font(.system(size: 11))
                         .scaleEffect(brainPulse ? 1.25 : 1.0)
                     Text(isContextAware ? "context on" : "context off")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 9, weight: .medium))
                 }
                 .foregroundColor(isContextAware ? AppTheme.accentAction : AppTheme.textCaptionGray)
+                .padding(.horizontal, 6).padding(.vertical, 4)
                 .contentShape(Rectangle())
+                .brightness(bottomBarHoveredBtn == "ctx" ? 0.12 : 0)
+                .scaleEffect(bottomBarHoveredBtn == "ctx" ? 1.04 : 1.0)
+                .animation(AppTheme.Motion.buttonHover.resolveGated(), value: bottomBarHoveredBtn == "ctx")
             }
-            .buttonStyle(.plain)
+            .frame(height: 22)
+            .liquidGlassButton()
+            .onHover { hovered in bottomBarHoveredBtn = hovered ? "ctx" : nil }
             .help(isContextAware ? "上下文感知已启用" : "上下文感知已关闭")
 
             Spacer()
 
             // ── 复制 ──
-            toolbarBtn("doc.on.doc", "拷贝结果") { copyResult() }
+            bottomBarIconBtn("doc.on.doc", "拷贝结果", id: "copy") { copyResult() }
 
             // ── TTS ──
-            toolbarBtn("speaker.wave.2", "朗读结果") { speakResult() }
+            bottomBarIconBtn("speaker.wave.2", "朗读结果", id: "tts") { speakResult() }
 
             // ── 主操作按钮 ──
             let hasResult = !session.translatedText.isEmpty || session.dictionaryEntry != nil
@@ -939,28 +975,44 @@ struct FloatingPanelContent: View {
                 }
                 .padding(.horizontal, 10).padding(.vertical, 5)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+            .frame(height: 26)
+            .liquidGlassProminentButton()
+            .layoutPriority(1)
             .disabled(inputText.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || session.isTranslating)
         }
         .padding(.horizontal, 12).padding(.vertical, 6)
-        // v0.8.1：实底 + hairline 描边，去投影 —— 与内容卡片同一套
-        // 表面规格；工具条是面板内唯一允许玻璃的白名单区域
-        // （macOS 26 上可升级 Liquid Glass）。
-        .background(
-            RoundedRectangle(cornerRadius: AppTheme.hudCornerRadius, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor))
-        )
-        .overlay(RoundedRectangle(cornerRadius: AppTheme.hudCornerRadius, style: .continuous)
-            .strokeBorder(AppTheme.MaterialPolicy.cardStroke, lineWidth: 1))
+        // macOS 26+: Liquid Glass 工具栏表面；更早版本：实底回退
+        .liquidGlassToolbar(in: RoundedRectangle(cornerRadius: AppTheme.hudCornerRadius, style: .continuous))
         .padding(.horizontal, 12).padding(.bottom, 12)
     }
 
-    /// v0.8.1：统一胶囊工具按钮（ToolbarCapsuleButton），
-    /// 替代裸 borderless 图标 —— 命中区与视觉重量与主按钮一致。
-    private func toolbarBtn(_ icon: String, _ help: String, action: @escaping () -> Void) -> some View {
-        ToolbarCapsuleButton(systemImage: icon, helpText: help, action: action)
-            .disabled(session.translatedText.isEmpty && session.dictionaryEntry == nil)
+    /// 底栏图标按钮 — 统一高度 + hover/press 反馈。
+    private func bottomBarIconBtn(_ icon: String, _ help: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .frame(width: 22, height: 18)
+        }
+        .buttonStyle(PressableButtonStyle())
+        .help(help)
+        .frame(width: 28, height: 26)
+        .background {
+            let shape = RoundedRectangle(cornerRadius: AppTheme.radiusSM, style: .continuous)
+            Group {
+                if #available(macOS 26.0, *) {
+                    Color.clear.glassEffect(.regular, in: shape)
+                } else {
+                    AppTheme.MaterialPolicy.cardBackground
+                        .overlay(shape.strokeBorder(AppTheme.MaterialPolicy.cardStroke))
+                        .clipShape(shape)
+                }
+            }
+            .brightness(bottomBarHoveredBtn == id ? 0.12 : 0)
+            .scaleEffect(bottomBarHoveredBtn == id ? 1.04 : 1.0)
+            .animation(AppTheme.Motion.buttonHover.resolveGated(), value: bottomBarHoveredBtn == id)
+        }
+        .onHover { hovered in bottomBarHoveredBtn = hovered ? id : nil }
+        .disabled(session.translatedText.isEmpty && session.dictionaryEntry == nil)
     }
 
     // MARK: - Helpers
