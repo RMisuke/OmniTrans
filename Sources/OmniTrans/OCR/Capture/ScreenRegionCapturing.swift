@@ -141,6 +141,8 @@ final class SCStreamRegionCapture: ScreenRegionCapturing {
     nonisolated private static let log = OSLog(subsystem: AppLogging.subsystem, category: "Capture")
 
     func capture(appKitRect: CGRect, excludingWindowID: CGWindowID) async -> CVPixelBuffer? {
+        // acquire 之前抛错（如权限拒绝）时不得 release —— 否则会误减其他活跃流的槽位。
+        var acquired = false
         do {
             // ── 使用缓存的 shareable content（省去每帧全量枚举）──
             let content = try await SCContentCache.shared.content()
@@ -180,8 +182,10 @@ final class SCStreamRegionCapture: ScreenRegionCapturing {
 
             // ── 活跃流保护：确保前一个 SCStream 已完全停止 ──
             await ActiveStreamGate.shared.acquire()
+            acquired = true
             let result = try await captureSingleFrame(filter: filter, configuration: config)
             await ActiveStreamGate.shared.release()
+            acquired = false
             return result
         } catch let error as SCStreamError {
             // 错误码依据 SDK 头文件 SCError.h（旧注释曾把 -3801/-3808 写反，已纠正）：
@@ -194,7 +198,7 @@ final class SCStreamRegionCapture: ScreenRegionCapturing {
             } else {
                 os_log(.error, log: Self.log, "Stream error %d: %@", code.rawValue, error.localizedDescription)
             }
-            await ActiveStreamGate.shared.release()
+            if acquired { await ActiveStreamGate.shared.release() }
             return nil
         } catch {
             os_log(.error, log: Self.log, "Capture failed: %@", error.localizedDescription)
@@ -207,7 +211,7 @@ final class SCStreamRegionCapture: ScreenRegionCapturing {
                         String(describing: error).localizedCaseInsensitiveContains("declined") {
                 NotificationCenter.default.post(name: .omniTransOCRPermissionDenied, object: nil)
             }
-            await ActiveStreamGate.shared.release()
+            if acquired { await ActiveStreamGate.shared.release() }
             return nil
         }
     }
@@ -251,17 +255,22 @@ final class SCStreamRegionCapture: ScreenRegionCapturing {
             return first
         }
 
-        // ── 阶段 2：等待 stopCapture 完成（最多 1s 超时保护）──
+        // ── 阶段 2：等待 stopCapture 完成（1s 真实超时，弃管语义）──
         // 旧实现 fire-and-forget stopCapture → 连续捕获时多个 SCStream 堆积
-        // → 耗尽 ScreenCaptureKit 服务端内部连接上限 → 后续 startCapture 失败。
-        // 现在同步等待 stop 完成，确保每次捕获结束后流被完全释放。
-        await withTaskGroup(of: Void.self) { stopGroup in
-            stopGroup.addTask { try? await stream.stopCapture() }
-            stopGroup.addTask {
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s 超时
+        // → 耗尽 ScreenCaptureKit 服务端内部连接上限。
+        // 不用 withTaskGroup：组退出隐式等待全部子任务，而 stopCapture 不响应
+        // 取消，"超时"形同虚设（同 OCRConcurrency.withInferenceDeadline 的批判）。
+        // OnceGate 竞速：到点立即返回，stop 任务弃管运行至自然结束。
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let gate = OnceGate()
+            Task.detached(priority: .userInitiated) {
+                try? await stream.stopCapture()
+                if gate.tryEnter() { continuation.resume() }
             }
-            _ = await stopGroup.next()
-            stopGroup.cancelAll()
+            Task.detached(priority: .utility) {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if gate.tryEnter() { continuation.resume() }
+            }
         }
 
         return result?.value
@@ -272,30 +281,55 @@ final class SCStreamRegionCapture: ScreenRegionCapturing {
 
 /// 捕获 `SCStream` 首帧 `CVPixelBuffer`。
 ///
-/// 帧/错误/任务取消三路竞速由 `OnceGate` 保证 continuation **恰好恢复一次**：
-/// 修复旧实现「超时取消后 continuation 永不恢复」的泄漏。
+/// 帧/错误/任务取消三路竞速由 **continuation 槽 + 锁** 保证恰好恢复一次：
+/// 谁先在锁内取到非 nil 槽位谁 resume 并清空。旧 OnceGate 方案存在竞态 ——
+/// 取消先于 continuation 存入时闸门被空耗，随后存入的 continuation 永不
+/// 恢复，task group 隐式等待全部子任务 → 捕获永久挂起（审计 S2）。
 /// 停流职责上移至 `captureSingleFrame` 的幂等 stop 逻辑，本类不再触碰流。
-private final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
+final class SingleFrameStreamOutput: NSObject, SCStreamOutput, @unchecked Sendable {
 
-    private let gate = OnceGate()
-    private let state = OSAllocatedUnfairLock<CheckedContinuation<PixelBufferBox?, Error>?>(initialState: nil)
+    private struct State {
+        var continuation: CheckedContinuation<PixelBufferBox?, Error>?
+        /// 帧先于 waitFirstFrame 到达时暂存首个结果（startCapture 与等待之间存在窗口）。
+        var earlyResult: Result<PixelBufferBox?, Error>?
+    }
+    private let state = OSAllocatedUnfairLock<State>(initialState: State())
 
     /// 等待首帧；任务被取消时以 nil 收尾（不悬挂 continuation）。
     func waitFirstFrame() async throws -> PixelBufferBox? {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                state.withLock { $0 = continuation }
+                let early: Result<PixelBufferBox?, Error>? = state.withLock { s in
+                    if let r = s.earlyResult {
+                        s.earlyResult = nil
+                        return r
+                    }
+                    s.continuation = continuation
+                    return nil
+                }
+                if let early {
+                    continuation.resume(with: early)
+                    return
+                }
+                // 取消先于存入时 onCancel 已运行（彼时槽位为 nil）；
+                // 此处补恢复，覆盖该竞态窗口。
+                if Task.isCancelled { finish(.success(nil)) }
             }
         } onCancel: {
             finish(.success(nil))
         }
     }
 
-    private func finish(_ result: Result<PixelBufferBox?, Error>) {
-        guard gate.tryEnter() else { return }
-        state.withLock { continuation in
-            continuation?.resume(with: result)
-            continuation = nil
+    /// continuation 槽 + 早到结果共同保证恰好一次恢复：
+    /// 有 continuation 立即 resume 并清空；否则暂存首个结果待 waitFirstFrame 取走。
+    func finish(_ result: Result<PixelBufferBox?, Error>) {
+        state.withLock { s in
+            if let c = s.continuation {
+                s.continuation = nil
+                c.resume(with: result)
+            } else if s.earlyResult == nil {
+                s.earlyResult = result
+            }
         }
     }
 
