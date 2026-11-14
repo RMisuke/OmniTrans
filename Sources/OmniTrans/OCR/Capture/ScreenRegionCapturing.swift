@@ -83,7 +83,7 @@ actor SCContentCache {
 /// 用户侧表现为「解析中」→ 超时 →「屏幕捕获失败」。
 ///
 /// 此锁确保前一个流完全停止后才创建新流，从根源杜绝 SCStream 资源泄露。
-private actor ActiveStreamGate {
+actor ActiveStreamGate {
     static let shared = ActiveStreamGate()
     private var activeCount = 0
     /// Track when the active stream was acquired for diagnostics.

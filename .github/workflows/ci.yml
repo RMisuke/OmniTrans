@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "fix/**"]
+  pull_request:
+
+jobs:
+  build-test:
+    # 项目需要 macOS 26+ SDK（Translation 框架 / Vision 新 Swift API）。
+    # 若 runner 默认 Xcode SDK 过旧导致编译失败，在此指定最新 Xcode。
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcode-select -p
+          swift --version
+
+      - name: Build (debug)
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Build (release)
+        run: swift build -c release
