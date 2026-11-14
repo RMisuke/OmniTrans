@@ -88,7 +88,7 @@ final class InferenceResilienceTests: XCTestCase {
             retryBackoff: .milliseconds(10),
             maxAttempts: 3)
 
-        let result = await strategy.recognizeBest(buffer)
+        let result = try await strategy.recognizeBest(buffer)
         XCTAssertNotNil(result, "瞬时 E5RT 失败后重试必须恢复出结果")
         XCTAssertEqual(mock.callCount, 2, "应恰好调用识别器 2 次（1 失败 + 1 重试成功）")
         XCTAssertEqual(result?.first?.text, "hello world")
@@ -104,7 +104,7 @@ final class InferenceResilienceTests: XCTestCase {
             retryBackoff: .milliseconds(10),
             maxAttempts: 3)
 
-        let result = await strategy.recognizeBest(buffer)
+        let result = try await strategy.recognizeBest(buffer)
         XCTAssertNotNil(result, "竞速双轨各失败一次后重试必须恢复")
         // 调用数存在合法竞态：en 轨重试成功（第 3 次）即早期采纳并取消 mixed 轨，
         // 但 mixed 轨的重试可能已先发出（第 4 次）—— 3~4 次均正确。
@@ -125,7 +125,7 @@ final class InferenceResilienceTests: XCTestCase {
             maxAttempts: 2)
 
         let start = ContinuousClock.now
-        let result = await strategy.recognizeBest(buffer)
+        let result = try await strategy.recognizeBest(buffer)
         let elapsed = ContinuousClock.now - start
 
         XCTAssertNil(result, "持续失败应返回 nil")
@@ -146,7 +146,7 @@ final class InferenceResilienceTests: XCTestCase {
             maxAttempts: 1) // 单次挂起即可验证超时，避免测试拖长
 
         let start = ContinuousClock.now
-        let result = await strategy.recognizeBest(buffer)
+        let result = try await strategy.recognizeBest(buffer)
         let elapsed = ContinuousClock.now - start
 
         XCTAssertNil(result, "挂起的推理超时后应返回 nil 而非永久等待")
@@ -167,7 +167,7 @@ final class InferenceResilienceTests: XCTestCase {
             maxAttempts: 1)
 
         let start = ContinuousClock.now
-        let result = await strategy.recognizeBest(buffer)
+        let result = try await strategy.recognizeBest(buffer)
         let elapsed = ContinuousClock.now - start
 
         XCTAssertNil(result)
@@ -192,7 +192,7 @@ final class InferenceResilienceTests: XCTestCase {
             maxAttempts: 2) // 刻意允许重试 —— 验证超时路径跳过重试
 
         let start = ContinuousClock.now
-        let result = await strategy.recognizeBest(buffer)
+        let result = try await strategy.recognizeBest(buffer)
         let elapsed = ContinuousClock.now - start
 
         XCTAssertNil(result)

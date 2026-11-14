@@ -38,12 +38,19 @@ enum OCRResultAssembler {
         }
         guard !mapped.isEmpty else { return nil }
 
-        // ── 空间排序：行（Y 相差超阈值）从上到下，同行内从左到右 ──
-        let ordered = mapped.sorted { a, b in
-            if abs(a.appKitFrame.minY - b.appKitFrame.minY) > rowThreshold * appKitRect.height {
-                return a.appKitFrame.minY > b.appKitFrame.minY
+        // ── 空间排序：两阶段保证传递性（审计 L3）──
+        // 旧成对比较器（Y 差超阈值比 Y，否则比 X）不满足传递性，sorted 结果未定义。
+        // 先按 Y 降序（AppKit 坐标从上到下），再按行首 Y 阈值分组，行内按 X 升序。
+        let byY = mapped.sorted { $0.appKitFrame.minY > $1.appKitFrame.minY }
+        var ordered: [OCRLineResult] = []
+        var rowStart = 0
+        for i in byY.indices {
+            let endOfRow = i + 1 == byY.count
+                || abs(byY[i + 1].appKitFrame.minY - byY[rowStart].appKitFrame.minY) > rowThreshold * appKitRect.height
+            if endOfRow {
+                ordered.append(contentsOf: byY[rowStart...i].sorted { $0.appKitFrame.minX < $1.appKitFrame.minX })
+                rowStart = i + 1
             }
-            return a.appKitFrame.minX < b.appKitFrame.minX
         }
 
         // ── 行拼接 ──

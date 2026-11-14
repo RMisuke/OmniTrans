@@ -106,8 +106,9 @@ final class OCRBenchmarkTests: XCTestCase {
 
         let start = ContinuousClock.now
         // 组装阶段需要 appKitRect 做坐标映射；此处仅关心文字内容与耗时。
-        let lines = await pipeline.racer.recognizeBest(buffer)
-        let elapsedMs = Double((ContinuousClock.now - start).components.attoseconds) / 1e15
+        let lines = try await pipeline.racer.recognizeBest(buffer)
+        let elapsed = (ContinuousClock.now - start).components
+        let elapsedMs = Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15
 
         let result = lines.flatMap { OCRResultAssembler.assemble($0, appKitRect: CGRect(x: 0, y: 0, width: fixture.width, height: fixture.height)) }
         return (result, elapsedMs)

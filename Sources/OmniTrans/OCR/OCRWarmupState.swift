@@ -28,8 +28,8 @@ final class OCRWarmupState {
     /// 当前已完成的尝试次数。
     var currentAttempt: Int = 0
 
-    /// 最大尝试次数（与 `ANEWarmup` 默认值一致）。
-    let maxAttempts: Int = 15
+    /// 最大尝试次数（与 `ANEWarmup` 默认值单一来源，审计 L2）。
+    let maxAttempts: Int = ANEWarmup.defaultMaxAttempts
 
     /// 上次预热成功完成的时间戳。用于 OCR 快捷键触发时判断缓存是否可能已失效。
     /// 长时间未使用后 ANE 缓存可能被系统释放，需要重新预热。

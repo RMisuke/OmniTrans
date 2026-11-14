@@ -93,19 +93,20 @@ struct RacingLanguageStrategy: Sendable {
     }
 
     /// 竞速识别主入口。返回 nil 表示两条轨道均无有效文字。
-    mutating func recognizeBest(_ buffer: CVPixelBuffer) async -> [RecognizedLine]? {
+    /// 引擎繁忙（闸门拒绝/熔断冷却）抛出 `InferenceGateError`，由上层提示用户（审计 M12）。
+    mutating func recognizeBest(_ buffer: CVPixelBuffer) async throws -> [RecognizedLine]? {
         // ── 启发式 1：小区域单轨 ──
         let pixels = CVPixelBufferGetWidth(buffer) * CVPixelBufferGetHeight(buffer)
         if pixels < Self.smallAreaPixels {
-            return await runSolo(.mixed, buffer: buffer)
+            return try await runSolo(.mixed, buffer: buffer)
         }
 
         // ── 启发式 2：自适应单轨 ──
         if await policyMemory.shouldRunEnglishSolo {
-            return await runSolo(.english, buffer: buffer)
+            return try await runSolo(.english, buffer: buffer)
         }
 
-        return await race(buffer: buffer)
+        return try await race(buffer: buffer)
     }
 
     // MARK: - 闸门 + 超时 + 重试的单次识别
@@ -162,7 +163,7 @@ struct RacingLanguageStrategy: Sendable {
 
     // MARK: - 单轨执行
 
-    private mutating func runSolo(_ track: LanguageTrack, buffer: CVPixelBuffer) async -> [RecognizedLine]? {
+    private mutating func runSolo(_ track: LanguageTrack, buffer: CVPixelBuffer) async throws -> [RecognizedLine]? {
         let state = OCRMetrics.begin(.inference)
         defer { OCRMetrics.end(.inference, state) }
         switch await recognizeResilient(track, buffer) {
@@ -170,6 +171,8 @@ struct RacingLanguageStrategy: Sendable {
             await policyMemory.record(winner: track)
             return lines.isEmpty ? nil : lines
         case .failure(let error):
+            // 繁忙错误上抛，让 UI 提示「引擎繁忙」而非误报「未检测到文字」（审计 M12）
+            if error is InferenceGateError { throw error }
             if !(error is InferenceDeadlineError) {
                 os_log(.error, log: Self.log, "solo %@ failed: %@", track.rawValue, String(describing: error))
             }
@@ -179,12 +182,15 @@ struct RacingLanguageStrategy: Sendable {
 
     // MARK: - 双轨竞速
 
+    /// 竞速整体兜底超时的哨兵错误 —— 与外部 CancellationError 区分（审计 L3）。
+    private struct RaceFallbackTimeout: Error {}
+
     private struct TrackResult {
         let track: LanguageTrack
         let result: Result<[RecognizedLine], Error>
     }
 
-    private mutating func race(buffer: CVPixelBuffer) async -> [RecognizedLine]? {
+    private mutating func race(buffer: CVPixelBuffer) async throws -> [RecognizedLine]? {
         let memory = policyMemory
         // mutating 方法内不可直接捕获 self —— 复制不可变副本供子任务捕获。
         let runner = self
@@ -193,6 +199,7 @@ struct RacingLanguageStrategy: Sendable {
         // 并发安全；经 Sendable 盒显式声明该不变量（消除 sending 闭包告警）。
         let sharedBuffer = PixelBufferBox(buffer)
 
+        var busyFailure = false
         let winner: TrackResult? = await withTaskGroup(of: TrackResult.self) { group in
             group.addTask(priority: .userInitiated) {
                 TrackResult(track: .english,
@@ -207,7 +214,7 @@ struct RacingLanguageStrategy: Sendable {
             //  保证子任务必然落定，此处兜底才能真实生效。）
             group.addTask(priority: .utility) {
                 try? await Task.sleep(for: deadline)
-                return TrackResult(track: .english, result: .failure(CancellationError()))
+                return TrackResult(track: .english, result: .failure(RaceFallbackTimeout()))
             }
 
             var successes: [TrackResult] = []
@@ -224,12 +231,22 @@ struct RacingLanguageStrategy: Sendable {
                     }
                     if !lines.isEmpty { successes.append(item) }
                 case .failure(let err):
-                    if err is CancellationError {
-                        // 兜底超时触发：放弃等待，返回已有最佳结果
+                    if err is RaceFallbackTimeout {
+                        // 兜底超时：返回已有结果中质量最优者（而非首个）（审计 L3）
                         group.cancelAll()
-                        return successes.first
+                        return successes.max { a, b in
+                            guard case .success(let la) = a.result,
+                                  case .success(let lb) = b.result else { return false }
+                            return OCRResultAssembler.qualityScore(la) < OCRResultAssembler.qualityScore(lb)
+                        }
                     }
-                    // 单轨失败不致命 —— 继续等另一轨
+                    if err is CancellationError {
+                        // 外部取消（区别于兜底超时）：不产出结果（审计 L3）
+                        group.cancelAll()
+                        return nil
+                    }
+                    if err is InferenceGateError { busyFailure = true }
+                    // 其他单轨失败不致命 —— 继续等另一轨
                 }
             }
             // 两轨都完成但均未达早期采纳阈值 → 取质量分更高者。
@@ -241,6 +258,8 @@ struct RacingLanguageStrategy: Sendable {
         }
 
         guard let winner, case .success(let lines) = winner.result, !lines.isEmpty else {
+            // 无文字且存在繁忙失败 → 上抛让 UI 提示引擎繁忙（审计 M12）
+            if busyFailure { throw InferenceGateError.busy }
             return nil
         }
         await memory.record(winner: winner.track)

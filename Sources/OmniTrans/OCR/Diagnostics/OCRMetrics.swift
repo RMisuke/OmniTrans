@@ -44,8 +44,10 @@ enum OCRMetrics {
                            track: LanguageTrack?,
                            cancelledOtherTrack: Bool,
                            textLength: Int) {
-        let ms = Double(total.components.attoseconds) / 1e15
-        let infMs = inference.map { Double($0.components.attoseconds) / 1e15 }
+        // components.attoseconds 仅是亚秒余数 —— 必须加上整秒部分，
+        // 否则 >1s 的耗时全部记错（2.5s → 500ms）（审计 M10）。
+        let ms = Double(total.components.seconds) * 1000 + Double(total.components.attoseconds) / 1e15
+        let infMs = inference.map { Double($0.components.seconds) * 1000 + Double($0.components.attoseconds) / 1e15 }
         os_log(.info, log: OSLog(subsystem: AppLogging.subsystem, category: "OCRMetrics"),
                "OCR summary: total=%.1fms inference=%@ms track=%@ otherCancelled=%d chars=%d",
                ms,

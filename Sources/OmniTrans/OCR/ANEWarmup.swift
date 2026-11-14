@@ -59,13 +59,18 @@ enum ANEWarmup {
     ///   - maxAttempts: 最大尝试次数（默认 12 次 ≈ 覆盖实测 1–2 分钟冷启动窗口）。
     ///   - interval: 失败重试间隔。
     ///   - attemptDeadline: 单次尝试的超时（弃管语义）。
+    /// 默认最大尝试次数 —— OCRWarmupState 进度条与此保持单一来源（审计 L2）。
+    static let defaultMaxAttempts = 10
+
     static func run(recognizer: any TextRecognizing,
-                    maxAttempts: Int = 10,
+                    maxAttempts: Int = defaultMaxAttempts,
                     baseInterval: Duration = .seconds(3),
                     maxInterval: Duration = .seconds(10),
                     attemptDeadline: Duration = .seconds(20)) async {
         guard let buffer = makeSyntheticBuffer() else {
             os_log(.error, log: log, "ANE warmup skipped: synthetic buffer creation failed")
+            // 必须标记失败，否则 isWarmingUp 永真、retryWarmup 被 guard 拦截 → OCR 锁死（审计 M13）
+            await MainActor.run { OCRWarmupState.shared.markFailed() }
             return
         }
         // 只读共享盒：消除 sending 闭包捕获告警（与竞速策略同法）。
@@ -76,20 +81,24 @@ enum ANEWarmup {
         // E5 模型不可用计数器：连续 2+ 次 "Unable to find a valid E5" → 放弃 ANE，使用 CPU 模式
         var consecutiveE5NotFound = 0
 
-        for attempt in 1...max(1, maxAttempts) {
-            // 报告预热进度（主线程更新 @Published）
-            await MainActor.run {
-                OCRWarmupState.shared.updateProgress(attempt: attempt - 1)
-            }
-
-            var failed: Error?
+        var attempt = 0
+        while attempt < max(1, maxAttempts) {
             // 用户 OCR 排队等待中 → 预热立即让出，不竞争闸门。
-            // 检测方式：闸门队列中有等待者时暂停预热。
+            // 让出不消耗 attempt 配额（审计 L1）；sleep 后查取消，避免取消态忙循环。
             if OCRInferenceGate.shared.queuedCount > 0 {
                 os_log(.info, log: log, "Warmup yielding — user OCR queued")
                 try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
                 continue
             }
+            attempt += 1
+            // 报告预热进度（主线程更新 @Published）；不可变副本避免 @Sendable 闭包捕获 var
+            let currentAttempt = attempt
+            await MainActor.run {
+                OCRWarmupState.shared.updateProgress(attempt: currentAttempt - 1)
+            }
+
+            var failed: Error?
             // 预热也经全局推理闸门 —— 若用户识别正占用管线，本轮尝试按失败处理、
             // 按 interval 重试，避免与真实 OCR 抢 ANE。
             do {

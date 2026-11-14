@@ -100,7 +100,7 @@ struct OCRCapturePipeline: Sendable {
 
         // ── 3. 竞速识别 + 4. 组装 ──
         let inferenceStart = ContinuousClock.now
-        let lines = await racer.recognizeBest(processed)
+        let lines = try await racer.recognizeBest(processed)
         let inferenceDuration = ContinuousClock.now - inferenceStart
 
         guard let lines else {
