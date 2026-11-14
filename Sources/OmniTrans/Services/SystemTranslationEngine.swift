@@ -25,12 +25,15 @@ private let transLogger = OSLog(
 @available(macOS 26.0, *)
 actor SystemTranslationEngine {
 
+    /// 共享单例 —— 避免每次翻译请求重建 actor + LanguageAvailability 实例。
+    static let shared = SystemTranslationEngine()
+
     /// Timeout for language-availability check.  Generous because the first
     /// call after boot may need to enumerate all installed language packs.
     private static let availabilityTimeout: UInt64 = 15
 
     /// Timeout for the actual translation request.  ANE model loading on
-    /// older (but supported) hardware can take 5–10 s on first use.
+    /// older (but supported) hardware can take 5–10 s on first use.
     private static let translateTimeout: UInt64 = 15
     private let availability = LanguageAvailability()
 
@@ -72,7 +75,7 @@ actor SystemTranslationEngine {
     nonisolated static func warmUp() {
         Task {
             do {
-                try await Self.warmUpOnce()
+                try await Self.shared.warmUpWithRetry()
             } catch {
                 os_log(.error, log: transLogger,
                        "预热失败 (非致命): %{public}s", String(describing: error))
@@ -80,18 +83,79 @@ actor SystemTranslationEngine {
         }
     }
 
+    /// 预热带重试 —— 冷启动时 `LanguageAvailability.status()` 枚举语言包可能需要
+    /// 10-30 秒甚至更久，单次尝试容易因系统繁忙而超时。重试机制确保缓存
+    /// 最终被建立，后续翻译不再走冷路径。
     @available(macOS 26.0, *)
-    private static func warmUpOnce() async throws {
+    private func warmUpWithRetry() async throws {
         let en = Locale.Language(identifier: "en")
         let zh = Locale.Language(identifier: "zh-Hans")
-        let avail = LanguageAvailability()
-        let status = await avail.status(from: en, to: zh)
-        guard status == .installed else { return }
-        let session = TranslationSession(installedSource: en, target: zh)
-        _ = try await session.translate("Hello")
-        os_log(.info, log: transLogger, "引擎预热完成")
+
+        // 第一次尝试（给系统充足的启动时间）
+        if await checkAndWarmPair(source: en, target: zh) {
+            os_log(.info, log: transLogger, "引擎预热完成 (首次尝试)")
+            return
+        }
+
+        // 等待 5 秒让系统服务就绪后重试
+        os_log(.info, log: transLogger, "首次预热未就绪，5 秒后重试")
+        try? await Task.sleep(for: .seconds(5))
+
+        if await checkAndWarmPair(source: en, target: zh) {
+            os_log(.info, log: transLogger, "引擎预热完成 (重试成功)")
+            return
+        }
+
+        // 第二次等待 10 秒后再试一次
+        os_log(.info, log: transLogger, "重试仍未就绪，10 秒后最终尝试")
+        try? await Task.sleep(for: .seconds(10))
+
+        if await checkAndWarmPair(source: en, target: zh) {
+            os_log(.info, log: transLogger, "引擎预热完成 (最终尝试成功)")
+        } else {
+            os_log(.error, log: transLogger, "引擎预热最终未就绪，将在首次翻译时重试")
+        }
     }
 
+    /// 检查单个语言对是否可用并预热翻译会话。
+    /// 使用 `ResumeGate` 保证 continuation 只恢复一次（超时 vs 正常完成互斥）。
+    /// - Returns: `true` 如果语言包已安装且预热成功。
+    @available(macOS 26.0, *)
+    private func checkAndWarmPair(source: Locale.Language, target: Locale.Language) async -> Bool {
+        let avail = self.availability
+        let gate = ResumeGate()
+        let status: LanguageAvailability.Status = await withCheckedContinuation { cont in
+            let task = Task {
+                let s = await avail.status(from: source, to: target)
+                await gate.runOnce { cont.resume(returning: s) }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(Int(Self.availabilityTimeout))) {
+                task.cancel()
+                Task { await gate.runOnce {
+                    cont.resume(returning: .unsupported)
+                }}
+            }
+        }
+        guard status == .installed || status == .supported else {
+            os_log(.debug, log: transLogger,
+                   "语言包不可用: %{public}s → %{public}s (status=%{public}s)",
+                   source.languageCode?.identifier ?? "?",
+                   target.languageCode?.identifier ?? "?",
+                   String(describing: status))
+            return false
+        }
+        do {
+            let session = TranslationSession(installedSource: source, target: target)
+            _ = try await session.translate("Hello")
+            return true
+        } catch {
+            os_log(.debug, log: transLogger,
+                   "checkAndWarmPair 翻译预热失败: %{public}s", String(describing: error))
+            return false
+        }
+    }
+
+    @available(macOS 26.0, *)
     func translate(
         text: String,
         sourceLang: TranslationLanguage,
@@ -116,7 +180,7 @@ actor SystemTranslationEngine {
 
         // 1. Cached fast path: skip availability check if known-installed
         if Self.isPackKnownInstalled(source: resolvedSource, target: targetLocale) {
-            return try await Self.translateWithTimeout(
+            return try await translateWithTimeout(
                 text: cleaned, source: resolvedSource, target: targetLocale
             )
         }
@@ -126,14 +190,15 @@ actor SystemTranslationEngine {
 
         // 3. Available → cache & translate
         Self.markPackInstalled(source: resolvedSource, target: targetLocale)
-        return try await Self.translateWithTimeout(
+        return try await translateWithTimeout(
             text: cleaned, source: resolvedSource, target: targetLocale
         )
     }
 
     // MARK: - Timeout-wrapped translation
 
-    private static func translateWithTimeout(
+    @available(macOS 26.0, *)
+    private func translateWithTimeout(
         text: String,
         source: Locale.Language,
         target: Locale.Language
@@ -182,7 +247,7 @@ actor SystemTranslationEngine {
     /// use. On macOS 26, the pack must be pre-downloaded — if it throws we
     /// provide actionable guidance via `checkAvailability`.
     @available(macOS 26.0, *)
-    private static func translateText(
+    private func translateText(
         _ text: String,
         source: Locale.Language,
         target: Locale.Language

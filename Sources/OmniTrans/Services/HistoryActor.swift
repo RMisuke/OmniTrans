@@ -343,11 +343,14 @@ actor HistoryActor {
 
     // MARK: - Write Throttling (UserDefaults)
 
-    /// Schedules a 5-second debounced flush to UserDefaults (≤50 entries).
+    /// 防抖刷新 UserDefaults（≤50 条）。
+    ///
+    /// 采用 2 秒防抖窗口：高频 `add()` 调用时仅最后一次生效，
+    /// 避免滑块/连续翻译场景下的 UserDefaults 写入风暴。
     private func scheduleFlush() {
         flushTask?.cancel()
         flushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)  // 5 seconds
+            try? await Task.sleep(nanoseconds: 2_000_000_000)  // 2s debounce
             guard let self, !Task.isCancelled else { return }
             let snapshot = await self.pending
             let trimmed = Array(snapshot.prefix(Self.maxUserDefaultsEntries))

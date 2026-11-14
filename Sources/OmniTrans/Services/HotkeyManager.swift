@@ -87,7 +87,16 @@ final class HotkeyManager {
     }
 
     /// 当前是否拥有辅助功能权限
-    nonisolated static var isTrusted: Bool { AXIsProcessTrusted() }
+    nonisolated static var isTrusted: Bool {
+        let trusted = AXIsProcessTrusted()
+        #if DEBUG
+        let bundleID = Bundle.main.bundleIdentifier ?? "unknown"
+        os_log(.debug, log: OSLog(subsystem: bundleID, category: "Permissions"),
+               "[AX] isTrusted=%{public}@ bundleID=%{public}@",
+               String(describing: trusted), bundleID)
+        #endif
+        return trusted
+    }
 
     // MARK: - Accessibility Permission (lazy, on first hotkey use)
 
@@ -95,8 +104,18 @@ final class HotkeyManager {
     /// 线程安全，可从 Carbon 回调线程调用。
     nonisolated static func requestAccessibilityIfNeeded() -> Bool {
         if AXIsProcessTrusted() { return true }
+        #if DEBUG
+        let bundleID = Bundle.main.bundleIdentifier ?? "unknown"
+        os_log(.info, log: OSLog(subsystem: bundleID, category: "Permissions"),
+               "[AX] Requesting accessibility permission... bundleID=%{public}@", bundleID)
+        #endif
         let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(opts)
+        let result = AXIsProcessTrustedWithOptions(opts)
+        #if DEBUG
+        os_log(.info, log: OSLog(subsystem: bundleID, category: "Permissions"),
+               "[AX] Permission request result: %{public}@", String(describing: result))
+        #endif
+        return result
     }
 
     /// Format a hotkey label from Carbon key/mod values e.g. "⌥D"

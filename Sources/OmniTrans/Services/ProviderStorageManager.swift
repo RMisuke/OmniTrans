@@ -1,32 +1,45 @@
 import Foundation
 import os
 
-/// Static proxy for persistent storage.  Loads providers from UserDefaults,
-/// fills secret fields from an in-memory cache (populated once from Keychain),
-/// and persists everything on save.
+// MARK: - Provider Storage Manager
+
+/// 供应商配置持久化代理。采用分层架构：
 ///
-/// Keychain model: one JSON blob per provider stored at account `provider:{uuid}`.
+/// - **Keychain / 加密文件**：存储敏感字段（apiKey, apiSecret, customRegion）
+/// - **UserDefaults**：存储非敏感配置（名称、模型、启用状态等）
+/// - **内存缓存**：启动时一次性加载密钥，后续读取零 I/O
+///
+/// ## 性能设计
+/// - `saveProviders` 采用增量写入：仅变更的 provider 触发 Keychain I/O
+/// - 内存缓存通过 `OSAllocatedUnfairLock` 保证线程安全
+/// - UserDefaults 写入保持原子性（JSON 编码后整体替换）
 enum ProviderStorageManager {
-    /// M8: 存储日志统一走 OSLog（subsystem 统一）。
+
     private static let log = OSLog(subsystem: AppLogging.subsystem, category: "Storage")
 
+    // MARK: - Storage Keys
+
     private enum Key {
-        static let providers = "saved_providers_v3"
-        static let dictProviderID = "dict_provider_id"
+        static let providers       = "saved_providers_v3"
+        static let dictProviderID  = "dict_provider_id"
         static let selectedProviderID = "selected_provider_id"
-        static let sourceLang = "source_lang"
-        static let targetLang = "target_lang"
-        static let history = "translation_history"
+        static let sourceLang      = "source_lang"
+        static let targetLang      = "target_lang"
+        static let history         = "translation_history"
     }
 
-    // ── In-memory secret cache (thread-safe via OSAllocatedUnfairLock) ──
+    // MARK: - In-Memory Secret Cache
+
+    /// 线程安全的密钥缓存。启动时从 Keychain 一次性加载，
+    /// 后续 `cachedValue` 调用零磁盘 I/O。
     fileprivate static let cacheLock = OSAllocatedUnfairLock(initialState: (
         cache: [UUID: KeychainFields](),
         loaded: false
     ))
 
-    // MARK: - Cache
+    // MARK: - Cache Management
 
+    /// 预加载密钥到内存缓存（仅首次调用触发 Keychain 读取）。
     static func preloadSecrets() {
         cacheLock.withLock { state in
             guard !state.loaded else { return }
@@ -35,13 +48,12 @@ enum ProviderStorageManager {
         }
     }
 
+    /// 获取指定 provider 的密钥字段（零 I/O）。
     static func cachedFields(for providerID: UUID) -> KeychainFields {
-        cacheLock.withLock { state in
-            state.cache[providerID] ?? KeychainFields()
-        }
+        cacheLock.withLock { $0.cache[providerID] ?? KeychainFields() }
     }
 
-    /// Single field lookup from cache — zero Keychain I/O.
+    /// 单字段查找（零 I/O）—— 供翻译链路高频调用。
     static func cachedValue(for providerID: UUID, field: String) -> String {
         cacheLock.withLock { state in
             let f = state.cache[providerID] ?? KeychainFields()
@@ -54,56 +66,67 @@ enum ProviderStorageManager {
         }
     }
 
-    // MARK: - Providers
+    // MARK: - Providers (Load)
 
+    /// 从 UserDefaults 加载供应商配置，并从内存缓存填充密钥字段。
     static func loadProviders() -> [APIProvider] {
-        #if DEBUG
-        os_log(.debug, log: log, "loadProviders called")
-        #endif
         preloadSecrets()
+
         guard let data = UserDefaults.standard.data(forKey: Key.providers),
               let decoded = try? JSONDecoder().decode([APIProvider].self, from: data)
         else { return [] }
 
-        var providers = decoded
-        for i in providers.indices {
-            let pid = providers[i].id
-            let fields = cacheLock.withLock { state in state.cache[pid] ?? KeychainFields() }
-            if providers[i].apiKey.isEmpty && !fields.apiKey.isEmpty {
-                providers[i].apiKey = fields.apiKey
-            }
-            if providers[i].apiSecret.isEmpty && !fields.apiSecret.isEmpty {
-                providers[i].apiSecret = fields.apiSecret
-            }
-            if providers[i].customRegion.isEmpty && !fields.customRegion.isEmpty {
-                providers[i].customRegion = fields.customRegion
+        // 从缓存合并密钥（避免 Keychain I/O）
+        return cacheLock.withLock { state in
+            decoded.map { provider in
+                var p = provider
+                let fields = state.cache[p.id] ?? KeychainFields()
+                if p.apiKey.isEmpty && !fields.apiKey.isEmpty { p.apiKey = fields.apiKey }
+                if p.apiSecret.isEmpty && !fields.apiSecret.isEmpty { p.apiSecret = fields.apiSecret }
+                if p.customRegion.isEmpty && !fields.customRegion.isEmpty { p.customRegion = fields.customRegion }
+                return p
             }
         }
-        return providers
     }
 
+    // MARK: - Providers (Save) — Incremental
+
+    /// 增量保存供应商配置。
+    ///
+    /// **优化策略**：
+    /// 1. 仅对密钥字段变更的 provider 执行 Keychain I/O（增量写入）
+    /// 2. 非敏感配置统一写入 UserDefaults（原子替换）
+    /// 3. 内存缓存同步更新，保证后续读取一致性
     static func saveProviders(_ providers: [APIProvider]) {
         #if DEBUG
         os_log(.debug, log: log, "saveProviders called with %d providers", providers.count)
-        for p in providers {
-            os_log(.debug, log: log, "  provider %{public}@ apiKey=%{public}@... secret=%{public}@...", p.name, String(p.apiKey.prefix(6)), String(p.apiSecret.prefix(6)))
-        }
         #endif
+
+        // ── Step 1: 增量 Keychain 写入（仅变更项） ──
         for p in providers {
-            let fields = KeychainFields(
+            let newFields = KeychainFields(
                 apiKey: p.apiKey,
                 apiSecret: p.apiSecret,
                 customRegion: p.customRegion
             )
-            if !fields.isEmpty {
-                KeychainManager.saveFields(fields, for: p.id)
-                cacheLock.withLock { state in state.cache[p.id] = fields }
+            let oldFields = cacheLock.withLock { $0.cache[p.id] ?? KeychainFields() }
+
+            // 仅当密钥内容发生变化时才触发 Keychain I/O
+            guard newFields.apiKey != oldFields.apiKey
+                    || newFields.apiSecret != oldFields.apiSecret
+                    || newFields.customRegion != oldFields.customRegion
+            else { continue }
+
+            if !newFields.isEmpty {
+                KeychainManager.saveFields(newFields, for: p.id)
+                cacheLock.withLock { $0.cache[p.id] = newFields }
             } else {
                 KeychainManager.deleteAllFields(for: p.id)
-                _ = cacheLock.withLock { state in state.cache.removeValue(forKey: p.id) }
+                cacheLock.withLock { $0.cache.removeValue(forKey: p.id) }
             }
         }
 
+        // ── Step 2: 写入非敏感配置到 UserDefaults ──
         var sanitized = providers
         for i in sanitized.indices {
             sanitized[i].apiKey = ""
@@ -115,9 +138,10 @@ enum ProviderStorageManager {
         }
     }
 
+    /// 删除指定 provider 的密钥（从 Keychain + 缓存中移除）。
     static func deleteProviderSecrets(for id: UUID) {
         KeychainManager.deleteAllFields(for: id)
-        _ = cacheLock.withLock { state in state.cache.removeValue(forKey: id) }
+        cacheLock.withLock { $0.cache.removeValue(forKey: id) }
     }
 
     // MARK: - Languages
@@ -127,6 +151,7 @@ enum ProviderStorageManager {
               let lang = TranslationLanguage(rawValue: raw) else { return .auto }
         return lang
     }
+
     static func saveSourceLang(_ lang: TranslationLanguage) {
         UserDefaults.standard.set(lang.rawValue, forKey: Key.sourceLang)
     }
@@ -136,30 +161,31 @@ enum ProviderStorageManager {
               let lang = TranslationLanguage(rawValue: raw), lang != .auto else { return .chinese }
         return lang
     }
+
     static func saveTargetLang(_ lang: TranslationLanguage) {
         UserDefaults.standard.set(lang.rawValue, forKey: Key.targetLang)
     }
 
-    // MARK: - Dict provider
-
-    static func loadDictProviderID() -> UUID? {
-        guard let str = UserDefaults.standard.string(forKey: Key.dictProviderID),
-              let uuid = UUID(uuidString: str) else { return nil }
-        return uuid
-    }
-    static func saveDictProviderID(_ id: UUID?) {
-        UserDefaults.standard.set(id?.uuidString, forKey: Key.dictProviderID)
-    }
-
-    // MARK: - Selected provider (translation engine persistence)
+    // MARK: - Provider Selection
 
     static func loadSelectedProviderID() -> UUID? {
         guard let str = UserDefaults.standard.string(forKey: Key.selectedProviderID),
               let uuid = UUID(uuidString: str) else { return nil }
         return uuid
     }
+
     static func saveSelectedProviderID(_ id: UUID?) {
         UserDefaults.standard.set(id?.uuidString, forKey: Key.selectedProviderID)
+    }
+
+    static func loadDictProviderID() -> UUID? {
+        guard let str = UserDefaults.standard.string(forKey: Key.dictProviderID),
+              let uuid = UUID(uuidString: str) else { return nil }
+        return uuid
+    }
+
+    static func saveDictProviderID(_ id: UUID?) {
+        UserDefaults.standard.set(id?.uuidString, forKey: Key.dictProviderID)
     }
 
     // MARK: - History
@@ -175,11 +201,13 @@ enum ProviderStorageManager {
               let decoded = try? JSONDecoder().decode([HistoryEntry].self, from: data) else { return [] }
         return decoded
     }
+
     static func saveHistory(_ entries: [HistoryEntry]) {
         if let data = try? JSONEncoder().encode(entries) {
             UserDefaults.standard.set(data, forKey: Key.history)
         }
     }
+
     static func clearHistory() {
         UserDefaults.standard.removeObject(forKey: Key.history)
     }

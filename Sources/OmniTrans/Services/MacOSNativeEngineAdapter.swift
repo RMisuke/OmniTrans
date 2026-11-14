@@ -32,9 +32,9 @@ struct MacOSNativeEngineAdapter: TranslationEngineProtocol {
                     }
                 } else if #available(macOS 26.0, *) {
                     // ── Translation mode: macOS 26+ ANE engine ──
-                    let engine = SystemTranslationEngine()
+                    // 复用共享单例，避免每次请求重建 actor + LanguageAvailability
                     do {
-                        let result = try await engine.translate(
+                        let result = try await SystemTranslationEngine.shared.translate(
                             text: text,
                             sourceLang: sourceLang,
                             targetLang: targetLang

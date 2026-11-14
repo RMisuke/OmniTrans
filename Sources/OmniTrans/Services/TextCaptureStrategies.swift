@@ -12,7 +12,13 @@ protocol TextCaptureStrategy {
 
 struct ClipboardCaptureStrategy: TextCaptureStrategy {
     func tryCapture() -> String? {
-        guard AXIsProcessTrusted() else { return nil }
+        guard AXIsProcessTrusted() else {
+            #if DEBUG
+            os_log(.debug, log: OSLog(subsystem: Bundle.main.bundleIdentifier ?? "com.omnitrans.app", category: "Permissions"),
+                   "[Clipboard] AX permission denied — skipping capture")
+            #endif
+            return nil
+        }
         let pb = NSPasteboard.general
         let initialCount = pb.changeCount
         let savedStrings = pb.readObjects(forClasses: [NSString.self], options: nil) as? [String]
@@ -53,7 +59,13 @@ private let kAXTimeout: Float = 0.5
 
 struct AXCaptureStrategy: TextCaptureStrategy {
     func tryCapture() -> String? {
-        guard AXIsProcessTrusted() else { return nil }
+        guard AXIsProcessTrusted() else {
+            #if DEBUG
+            os_log(.debug, log: OSLog(subsystem: Bundle.main.bundleIdentifier ?? "com.omnitrans.app", category: "Permissions"),
+                   "[AX] AX permission denied — skipping capture")
+            #endif
+            return nil
+        }
         let system = AXUIElementCreateSystemWide()
         guard let appRef = system.copyAttribute(kAXFocusedApplicationAttribute as CFString),
               CFGetTypeID(appRef) == AXUIElementGetTypeID()
