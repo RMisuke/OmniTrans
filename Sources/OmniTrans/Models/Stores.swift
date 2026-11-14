@@ -38,6 +38,7 @@ final class TranslationSessionStore {
 
 /// 设置型计算属性的缓存层。直接读写 UserDefaults，
 /// 通过内存缓存消除翻译链路中的高频磁盘 I/O。
+/// 消费方均为 AppState（@MainActor），故整类主线程隔离（审计 L6/M5 配套）。
 ///
 /// ## 性能设计
 /// - 首次读取时从 UserDefaults 加载并缓存
@@ -45,7 +46,8 @@ final class TranslationSessionStore {
 /// - 监听 `UserDefaults.didChangeNotification` 自动失效缓存
 ///   （其他进程/扩展修改设置时保持一致）
 @Observable
-final class ConfigurationStore {
+@MainActor
+final class ConfigurationStore: NSObject {
 
     // MARK: - Cached Backing Properties
 
@@ -64,6 +66,24 @@ final class ConfigurationStore {
     }
 
     // MARK: - Cache Invalidation
+
+    override init() {
+        super.init()
+        // 外部（其他进程/扩展）修改 UserDefaults 时失效缓存（审计 L6：
+        // 旧注释声称监听变更但实际无观察者，invalidateCache 无调用者）。
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(defaultsDidChange),
+            name: UserDefaults.didChangeNotification, object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func defaultsDidChange() {
+        invalidateCache()
+    }
 
     /// 使所有缓存失效（外部 UserDefaults 变更时调用）。
     func invalidateCache() {

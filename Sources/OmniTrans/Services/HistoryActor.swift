@@ -252,7 +252,8 @@ actor HistoryActor {
                     encodeFailures += 1
                 }
             }
-            try data.write(to: url)
+            // 原子写（审计 M14）：先写临时文件再替换，崩溃不会截断整份归档。
+            try data.write(to: url, options: .atomic)
             if encodeFailures > 0 {
                 os_log(.error, log: Self.log, "HistoryActor: %d entries failed to encode during archive rewrite", encodeFailures)
             }

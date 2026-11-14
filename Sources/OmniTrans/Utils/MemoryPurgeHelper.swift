@@ -58,7 +58,9 @@ final class MemoryPurgeHelper {
             if event == .warning || event == .critical {
                 os_log(.error, log: memPurgeLog, "System memory pressure (%{public}@) — evicting caches", "\(event)")
                 Task { await HistoryActor.shared.evictMemoryCache() }
-                self.purgeBackendCache()
+                // purgeBackendCache 是 @MainActor（CoreAnimation 调用必须在主线程）；
+                // 压力事件在 utility 队列投递， hop 到 MainActor 执行（审计 M5）。
+                Task { @MainActor [weak self] in self?.purgeBackendCache() }
             }
         }
         source.resume()
