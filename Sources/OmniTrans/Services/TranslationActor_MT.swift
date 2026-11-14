@@ -249,17 +249,20 @@ enum VolcengineSigner {
         let timestamp = SignerUtilities.iso8601Timestamp()
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
+        // TextList 必须是合法 JSON 数组（如 ["hello"]）—— 用 JSONSerialization
+        // 生成，自动处理引号/转义/中文；裸拼接 "[\(text)]" 非法（审计 H2）。
+        let textList = (try? JSONSerialization.data(withJSONObject: [sourceText]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+
         let params: [(String, String)] = [
             ("AccessKeyId", accessKey),
             ("Action", "TranslateText"),
             ("Version", "2020-06-01"),
             ("SourceLanguage", sourceLanguage),
             ("TargetLanguage", targetLanguage),
-            // 注意：`TextList` 必须是 JSON 数组文本（如 `["hello"]`），
             // 由 `buildSignedQuery` 统一做一次 RFC 3986 百分号编码。
-            // 禁止在此预编码 —— 否则 `%` 会被二次编码成 `%25`，含空格/中文/特殊字符
-            // 的源文本会翻译错误或签名校验失败（审计 C2）。
-            ("TextList", "[\(sourceText)]"),
+            // 禁止在此预编码 —— 否则 `%` 会被二次编码成 `%25`（审计 C2）。
+            ("TextList", textList),
             ("SignatureMethod", "HMAC-SHA256"),
             ("SignatureNonce", nonce),
             ("SignatureVersion", "1.0"),

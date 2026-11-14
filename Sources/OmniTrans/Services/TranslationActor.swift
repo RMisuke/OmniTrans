@@ -228,6 +228,8 @@ actor TranslationActor {
                 }
             }
             activeStreamTask = task
+            // 消费方弃流/取消 → 同步取消内部 SSE 任务，不再空消费至下一请求（审计 M7）
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -256,6 +258,8 @@ actor TranslationActor {
                 }
             }
             activeStreamTask = task
+            // 消费方弃流/取消 → 同步取消内部 SSE 任务，不再空消费至下一请求（审计 M7）
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 

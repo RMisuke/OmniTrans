@@ -76,7 +76,14 @@ enum NetworkLogger {
     /// body 预览；Release 只记方法与 URL。
     static func logRequest(_ request: URLRequest, body: Data? = nil, label: String = "") {
         let method = request.httpMethod ?? "GET"
-        let url = request.url?.absoluteString ?? "?"
+        // 只记 scheme+host+path：query 可能含 AccessKeyId/Signature（阿里/火山
+        // 签名 URL）或用户文本（Google q 参数），均属敏感数据（审计 M1）。
+        var url = "?"
+        if let u = request.url, var c = URLComponents(url: u, resolvingAgainstBaseURL: false) {
+            c.query = nil
+            c.fragment = nil
+            url = c.url?.absoluteString ?? "?"
+        }
         let tag = label.isEmpty ? "" : "[\(label)] "
         os_log(.debug, log: log, "%{public}@──→ %{public}@ %{public}@", tag, method, url)
         #if DEBUG

@@ -284,7 +284,7 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
-    private func doTranslate(text: String, provider: APIProvider, context: CapturedContext? = nil, forceRefresh: Bool = false) {
+    private func doTranslate(text: String, provider: APIProvider, context: CapturedContext? = nil, forceRefresh: Bool = false, fallbackDepth: Int = 0) {
         activeStreamTask?.cancel()
         isTranslating = true; errorMessage = nil; translatedText = ""
         streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
@@ -483,6 +483,8 @@ final class AppState: ObservableObject {
                 self.addHistory(text: text, result: chunks.joined(), provider: effectiveProvider)
                 self.isDictionaryMode = false
             } catch {
+                // 被取消的旧请求不得降级/重试，避免旧结果覆盖新译文（审计 H1）
+                if error is CancellationError || Task.isCancelled { return }
                 NetworkLogger.logError("Stream", error)
 
                 if isDict && effectiveProvider.kind != .macOSNative {
@@ -509,11 +511,13 @@ final class AppState: ObservableObject {
 
                 NetworkLogger.log("Fallback", "fallbackOn=\(fallbackOn) isAuth=\(isAuthError) error=\(error.localizedDescription.prefix(80))")
 
-                if fallbackOn, !isAuthError, let next = Self.nextFallbackProvider(after: effectiveProvider, in: self.enabledProviders) {
+                // 深度上限：每个 provider 至多尝试一次，防止全失败时取模回绕无限递归（审计 H1）
+                if fallbackOn, !isAuthError, fallbackDepth < self.enabledProviders.count,
+                   let next = Self.nextFallbackProvider(after: effectiveProvider, in: self.enabledProviders) {
                     NetworkLogger.log("Fallback", "switching \(effectiveProvider.name) → \(next.name)")
                     self.selectedProviderID = next.id
                     ProviderStorageManager.saveSelectedProviderID(next.id)
-                    self.doTranslate(text: text, provider: next, context: context)
+                    self.doTranslate(text: text, provider: next, context: context, fallbackDepth: fallbackDepth + 1)
                     return
                 }
 

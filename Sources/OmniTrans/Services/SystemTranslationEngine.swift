@@ -186,10 +186,13 @@ actor SystemTranslationEngine {
         }
 
         // 2. First-time / unknown: check availability (with timeout)
-        try await checkAvailability(source: resolvedSource, target: targetLocale)
+        let status = try await checkAvailability(source: resolvedSource, target: targetLocale)
 
-        // 3. Available → cache & translate
-        Self.markPackInstalled(source: resolvedSource, target: targetLocale)
+        // 3. 仅真正 installed 才缓存；.supported（尚未下载）不得标记 installed，
+        // 否则永久跳过可用性检查（审计 M16）
+        if status == .installed {
+            Self.markPackInstalled(source: resolvedSource, target: targetLocale)
+        }
         return try await translateWithTimeout(
             text: cleaned, source: resolvedSource, target: targetLocale
         )
@@ -268,7 +271,7 @@ actor SystemTranslationEngine {
     private func checkAvailability(
         source: Locale.Language,
         target: Locale.Language
-    ) async throws {
+    ) async throws -> LanguageAvailability.Status {
         let avail = self.availability
         let gate = ResumeGate()
 
@@ -301,7 +304,7 @@ actor SystemTranslationEngine {
 
         switch status {
         case .installed:
-            return
+            return status
         case .supported:
             // macOS 26: 语言包状态为 .supported 但尚未 .installed。
             // macOS 27+ 在 TranslationSession 初始化时会自动下载，
@@ -309,13 +312,13 @@ actor SystemTranslationEngine {
             // TranslationSession 自己处理下载/报错。
             os_log(.info, log: transLogger,
                    "语言包状态为 .supported，尝试直接翻译 (macOS 27 可自动下载)")
-            return
+            return status
         case .unsupported:
             throw TranslationService.TranslationError.apiError(
                 "\"\(source.languageCode?.identifier ?? "?")\" → \"\(target.languageCode?.identifier ?? "?")\" 语言对暂不被系统原生翻译支持，请切换至云端 API。"
             )
         @unknown default:
-            break
+            return status
         }
     }
 

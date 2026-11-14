@@ -40,6 +40,8 @@ final class NativeTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate {
     private let synth = AVSpeechSynthesizer()
     private let logger = Logger(subsystem: AppLogging.subsystem, category: "TTSEngine")
     private var continuation: CheckedContinuation<Void, Error>?
+    /// 当前朗读的 utterance —— delegate 回调按身份匹配，防止旧回调误恢复新 continuation（审计 M6）。
+    private var currentUtterance: AVSpeechUtterance?
 
     // MARK: - Speaking State (B15)
 
@@ -76,7 +78,8 @@ final class NativeTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate {
         }
 
         return try await withCheckedThrowingContinuation { cont in
-            self.continuation = cont
+            // 二次 speak 先取消旧等待，避免旧 continuation 被覆盖后永久挂起（审计 M6）
+            self.continuation?.resume(throwing: CancellationError())
 
             let utterance = AVSpeechUtterance(string: text)
 
@@ -92,6 +95,8 @@ final class NativeTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate {
             utterance.volume            = 1.0
             utterance.preUtteranceDelay = 0.05
 
+            self.continuation = cont
+            self.currentUtterance = utterance
             synth.speak(utterance)
         }
     }
@@ -101,6 +106,7 @@ final class NativeTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate {
     nonisolated func stop() {
         Task { @MainActor in
             synth.stopSpeaking(at: .immediate)
+            currentUtterance = nil
             continuation?.resume(throwing: CancellationError())
             continuation = nil
         }
@@ -141,14 +147,21 @@ final class NativeTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate {
     // MARK: - AVSpeechSynthesizerDelegate (Swift 6 Concurrency-Compliant)
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        // 仅捕获 Sendable 的身份标识，避免跨隔离域传递 utterance 本体
+        let id = ObjectIdentifier(utterance)
         Task { @MainActor in
+            guard let current = currentUtterance, ObjectIdentifier(current) == id else { return }
+            currentUtterance = nil
             continuation?.resume()
             continuation = nil
         }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        let id = ObjectIdentifier(utterance)
         Task { @MainActor in
+            guard let current = currentUtterance, ObjectIdentifier(current) == id else { return }
+            currentUtterance = nil
             continuation?.resume(throwing: CancellationError())
             continuation = nil
         }
