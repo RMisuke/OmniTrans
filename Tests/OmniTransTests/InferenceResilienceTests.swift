@@ -36,7 +36,7 @@ final class HangingRecognizer: TextRecognizing, @unchecked Sendable {
     var callCount: Int { calls.withLock { $0 } }
 
     func recognize(_ buffer: CVPixelBuffer, track: LanguageTrack) async throws -> [RecognizedLine] {
-        _ = calls.withLock { $0 += 1 }
+        calls.withLock { $0 += 1 }
         // 刻意忽略取消：循环 sleep，直到 30s 时限为止（复现 Vision 停滞语义）
         let start = ContinuousClock.now
         while ContinuousClock.now - start < .seconds(30) {

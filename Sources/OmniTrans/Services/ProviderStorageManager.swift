@@ -122,7 +122,7 @@ enum ProviderStorageManager {
                 cacheLock.withLock { $0.cache[p.id] = newFields }
             } else {
                 KeychainManager.deleteAllFields(for: p.id)
-                cacheLock.withLock { $0.cache.removeValue(forKey: p.id) }
+                _ = cacheLock.withLock { $0.cache.removeValue(forKey: p.id) }
             }
         }
 
@@ -141,7 +141,7 @@ enum ProviderStorageManager {
     /// 删除指定 provider 的密钥（从 Keychain + 缓存中移除）。
     static func deleteProviderSecrets(for id: UUID) {
         KeychainManager.deleteAllFields(for: id)
-        cacheLock.withLock { $0.cache.removeValue(forKey: id) }
+        _ = cacheLock.withLock { $0.cache.removeValue(forKey: id) }
     }
 
     // MARK: - Languages

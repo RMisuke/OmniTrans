@@ -119,7 +119,15 @@ enum KeychainManager {
     static func batchReadAll() -> [UUID: KeychainFields] {
         if resolveBackend() == .keychain {
             migrateLegacyFileIfNeeded()
-            return readAllFromKeychain()
+            var out = readAllFromKeychain()
+            // 防御纵深：旧文件仍在（部分迁移失败）时，合并读取 Keychain 缺失的条目，
+            // 保证未迁移密钥在当前进程内也可见，不依赖下次启动重试。
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                for (id, fields) in legacyBatchReadAll() where out[id] == nil {
+                    out[id] = fields
+                }
+            }
+            return out
         }
         return legacyBatchReadAll()
     }
@@ -128,14 +136,14 @@ enum KeychainManager {
         if resolveBackend() == .keychain {
             migrateLegacyFileIfNeeded()
             if upsertInKeychain(fields, for: providerID) {
-                log("✅ saved \(providerID) → keychain (apiKey=\(fields.apiKey.prefix(6))...)")
+                log("✅ saved \(providerID) → keychain")
                 return
             }
             // Keychain 写入失败（罕见）—— 回退到文件后端保证不丢数据
             os_log(.error, log: log_, "keychain upsert failed for %{public}@ — falling back to file", providerID.uuidString)
         }
         legacySaveFields(fields, for: providerID)
-        log("✅ saved \(providerID) → file (apiKey=\(fields.apiKey.prefix(6))...)")
+        log("✅ saved \(providerID) → file")
     }
 
     static func deleteAllFields(for providerID: UUID) {
@@ -238,16 +246,21 @@ enum KeychainManager {
 
     // MARK: - Legacy File Migration
 
-    /// 旧 `secrets.json` 存在且未迁移过 → 解密后逐条迁入 Keychain，成功则删除明文残留。
+    /// 旧 `secrets.json` 存在且未迁移过 → 解密后逐条迁入 Keychain，全部成功才删除旧文件。
+    /// 部分失败保留旧文件并置 done=false，下次启动重试（审计 S3：旧 defer 无条件
+    /// 置 true 覆盖了失败分支的 set(false)，导致永不重试、未迁移密钥静默丢失）。
     private static func migrateLegacyFileIfNeeded() {
         guard !UserDefaults.standard.bool(forKey: migrationDoneKey) else { return }
-        defer { UserDefaults.standard.set(true, forKey: migrationDoneKey) }
 
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            UserDefaults.standard.set(true, forKey: migrationDoneKey)
+            return
+        }
         let legacy = legacyBatchReadAll()
         guard !legacy.isEmpty else {
             // 无法解密或空文件 —— 直接移除，避免每次启动重复尝试
             try? FileManager.default.removeItem(at: fileURL)
+            UserDefaults.standard.set(true, forKey: migrationDoneKey)
             return
         }
 
@@ -255,15 +268,20 @@ enum KeychainManager {
         for (id, fields) in legacy where upsertInKeychain(fields, for: id) {
             migrated += 1
         }
-        if migrated == legacy.count {
+        let outcome = migrationOutcome(migrated: migrated, total: legacy.count)
+        if outcome.deleteFile {
             try? FileManager.default.removeItem(at: fileURL)
             os_log(.info, log: log_, "migrated %d secrets from legacy file to keychain", migrated)
         } else {
-            // 部分失败 —— 保留旧文件以便下次重试（迁移标记已被 defer 置位，
-            // 但保留文件意味着数据仍可经 fallback 路径读取，不会丢失）
-            UserDefaults.standard.set(false, forKey: migrationDoneKey)
-            os_log(.error, log: log_, "migration incomplete (%d/%d) — legacy file kept", migrated, legacy.count)
+            os_log(.error, log: log_, "migration incomplete (%d/%d) — legacy file kept, will retry next launch", migrated, legacy.count)
         }
+        UserDefaults.standard.set(outcome.done, forKey: migrationDoneKey)
+    }
+
+    /// 迁移判定（纯函数，供单测）：全部成功才删旧文件并标记完成；
+    /// 部分失败保留旧文件、done=false 以便重试。
+    static func migrationOutcome(migrated: Int, total: Int) -> (deleteFile: Bool, done: Bool) {
+        migrated == total ? (true, true) : (false, false)
     }
 
     // MARK: - Legacy Encrypted-File Backend
