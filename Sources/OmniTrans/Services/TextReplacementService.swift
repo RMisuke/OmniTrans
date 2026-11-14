@@ -25,7 +25,8 @@ final class TextReplacementService {
         guard !text.isEmpty else { return }
 
         let pasteboard = NSPasteboard.general
-        let oldString = pasteboard.string(forType: .string)
+        // 全保真备份（审计 H10）：图片/文件等格式一并保存，恢复时不丢失。
+        let snapshot = PasteboardSnapshot(pasteboard)
 
         // （审计 B2）抑制自身剪贴板监控：替换文本会短暂进入系统剪贴板，
         // 若 clipboard_monitor 开启，ClipboardMonitor 会把这次变更当作新的
@@ -45,10 +46,7 @@ final class TextReplacementService {
         guard pasteboard.changeCount == postWriteCount else { return }
 
         ClipboardMonitor.shared.suppressNext = true
-        pasteboard.clearContents()
-        if let old = oldString {
-            pasteboard.setString(old, forType: .string)
-        }
+        snapshot.restore(to: pasteboard)
     }
 
     private func simulatePaste() {

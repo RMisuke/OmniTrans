@@ -13,8 +13,15 @@ final class ClipboardMonitor {
     private var lastChangeCount: Int = 0
     private var isRunning = false
     private var lastTranslationTime: Date = .distantPast
-    /// Ignore changes originated by our own translate/copy actions
-    var suppressNext = false
+    /// 抑制接下来 N 次自身写入引发的变更事件（审计 M9：替换流程含写入+恢复
+    /// 两次写入，单次布尔抑制会漏掉第二次）。
+    var suppressCount = 0
+
+    /// 便捷入口：抑制下一次变更。多次置 true 累加计数。
+    var suppressNext: Bool {
+        get { suppressCount > 0 }
+        set { if newValue { suppressCount += 1 } }
+    }
 
     private init() {}
 
@@ -58,7 +65,7 @@ final class ClipboardMonitor {
 
     private func check() {
         guard isRunning else { return }
-        guard !suppressNext else { suppressNext = false; lastChangeCount = NSPasteboard.general.changeCount; return }
+        guard suppressCount == 0 else { suppressCount -= 1; lastChangeCount = NSPasteboard.general.changeCount; return }
         let pb = NSPasteboard.general
         guard pb.changeCount != lastChangeCount else { return }
         lastChangeCount = pb.changeCount

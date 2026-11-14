@@ -1,5 +1,6 @@
 import SwiftUI
 import ApplicationServices
+import CoreGraphics
 
 // MARK: - Onboarding View
 
@@ -17,7 +18,15 @@ import ApplicationServices
 struct OnboardingView: View {
     let onDismiss: () -> Void
     @State private var page = 0
+    /// 权限实时状态（审计 M17：引导页需反映真实授权情况）
+    @State private var axTrusted = false
+    @State private var screenTrusted = false
     private let totalPages = 5
+
+    private func refreshPermissionStatus() {
+        axTrusted = AXIsProcessTrusted()
+        screenTrusted = CGPreflightScreenCaptureAccess()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -214,13 +223,13 @@ struct OnboardingView: View {
                 OnboardRow(
                     icon: "hand.tap.fill", color: .blue,
                     title: "辅助功能权限",
-                    desc: "用于读取划词选中的文本内容"
+                    desc: axTrusted ? "已授权 — 用于读取划词选中的文本内容" : "用于读取划词选中的文本内容（点击前往设置）"
                 )
                 .onTapGesture { openAccessibilitySettings() }
                 OnboardRow(
                     icon: "rectangle.inset.filled", color: .orange,
                     title: "屏幕录制权限",
-                    desc: "用于 OCR 框选识别屏幕上的文字"
+                    desc: screenTrusted ? "已授权 — 用于 OCR 框选识别屏幕上的文字" : "用于 OCR 框选识别屏幕上的文字（点击前往设置）"
                 )
                 .onTapGesture { openScreenRecordingSettings() }
                 OnboardRow(
@@ -232,6 +241,11 @@ struct OnboardingView: View {
             .padding(.horizontal, 40)
         }
         .padding(.vertical, 30)
+        .onAppear { refreshPermissionStatus() }
+        // 每 2s 刷新授权状态，用户在系统设置中授权后回到引导页即时可见（审计 M17）
+        .onReceive(Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()) { _ in
+            refreshPermissionStatus()
+        }
     }
 
     // MARK: - Page 3 — Offline Translation

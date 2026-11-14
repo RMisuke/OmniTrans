@@ -37,6 +37,11 @@ extension SettingsPanelContent {
                             Text("大").tag("large"); Text("动态").tag("dynamic")
                         }.pickerStyle(.segmented).fixedSize().padding(.horizontal, 4).padding(.vertical, 2)
                     }
+                    HStack {
+                        Text("动画效果").font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
+                        Spacer()
+                        Toggle("", isOn: $animationsEnabled).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                    }
                 }
             }
             animatedCard(icon: "clipboard", title: "剪贴板", index: 2) {
@@ -266,6 +271,8 @@ extension SettingsPanelContent {
     // MARK: - Hotkey Recording
 
     func startRecording(for key: String, onSet: @escaping (Int, Int) -> Void) {
+        // 先移除旧 monitor，防止换行录制时泄漏并吞掉全应用 keyDown（审计 H9）
+        stopRecording()
         recordingKey = key
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard self.recordingKey == key else { return event }

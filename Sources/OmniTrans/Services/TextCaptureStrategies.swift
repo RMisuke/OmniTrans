@@ -21,16 +21,14 @@ struct ClipboardCaptureStrategy: TextCaptureStrategy {
         }
         let pb = NSPasteboard.general
         let initialCount = pb.changeCount
-        let savedStrings = pb.readObjects(forClasses: [NSString.self], options: nil) as? [String]
+        // 全保真备份（审计 H10）：图片/文件等所有类型一并恢复。
+        let snapshot = PasteboardSnapshot(pb)
         defer {
             // Restore clipboard if *any* change occurred — not just initialCount+1.
             // This handles the case where a third-party app also modifies the
             // pasteboard during the capture window (TOCTOU-safe snapshot compare).
             if pb.changeCount != initialCount {
-                pb.clearContents()
-                if let strings = savedStrings, !strings.isEmpty {
-                    pb.setString(strings.joined(separator: "\n"), forType: .string)
-                }
+                snapshot.restore(to: pb)
             }
         }
         let src = CGEventSource(stateID: .hidSystemState)
@@ -263,19 +261,21 @@ enum SlidingWindowContextCapture {
     /// - Selection expansion uses `Cmd+Shift+LeftArrow` and `Cmd+Shift+RightArrow`
     ///   to select to line boundaries, then copies the result.
     private static func captureViaKeyboardSimulation(selectedText: String) -> CapturedContext? {
+        // 扩选会破坏用户选区且键盘模拟无法精确还原 —— 先经 AX 记录原选区，
+        // 退出时恢复；AX 不可用则跳过扩选（审计 H11）。
+        guard let originalRange = Self.focusedSelectedTextRange() else { return nil }
+
         let pb = NSPasteboard.general
         let savedChangeCount = pb.changeCount
-        let savedItems = pb.readObjects(forClasses: [NSString.self], options: nil)
+        let snapshot = PasteboardSnapshot(pb)
 
-        // ── Restore clipboard on exit ──
+        // ── Restore clipboard and selection on exit ──
         defer {
             // Only restore if pasteboard was modified
             if pb.changeCount != savedChangeCount {
-                pb.clearContents()
-                if let items = savedItems as? [String], !items.isEmpty {
-                    pb.setString(items.joined(separator: "\n"), forType: .string)
-                }
+                snapshot.restore(to: pb)
             }
+            Self.restoreFocusedSelectedTextRange(originalRange)
         }
 
         let src = CGEventSource(stateID: .hidSystemState)
@@ -297,6 +297,34 @@ enum SlidingWindowContextCapture {
     }
 
     private enum Direction { case left, right }
+
+    // MARK: - AX 选区记录/恢复（审计 H11）
+
+    private static func focusedElement() -> AXUIElement? {
+        let system = AXUIElementCreateSystemWide()
+        guard let appRef = system.copyAttribute(kAXFocusedApplicationAttribute as CFString),
+              CFGetTypeID(appRef) == AXUIElementGetTypeID() else { return nil }
+        let app = appRef as! AXUIElement
+        guard let elemRef = app.copyAttribute(kAXFocusedUIElementAttribute as CFString),
+              CFGetTypeID(elemRef) == AXUIElementGetTypeID() else { return nil }
+        return (elemRef as! AXUIElement)
+    }
+
+    private static func focusedSelectedTextRange() -> CFRange? {
+        guard let elem = focusedElement(),
+              let rangeVal = elem.copyAttribute(kAXSelectedTextRangeAttribute as CFString),
+              CFGetTypeID(rangeVal) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(rangeVal as! AXValue, .cfRange, &range) else { return nil }
+        return range
+    }
+
+    private static func restoreFocusedSelectedTextRange(_ range: CFRange) {
+        guard let elem = focusedElement() else { return }
+        var r = range
+        guard let value = AXValueCreate(.cfRange, &r) else { return }
+        AXUIElementSetAttributeValue(elem, kAXSelectedTextRangeAttribute as CFString, value)
+    }
 
     /// Simulates Cmd+Shift+{Left,Right}Arrow to select surrounding text,
     /// then Cmd+C to copy.  Returns the copied text (or "" on timeout).

@@ -35,6 +35,8 @@ struct SettingsPanelContent: View {
 
     @AppStorage("panel_size") var panelSize = "default"
     @AppStorage("dismiss_mode") var dismissMode = "clickOutside"
+    /// 动画效果开关（审计 H12：此前无任何 UI 写入 animations_enabled）。
+    @AppStorage("animations_enabled") var animationsEnabled = true
     @AppStorage("clipboard_monitor") var clipboardMonitor = false
     @AppStorage("history_disabled") var historyDisabled = false
     @AppStorage("max_history_count") var maxHistoryCount = 100
@@ -154,11 +156,18 @@ struct SettingsPanelContent: View {
         .onChange(of: state.selectedProviderID) { _, _ in
             loadSettingsFromProvider()
         }
+        .onChange(of: animationsEnabled) { _, _ in
+            AnimationGate.refresh()
+        }
+        .onDisappear {
+            // 关窗时移除热键录制 monitor，防止泄漏吞掉全应用 keyDown（审计 H9）
+            stopRecording()
+        }
         .onChange(of: translationTemp) { _, newValue in
-            debounceProviderSync { syncTemperatureToProvider(newValue) }
+            debounceProviderSync { pid in syncTemperatureToProvider(newValue, providerID: pid) }
         }
         .onChange(of: translationMaxTokens) { _, newValue in
-            debounceProviderSync { syncMaxTokensToProvider(newValue) }
+            debounceProviderSync { pid in syncMaxTokensToProvider(newValue, providerID: pid) }
         }
         .onChange(of: customPromptEnabled) { _, enabled in
             if enabled, customPromptText.isEmpty {
@@ -182,26 +191,28 @@ struct SettingsPanelContent: View {
     }
 
     /// 供应商参数变更防抖：停止交互 300ms 后才落库，避免滑块拖动每步全量保存。
-    func debounceProviderSync(_ block: @escaping @MainActor () -> Void) {
+    /// 调度时捕获 providerID 快照，执行时比对 —— 快速切换供应商不会把 A 的参数写入 B（审计 M15）。
+    func debounceProviderSync(_ block: @escaping @MainActor (UUID) -> Void) {
+        guard let pid = state.selectedProvider?.id else { return }
         providerSyncDebounceTask?.cancel()
         providerSyncDebounceTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
-            block()
+            block(pid)
         }
     }
 
     /// Push temperature change to the selected provider so TranslationActor uses it.
-    func syncTemperatureToProvider(_ newValue: Double) {
-        guard let provider = state.selectedProvider, !provider.isBuiltIn else { return }
+    func syncTemperatureToProvider(_ newValue: Double, providerID: UUID) {
+        guard let provider = state.selectedProvider, provider.id == providerID, !provider.isBuiltIn else { return }
         var updated = provider
         updated.temperature = newValue
         state.updateProvider(updated)
     }
 
     /// Push maxTokens change to the selected provider.
-    func syncMaxTokensToProvider(_ newValue: Int) {
-        guard let provider = state.selectedProvider, !provider.isBuiltIn else { return }
+    func syncMaxTokensToProvider(_ newValue: Int, providerID: UUID) {
+        guard let provider = state.selectedProvider, provider.id == providerID, !provider.isBuiltIn else { return }
         var updated = provider
         updated.maxTokens = newValue
         state.updateProvider(updated)

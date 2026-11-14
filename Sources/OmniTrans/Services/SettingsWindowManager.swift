@@ -206,7 +206,9 @@ final class SettingsWindowManager {
                 w.alphaValue = 0
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
-                self?.window = nil
+                // 仅关闭发起时的窗口实例才置 nil —— 快速重开的新窗口不被抹掉（审计 M8）
+                guard let self, self.window === w else { return }
+                self.window = nil
             }
         } else {
             window = nil

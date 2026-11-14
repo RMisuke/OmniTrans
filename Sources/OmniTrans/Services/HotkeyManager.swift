@@ -156,13 +156,15 @@ final class HotkeyManager {
     }
 
     nonisolated private static func resolvedMods(for udKey: String, defaultMod: Int) -> UInt32 {
-        let m = UserDefaults.standard.integer(forKey: udKey)
-        return m != 0 ? UInt32(m) : UInt32(defaultMod)
+        // mods==0（裸键）是合法值 —— 按存在性判断"未设置"，而非 != 0（审计 H8）
+        guard let v = UserDefaults.standard.object(forKey: udKey) as? Int else { return UInt32(defaultMod) }
+        return UInt32(v)
     }
 
     nonisolated private static func resolvedKey(for udKey: String, defaultKey: Int) -> UInt32 {
-        let k = UserDefaults.standard.integer(forKey: udKey)
-        return k != 0 ? UInt32(k) : UInt32(defaultKey)
+        // keyCode 0（A 键）是合法值 —— 按存在性判断"未设置"，而非 != 0（审计 H8）
+        guard let v = UserDefaults.standard.object(forKey: udKey) as? Int else { return UInt32(defaultKey) }
+        return UInt32(v)
     }
 
     nonisolated private static func keyToString(_ code: UInt16) -> String {
@@ -237,12 +239,14 @@ final class HotkeyManager {
     }
 
     func register() {
-        let m = UserDefaults.standard.integer(forKey: "hotkey_carbonMods")
-        let k = UserDefaults.standard.integer(forKey: "hotkey_carbonKey")
-        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
-        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_D)
+        let mods = Self.resolvedMods(for: "hotkey_carbonMods", defaultMod: Int(optionKey))
+        let key = Self.resolvedKey(for: "hotkey_carbonKey", defaultKey: Int(kVK_ANSI_D))
         let hid = EventHotKeyID(signature: 0x4149544C, id: 1)
-        RegisterEventHotKey(key, mods, hid, GetApplicationEventTarget(), 0, &hotkeyRef)
+        let status = RegisterEventHotKey(key, mods, hid, GetApplicationEventTarget(), 0, &hotkeyRef)
+        if status != noErr {
+            os_log(.error, log: OSLog(subsystem: AppLogging.subsystem, category: "Hotkey"),
+                   "RegisterEventHotKey(id=1) failed: %d — 热键冲突或组合无效", status)
+        }
         ensureHandlerInstalled()
     }
 
@@ -254,13 +258,15 @@ final class HotkeyManager {
     // MARK: - OCR hotkey (⌥F by default)
 
     func registerOCR() {
-        let m = UserDefaults.standard.integer(forKey: "ocr_hotkey_carbonMods")
-        let k = UserDefaults.standard.integer(forKey: "ocr_hotkey_carbonKey")
-        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
-        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_F)
+        let mods = Self.resolvedMods(for: "ocr_hotkey_carbonMods", defaultMod: Int(optionKey))
+        let key = Self.resolvedKey(for: "ocr_hotkey_carbonKey", defaultKey: Int(kVK_ANSI_F))
         let hid = EventHotKeyID(signature: 0x4149544C, id: 2)
-        RegisterEventHotKey(key, mods, hid,
+        let status = RegisterEventHotKey(key, mods, hid,
                             GetApplicationEventTarget(), 0, &ocrHotkeyRef)
+        if status != noErr {
+            os_log(.error, log: OSLog(subsystem: AppLogging.subsystem, category: "Hotkey"),
+                   "RegisterEventHotKey(id=2) failed: %d — 热键冲突或组合无效", status)
+        }
         ensureHandlerInstalled()
     }
 
@@ -268,12 +274,14 @@ final class HotkeyManager {
 
     func registerReplace() {
         let hid = EventHotKeyID(signature: 0x4149544C, id: 3)
-        let m = UserDefaults.standard.integer(forKey: "replace_hotkey_carbonMods")
-        let k = UserDefaults.standard.integer(forKey: "replace_hotkey_carbonKey")
-        let mods = m != 0 ? UInt32(m) : UInt32(optionKey)
-        let key  = k != 0 ? UInt32(k) : UInt32(kVK_ANSI_R)
-        RegisterEventHotKey(key, mods, hid,
+        let mods = Self.resolvedMods(for: "replace_hotkey_carbonMods", defaultMod: Int(optionKey))
+        let key = Self.resolvedKey(for: "replace_hotkey_carbonKey", defaultKey: Int(kVK_ANSI_R))
+        let status = RegisterEventHotKey(key, mods, hid,
                             GetApplicationEventTarget(), 0, &replaceHotkeyRef)
+        if status != noErr {
+            os_log(.error, log: OSLog(subsystem: AppLogging.subsystem, category: "Hotkey"),
+                   "RegisterEventHotKey(id=3) failed: %d — 热键冲突或组合无效", status)
+        }
         ensureHandlerInstalled()
     }
 

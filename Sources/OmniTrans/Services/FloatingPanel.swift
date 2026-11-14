@@ -17,10 +17,13 @@ enum CloseMethod: String, CaseIterable, Sendable {
     }
 
     /// 从 UserDefaults 读取，默认 `.clickOutside`。
+    /// 键名与设置 UI 的 `@AppStorage("dismiss_mode")` 统一（审计 H7：
+    /// 旧实现读 "closeMethod" 且取值 "manualEsc" 与 UI 写入的 "manual" 双错配）。
     static var current: CloseMethod {
-        if let raw = UserDefaults.standard.string(forKey: "closeMethod"),
-           let m = CloseMethod(rawValue: raw) { return m }
-        return .clickOutside
+        switch UserDefaults.standard.string(forKey: "dismiss_mode") {
+        case "manual", "manualEsc": return .manualEsc
+        default: return .clickOutside
+        }
     }
 }
 
@@ -61,6 +64,9 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
     /// 未执行的延迟关闭任务（用于取消）。
     private var pendingCloseTask: Task<Void, Never>?
 
+    /// hide/show 代际：hide 动画完成回调校验代际，快速重显后旧回调不再 orderOut（审计 M8）。
+    private var hideGeneration: Int = 0
+
     private var resignKeyObserver: NSObjectProtocol?
 
     private init() {
@@ -92,11 +98,10 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
 
     /// Overrides parent's `handleLostFocus` — the parent unconditionally
     /// calls `orderOut(nil)` on `didResignKeyNotification`, which ignores
-    /// the pin state.  This override inserts the pin guard so the panel
-    /// stays visible when pinned.
+    /// pin state and close method. Route to the policy-aware path so
+    /// manualEsc / pinned / 0.1s debounce are all respected (审计 H7).
     @objc override func handleLostFocus() {
-        guard !isPinned else { return }
-        super.close()  // delegates to our close() which also checks isPinned
+        windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: self))
     }
 
     override func close() {
@@ -180,6 +185,8 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
     // MARK: - Show
 
     func show(nearMouse: Bool = true) {
+        // 递增代际使任何进行中的 hide 完成回调失效（审计 M8）
+        hideGeneration += 1
         let h = heightForMode(UserDefaults.standard.string(forKey: "panel_size") ?? "default")
         let w = Self.defaultWidth
 
@@ -207,6 +214,8 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
 
     func hide() {
         cancelPendingClose()
+        hideGeneration += 1
+        let generation = hideGeneration
         Task { await TTSManager.shared.stop() }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = AppTheme.Motion.panelHide.appKitDuration
@@ -215,6 +224,8 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
         } completionHandler: { [weak self] in
             guard let self else { return }
             Task { @MainActor in
+                // 动画期间若已重新 show（代际递增），放弃 orderOut（审计 M8）
+                guard self.hideGeneration == generation else { return }
                 self.orderOut(nil)
                 // 刻意不做内存清理：面板隐藏是高频路径，malloc_zone_pressure_relief
                 // 会把 Vision 内部缓冲反复「清零」，下次 OCR 重新冷建（连续识别卡死主因之一）。

@@ -40,8 +40,11 @@ enum AnimationGate {
     }
 
     /// 刷新缓存。应在 App 启动时及用户切换「动画效果」设置后调用。
+    /// 未注册默认值时按启用处理（审计 H12：bool(forKey:) 对未注册键返回 false，
+    /// 启动早期 refresh 会误关全部动画）。
     static func refresh() {
-        _enabled = UserDefaults.standard.bool(forKey: "animations_enabled")
+        let raw = UserDefaults.standard.object(forKey: "animations_enabled")
+        _enabled = raw == nil ? true : UserDefaults.standard.bool(forKey: "animations_enabled")
     }
 
     /// Programmatically enable/disable animations and persist.

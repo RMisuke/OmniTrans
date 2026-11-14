@@ -111,15 +111,16 @@ final class AppState: ObservableObject {
         ])
 
         // ── Hotkey first-launch defaults ──
-        if UserDefaults.standard.integer(forKey: "hotkey_carbonKey") == 0 {
+        // 按存在性判断首次启动（keyCode 0 = A 键是合法值，审计 H8）
+        if UserDefaults.standard.object(forKey: "hotkey_carbonKey") == nil {
             UserDefaults.standard.set(Int(kVK_ANSI_D), forKey: "hotkey_carbonKey")
             UserDefaults.standard.set(Int(optionKey), forKey: "hotkey_carbonMods")
         }
-        if UserDefaults.standard.integer(forKey: "ocr_hotkey_carbonKey") == 0 {
+        if UserDefaults.standard.object(forKey: "ocr_hotkey_carbonKey") == nil {
             UserDefaults.standard.set(Int(kVK_ANSI_F), forKey: "ocr_hotkey_carbonKey")
             UserDefaults.standard.set(Int(optionKey), forKey: "ocr_hotkey_carbonMods")
         }
-        if UserDefaults.standard.integer(forKey: "replace_hotkey_carbonKey") == 0 {
+        if UserDefaults.standard.object(forKey: "replace_hotkey_carbonKey") == nil {
             UserDefaults.standard.set(Int(kVK_ANSI_R), forKey: "replace_hotkey_carbonKey")
             UserDefaults.standard.set(Int(optionKey), forKey: "replace_hotkey_carbonMods")
         }

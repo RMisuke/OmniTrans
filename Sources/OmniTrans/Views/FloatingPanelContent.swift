@@ -1043,6 +1043,8 @@ struct FloatingPanelContent: View {
         } else {
             return
         }
+        // 抑制自身写入，避免剪贴板监控把拷贝结果当作新划词再翻译（审计 M9）
+        ClipboardMonitor.shared.suppressNext = true
         NSPasteboard.general.clearContents()
         NSPasteboard.general.declareTypes([.string], owner: nil)
         NSPasteboard.general.setString(text, forType: .string)
