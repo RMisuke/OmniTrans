@@ -1,6 +1,10 @@
 # OmniTrans 系统架构文档
 
-> 版本: v0.9 | 平台: macOS 14+ | 语言: Swift 5.9 (StrictConcurrency)
+> 版本: 0.7.0 | 平台: macOS 15+ | 语言: Swift 6.4 工具链（Swift 5 模式 + StrictConcurrency）
+>
+> ⚠️ 2026-11 审计更新：下方组件清单已对齐 0.7.0 实际代码；第 3 节及以后的详细架构
+> 描述基于 v0.9 工作区插件体系（已移除），仅作历史参考，待重写。
+> 最新审计见 [audit-2026-11.md](audit-2026-11.md)。
 
 ---
 
@@ -47,32 +51,37 @@ Sources/OmniTrans/
 │   ├── WindowManager.swift             # 窗口生命周期管理
 │   ├── FloatingPanel.swift             # 浮动翻译面板
 │   ├── OmniPanel.swift                 # 基础面板类
-│   ├── SettingsPanel.swift             # 设置面板
+│   ├── SettingsWindowManager.swift     # 设置窗口管理
 │   ├── ProviderStorageManager.swift    # 供应商配置持久化
 │   └── APITestService.swift            # API 连通性测试
+├── OCR/
+│   ├── OCRCapturePipeline.swift        # 捕获→预处理→识别→组装编排
+│   ├── Capture/ScreenRegionCapturing.swift  # SCStream 单帧零拷贝捕获
+│   ├── Recognition/RacingLanguageStrategy.swift  # 双轨竞速识别
+│   ├── Recognition/VisionTextRecognizer.swift    # Vision 新 Swift API
+│   ├── Assembly/OCRResultAssembler.swift # 纯函数结果组装
+│   ├── Preprocess/ImagePreprocessor.swift # 面积预算降采样
+│   ├── ANEWarmup.swift / OCRWarmupState.swift    # ANE 预热与状态
+│   └── OCRInferenceGate.swift / OCRConcurrency.swift  # 闸门/熔断/弃管超时
 ├── Views/
-│   ├── FloatingTranslationView.swift   # 浮动面板工作区根视图
-│   ├── WorkspaceRuntime.swift          # 插件运行时（v0.8）
-│   ├── WorkspacePlugins.swift          # 翻译/查词/历史插件
-│   ├── WorkspaceFramework.swift        # 工作区协议定义
-│   ├── WorkspaceComponents.swift       # 共享 UI 组件
-│   ├── ContentView.swift               # 设置内容
-│   ├── SettingsView.swift              # 设置视图
-│   ├── TranslationView.swift           # 翻译结果视图
-│   ├── StreamingTextView.swift         # 流式文本渲染
-│   ├── DictionaryCardView.swift        # AI 词典卡片
-│   ├── NativeDictionaryView.swift      # 原生词典视图
+│   ├── FloatingPanelContent.swift      # 浮动面板根视图
+│   ├── FloatingPanel+Layout.swift      # 面板布局常量
+│   ├── SettingsPanelContent.swift      # 设置面板（Tab 容器）
+│   ├── Settings/                       # General/Translation/About Tab
+│   ├── ProviderSettingsView.swift      # 供应商配置
 │   ├── OnboardingView.swift            # 首次引导
-│   ├── SkeletonShimmerView.swift       # 骨架屏
-│   ├── AdaptiveGlassBackground.swift   # 玻璃背景
-│   └── Components/                     # 可复用子组件
+│   └── Components/OTPrimitives.swift   # 可复用子组件
 └── Utils/
-    ├── AppTheme.swift                   # 主题常量
-    ├── AppTheme+Motion.swift            # 动画常量
-    ├── AnimationGate.swift              # 动画门控
-    ├── KeychainManager.swift            # Keychain 安全存储
-    └── MemoryPurgeHelper.swift          # 内存压力管理
+    ├── AppTheme.swift / AppTheme+Motion.swift  # 主题与动效常量
+    ├── AnimationGate.swift / AnimationSystem.swift / ThemeEngine.swift
+    ├── KeychainManager.swift           # Keychain 优先 + AES-GCM 文件回退
+    ├── StoragePaths.swift              # 持久化路径单一来源
+    ├── TranslationCaches.swift         # 翻译/词典缓存
+    └── MemoryPurgeHelper.swift         # 内存压力管理
 ```
+
+> 另有独立 target `Sources/DisplayGeometry/`：多屏坐标换算纯函数库（AppKit↔CG、
+> display-local sourceRect、Vision normalized 映射），配 12 个单元测试。
 
 ---
 

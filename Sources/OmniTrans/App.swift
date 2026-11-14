@@ -1,5 +1,4 @@
 import SwiftUI
-import SwiftUI
 import AppKit
 import Carbon
 import ScreenCaptureKit
@@ -749,11 +748,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func cancelParsingWatchdog() {
         ocrParsingWatchdog?.cancel()
         ocrParsingWatchdog = nil
-    }
-
-    /// 复位 OCR 状态（回到空闲）。
-    private func clearOCRStatus() {
-        setOCRStatus(.idle)
     }
 
     /// 显示 OCR 状态 popover（`.applicationDefined`：不因点击外部/失焦自动关闭）。

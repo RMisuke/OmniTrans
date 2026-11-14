@@ -4,17 +4,18 @@ import Foundation
 /// Eliminates redundant network probes when translations happen in quick
 /// succession (e.g. rapid hotkey invocations). (P5)
 private actor ProbeCache {
-    private var primaryResult: (alive: Bool, expiresAt: Date)?
+    // 按 provider 键控（审计 L4：单槽缓存会在 30s 内把 A 的探测结果复用给 B）
+    private var primaryResults: [UUID: (alive: Bool, expiresAt: Date)] = [:]
     private var ollamaResult: (alive: Bool, expiresAt: Date)?
 
-    func getPrimary() -> Bool? {
-        guard let r = primaryResult, r.expiresAt > Date() else { return nil }
+    func getPrimary(_ id: UUID) -> Bool? {
+        guard let r = primaryResults[id], r.expiresAt > Date() else { return nil }
         return r.alive
     }
-    func setPrimary(_ alive: Bool) {
-        primaryResult = (alive, Date().addingTimeInterval(NetworkConfig.probeCacheTTL))
+    func setPrimary(_ alive: Bool, for id: UUID) {
+        primaryResults[id] = (alive, Date().addingTimeInterval(NetworkConfig.probeCacheTTL))
     }
-    func invalidatePrimary() { primaryResult = nil }
+    func invalidatePrimary() { primaryResults.removeAll() }
 
     func getOllama() -> Bool? {
         guard let r = ollamaResult, r.expiresAt > Date() else { return nil }
@@ -92,14 +93,14 @@ enum FallbackRouter {
               let url = URL(string: provider.baseURL)
         else { return false }
         // Check cache first
-        if let cached = await probeCache.getPrimary() { return cached }
+        if let cached = await probeCache.getPrimary(provider.id) { return cached }
         var req = URLRequest(url: url)
         req.httpMethod = "HEAD"
         req.timeoutInterval = NetworkConfig.probeTimeout
         do {
             let (_, resp) = try await sharedURLSession.data(for: req)
             let alive = ((resp as? HTTPURLResponse)?.statusCode ?? 0) < 500
-            await probeCache.setPrimary(alive)
+            await probeCache.setPrimary(alive, for: provider.id)
             return alive
         } catch {
             return false

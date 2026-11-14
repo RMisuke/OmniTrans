@@ -7,7 +7,7 @@
 #   2. 统一部署目标（MACOSX_DEPLOYMENT_TARGET，与 Package.swift platforms 一致）
 #   3. 解析 SwiftPM release 产物路径（兼容 Xcode 27/Swift 6.4 等新旧布局）
 #   4. 封装统一 Swift 构建命令（始终走 xcrun + DEVELOPER_DIR）
-#   5. 生成最小 Info.plist（含阿里云 ATS 例外）
+#   5. 生成最小 Info.plist
 #   6. 组装 .app（拷贝二进制、strip、图标、Hardened Runtime 签名、去 quarantine）
 #
 # 被 source 后立即执行 omni_select_developer_dir。
@@ -89,7 +89,9 @@ omni_swift_build_release() {
         "$@"
 }
 
-# ── 6. 最小 Info.plist（含阿里云 ATS 例外）──
+# ── 6. 最小 Info.plist ──
+# 审计 R3：移除阿里云 ATS 明文例外 —— 远端端点全 https（http 仅本地 Ollama，
+# 不受 ATS 约束），例外无实际用途且扩大攻击面。
 omni_make_info_plist() {
     local app_dir="$1" bundle_id="$2" version="${3:-0.7.0}"
     local minos="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
@@ -108,18 +110,6 @@ omni_make_info_plist() {
     <key>CFBundleIconFile</key><string>icon.icns</string>
     <key>CFBundleIconName</key><string>icon</string>
     <key>LSUIElement</key><true/>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSExceptionDomains</key>
-        <dict>
-            <key>mt.cn-hangzhou.aliyuncs.com</key>
-            <dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/><key>NSIncludesSubdomains</key><true/></dict>
-            <key>mt.aliyuncs.com</key>
-            <dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/><key>NSIncludesSubdomains</key><true/></dict>
-            <key>aliyuncs.com</key>
-            <dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/><key>NSIncludesSubdomains</key><true/></dict>
-        </dict>
-    </dict>
 </dict></plist>
 PLIST
 }

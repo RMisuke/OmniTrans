@@ -48,12 +48,6 @@ private nonisolated(unsafe) let translateStrategies: [any TextCaptureStrategy] =
     AXCaptureStrategy()
 ]
 
-private nonisolated(unsafe) let ocrStrategies: [any TextCaptureStrategy] = [
-    ClipboardCaptureStrategy(),
-    AXCaptureStrategy(),
-    ScreenCaptureOCRCaptureStrategy()
-]
-
 /// 划词取词: CGEvent 模拟 Cmd+C (需辅助功能权限) → AX fallback
 ///
 /// Swift 6 严格并发: 整个管理器隔离在 `@MainActor` 上。
@@ -346,14 +340,6 @@ final class HotkeyManager {
     /// Alias for translate hotkey callback — identical to capture()
     nonisolated func captureWithoutOCR() -> String? {
         return capture()
-    }
-
-    /// Full capture with OCR fallback (used by OCR hotkey and internally)
-    nonisolated func captureWithOCR() -> String? {
-        for strategy in ocrStrategies {
-            if let text = strategy.tryCapture() { return text }
-        }
-        return nil
     }
 }
 

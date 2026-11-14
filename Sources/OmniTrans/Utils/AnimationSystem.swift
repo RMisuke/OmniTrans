@@ -247,35 +247,6 @@ extension View {
     }
 }
 
-// MARK: - Frame Tracker
-
-actor FrameTracker {
-    static let shared = FrameTracker()
-
-    private var frameDurations: [CFTimeInterval] = []
-    private let maxSamples = 60
-
-    var currentFPS: Int {
-        guard !frameDurations.isEmpty else { return 60 }
-        let avg = frameDurations.reduce(0, +) / Double(frameDurations.count)
-        guard avg > 0 else { return 60 }
-        return Int(1.0 / avg)
-    }
-
-    var isThrottling: Bool { currentFPS < 45 }
-
-    func reportFrame(duration: CFTimeInterval) {
-        frameDurations.append(duration)
-        if frameDurations.count > maxSamples {
-            frameDurations.removeFirst(frameDurations.count - maxSamples)
-        }
-    }
-
-    func adaptiveScale() -> DurationScale {
-        isThrottling ? .fast : AnimationEngine.durationScale
-    }
-}
-
 // MARK: - Stagger Engine
 
 struct StaggerConfig: Sendable {

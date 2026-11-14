@@ -36,17 +36,21 @@ OmniTrans 是一款运行在 macOS 菜单栏的 AI 翻译应用，支持快捷�
 ```
 OmniTrans/
 ├── Package.swift
-├── build-arm.sh / build-intel.sh / build.sh
-├── doc/v0.5/            ← 架构文档
+├── build.sh                  ← Universal 构建（arm64 + x86_64）
+├── scripts/                  ← 共享构建环境
+├── docs/                     ← 架构与审计文档
 ├── Resource/icon/
-└── Sources/OmniTrans/
-    ├── App.swift
-    ├── Models/           ← APIProvider, AppState, DictionaryEntry, Stores, TranslationConfig...
-    ├── Services/         ← TranslationActor, TranslationPipeline, NativeDictionaryParser,
-    │                       OCRSelectionOverlay, CaptureService, HotkeyManager, HistoryActor...
-    ├── Utils/            ← AppTheme, AnimationGate, KeychainManager, MemoryPurgeHelper
-    └── Views/            ← TranslationView, FloatingTranslationView, SettingsView,
-                            NativeDictionaryView, ContentView, Components...
+└── Sources/
+    ├── DisplayGeometry/      ← 多屏坐标换算纯函数库（独立 target）
+    └── OmniTrans/
+        ├── App.swift
+        ├── Models/           ← APIProvider, AppState, Stores, DictionaryEntry...
+        ├── OCR/              ← 捕获/预处理/竞速识别/组装/预热/闸门
+        ├── Services/         ← TranslationActor, SystemTranslationEngine,
+        │                       FloatingPanel, HotkeyManager, HistoryActor...
+        ├── Utils/            ← AppTheme, AnimationGate, KeychainManager...
+        └── Views/            ← FloatingPanelContent, SettingsPanelContent,
+                                OnboardingView, Components...
 ```
 
 ---
@@ -63,17 +67,17 @@ OmniTrans/
 ```bash
 git clone https://github.com/RMisuke/OmniTrans.git
 cd OmniTrans
-bash build-arm.sh
+bash build.sh
 ```
 
-构建产物：`.build/OmniTrans-arm64.app`
+构建产物：`.build/OmniTrans.app`（universal: arm64 + x86_64）
 
 > **注意**: 构建需要 Xcode-beta.app 或 Xcode.app 完整安装，不支持仅安装 Command Line Tools 的环境。
 
 ### 运行
 
 ```bash
-open .build/OmniTrans-arm64.app
+open .build/OmniTrans.app
 ```
 
 首次启动弹出引导窗口，按提示授予辅助功能和屏幕录制权限。
@@ -131,8 +135,8 @@ swift build -Xswiftc -strict-concurrency=complete
 # Release
 swift build -c release
 
-# 打包
-bash build-arm.sh
+# 打包（universal + 签名）
+bash build.sh
 ```
 
 ---

@@ -73,12 +73,6 @@ public enum DisplayGeometry {
 
     // MARK: - AppKit 全局 ↔ CG 全局
 
-    /// AppKit 全局坐标系（bottom-left）的顶边 = 所有屏幕 `frame.maxY` 的最大值。
-    /// 这是把 AppKit 全局坐标翻转为 CG 全局坐标（top-left）的基准。
-    public static func appKitGlobalTop(screens: [NSScreen] = NSScreen.screens) -> CGFloat {
-        screens.map { $0.frame.maxY }.max() ?? 0
-    }
-
     /// AppKit 全局点 → CG 全局点（X 不变，Y 翻转）。
     /// 纯函数：`globalTop` 显式传入，便于单元测试模拟任意布局。
     public static func cgPoint(fromAppKit p: CGPoint, globalTop top: CGFloat) -> CGPoint {

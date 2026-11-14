@@ -195,3 +195,15 @@ build 有大量 Swift 6 严格并发 warning，现为 0 error / 0 warning，`swi
 **验证**：`swift build`（clean）0 error / 0 warning；`swift test` 16/16 passed
 （OmniTransTests 4 + DisplayGeometryTests 12）。集成验证需真机 ⌥F：框选结束即现「解析中…」、
 弹窗无空白帧、快速连续触发无重复弹窗/结果串台。
+
+## 2026-11 全项目审计修复（0.7.0）
+
+依据 docs/audit-2026-11.md + plans/fix-plan-2026-11.md，分支 fix/audit-2026-11：
+
+- **S1** ⌥R：changeCount 消费检测前提错误（粘贴读取不增计数）→ 写入后基线 + 0.5s 宽限期 + 第三方写入保护
+- **S2** OCR 首帧：OnceGate 取消竞态死锁 → continuation 槽 + 早到结果暂存 + 存入后查取消；停流改 OnceGate 竞速真超时；acquired 标志防误释放
+- **S3** Keychain 迁移：defer 覆盖重试标记 → 显式标记 + batchReadAll 合并回读
+- **H1-H12**：降级深度上限 + CancellationError 短路；火山 TextList JSONSerialization；关闭键统一 dismiss_mode；热键 0 哨兵改存在性判断；录制 monitor 生命周期；PasteboardSnapshot 全保真；AX 选区记录/恢复；AnimationGate 未注册键按启用；窗口 hide/show 代际；抑制计数器；防抖 providerID 快照；注册状态日志 + 引导页权限实时刷新
+- **M 系列**：签名 URL 脱敏、TTS utterance 身份守卫、SSE onTermination、语言包仅 installed 缓存、耗时公式补整秒、busy 上抛、预热 markFailed、原子写、MainActor hop、UserDefaults 观察者
+- 死代码清除约 12 处；ATS 阿里云例外移除（远端全 https）；版本统一 0.7.0
+- 测试 49 → 58+ 例；Debug/Release 0 error / 0 warning

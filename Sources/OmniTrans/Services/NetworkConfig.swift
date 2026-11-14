@@ -23,8 +23,6 @@ enum NetworkConfig {
     static let maxConnectionsPerHost = 10
     /// Whether to wait for connectivity instead of failing immediately (P1)
     static let waitsForConnectivity = true
-    /// Timeout for the initial TCP/TLS connection phase
-    static let connectTimeout: TimeInterval = 8
 
     // MARK: Per-operation timeouts
     /// AI streaming (SSE) — OpenAI / Anthropic / Gemini

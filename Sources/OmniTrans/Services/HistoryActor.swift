@@ -109,16 +109,6 @@ actor HistoryActor {
         scheduleFlush()
     }
 
-    /// Load cached entries (memory-only).  If the cache was purged by memory
-    /// pressure, triggers a streaming reload from JSONL.
-    func entries() -> [HistoryEntry] {
-        if isDirty {
-            pending = loadFromArchive(limit: 200)
-            isDirty = false
-        }
-        return pending
-    }
-
     /// Load from persistent storage, overwriting in-memory buffer.
     /// Respects `maxHistoryCount` to cap the number of entries loaded.
     func loadFromDisk() {

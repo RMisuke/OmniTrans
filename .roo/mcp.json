@@ -15,7 +15,7 @@
       "args": [
         "mcp-server-git",
         "--repository",
-        "'/Users/chensinuo/Codex/AI Translater'"
+        "'/Volumes/APPLE 1TB/Code/AI Translater'"
       ]
     },
     "filesystem": {
@@ -23,7 +23,7 @@
       "args": [
         "-y",
         "@modelcontextprotocol/server-filesystem",
-        "/Users/chensinuo/Codex/AI Translater"
+        "/Volumes/APPLE 1TB/Code/AI Translater"
       ]
     }
   }

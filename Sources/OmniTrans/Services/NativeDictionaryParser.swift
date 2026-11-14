@@ -120,9 +120,6 @@ enum NativeDictionaryParser {
             flushCurrentSense(into: &definitions, pos: currentPOS, posLabel: currentPOSLabel, number: currentSenseNumber, labels: currentLabels, meaning: &currentMeaning)
         }
 
-        // ── Attach examples to their corresponding definitions ──
-        attachExamples(&definitions, &examples)
-
         // ── Validate ──
         guard !definitions.isEmpty else {
             os_log(.error, log: nativeDictLog, "No definitions extracted for '%{public}@'", word)
@@ -200,10 +197,6 @@ enum NativeDictionaryParser {
     }
 
     // MARK: - POS Detection
-
-    private static let posRegex = try! NSRegularExpression(
-        pattern: #"^[A-Z][a-z]+(?:\s+[a-z]+)?$"#
-    )
 
     private static let knownPOSLabels: Set<String> = [
         "noun", "verb", "adjective", "adverb", "pronoun", "preposition",
@@ -366,18 +359,6 @@ enum NativeDictionaryParser {
     }
 
     // MARK: - Example Attachment
-
-    /// Heuristic: attach each example to the most recent definition (same POS
-    /// block), or leave as top-level if no definition exists.
-    private static func attachExamples(
-        _ definitions: inout [DictionaryEntry.Definition],
-        _ examples: inout [DictionaryEntry.Example]
-    ) {
-        guard !examples.isEmpty, !definitions.isEmpty else { return }
-        // Simple strategy: attach all examples to the last definition
-        // (refinement would require tracking example positions relative to senses)
-        // We leave examples top-level for simplicity; views can render them.
-    }
 
     // MARK: - Normalizers
 

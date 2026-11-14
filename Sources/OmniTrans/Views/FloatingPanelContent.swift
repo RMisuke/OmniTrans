@@ -301,6 +301,10 @@ struct FloatingPanelContent: View {
         .onChange(of: session.inputText) { _, _ in
             scheduleHeightUpdate()
         }
+        // 动态模式重显时由 FloatingWindowManager 触发高度重算（审计 L8：通知此前无接收方）
+        .onReceive(NotificationCenter.default.publisher(for: .floatingPanelNeedsHeightUpdate)) { _ in
+            scheduleHeightUpdate()
+        }
         .onChange(of: panelSize) { _, newValue in
             if newValue == "dynamic" {
                 scheduleHeightUpdate()
@@ -1017,12 +1021,16 @@ struct FloatingPanelContent: View {
 
     // MARK: - Helpers
 
-    private func formattedTime(_ date: Date) -> String {
+    private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy/M/d HH:mm"
         f.locale = Locale.current
         f.timeZone = TimeZone.current
-        return f.string(from: date)
+        return f
+    }()
+
+    private func formattedTime(_ date: Date) -> String {
+        Self.timeFormatter.string(from: date)
     }
 
     // MARK: - Actions

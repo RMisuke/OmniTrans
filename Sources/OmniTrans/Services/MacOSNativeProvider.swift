@@ -51,19 +51,4 @@ enum MacOSNativeProvider {
             return fallback
         }.value
     }
-
-    private static func stripHTML(_ raw: String) -> String {
-        guard let data = raw.data(using: .utf8) else { return raw }
-        if let attr = try? NSAttributedString(data: data,
-            options: [.documentType: NSAttributedString.DocumentType.html,
-                      .characterEncoding: String.Encoding.utf8.rawValue],
-            documentAttributes: nil) {
-            return attr.string
-        }
-        return raw
-            .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "&", with: "&")
-            .replacingOccurrences(of: "<",  with: "<")
-            .replacingOccurrences(of: ">",  with: ">")
-    }
 }

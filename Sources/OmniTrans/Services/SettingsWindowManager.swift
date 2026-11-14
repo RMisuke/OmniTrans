@@ -124,31 +124,6 @@ final class SettingsWindowManager {
         }
     }
 
-    /// 驱动窗口尺寸自适应——当 SwiftUI 内容变化时，
-    /// 通过 `intrinsicContentSize` 相应调整 NSWindow frame。
-    func updateWindowSize(animated: Bool = true) {
-        guard let w = window, let hosting = hostingView else { return }
-        // 强制重新计算 intrinsic size
-        hosting.invalidateIntrinsicContentSize()
-        let ideal = hosting.intrinsicContentSize
-        guard ideal.width > 0, ideal.height > 0 else { return }
-
-        let newFrame = NSRect(
-            x: w.frame.midX - ideal.width / 2,
-            y: w.frame.midY - ideal.height / 2,
-            width: max(config.width, ideal.width),
-            height: max(config.height, ideal.height)
-        )
-
-        if animated, AnimationGate.isEnabled, !AnimationEngine.isReducedMotion {
-            AnimationEngine.animateAppKit(AppTheme.Motion.panelOpen) {
-                w.setFrame(newFrame, display: true)
-            }
-        } else {
-            w.setFrame(newFrame, display: true)
-        }
-    }
-
     // MARK: - 入场动画
 
     private func applyEntranceAnimation(to window: NSWindow) {

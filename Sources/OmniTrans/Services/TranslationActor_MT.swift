@@ -60,19 +60,8 @@ extension String {
         return result
     }
 
-    /// Extracts content between `<tag>` and `</tag>` from XML.
-    /// Uses simple string scanning — suitable for known, simple XML shapes.
-    /// Prefer `xmlTagValue(_:)` for production paths where XML structure may vary.
-    func extractXMLTag(_ tag: String) -> String? {
-        guard let start = range(of: "<\(tag)>"),
-              let end = range(of: "</\(tag)>")
-        else { return nil }
-        return String(self[start.upperBound..<end.lowerBound])
-    }
-
     /// Robust XML tag value extraction via `XMLDocument` + XPath. (M6)
-    /// Handles namespaces, attributes, extra whitespace, and self-closing tags
-    /// that `extractXMLTag` cannot parse.
+    /// Handles namespaces, attributes, extra whitespace, and self-closing tags.
     func xmlTagValue(_ tag: String) -> String? {
         guard let data = self.data(using: .utf8) else { return nil }
         // Suppress XML parser warnings (e.g. DTD loading)

@@ -415,13 +415,6 @@ extension View {
             )
         )
     }
-
-    // MARK: ── Shake (Error Feedback) ──
-
-    /// 水平抖动效果 — 用于表单验证错误。
-    func shakeEffect(_ trigger: Bool) -> some View {
-        self.modifier(ShakeEffect(trigger: trigger))
-    }
 }
 
 // MARK: - Pressable Button Style
@@ -436,26 +429,3 @@ struct PressableButtonStyle: ButtonStyle {
             .animation(AppTheme.Motion.buttonPress.resolveGated(), value: configuration.isPressed)
     }
 }
-
-// MARK: - Shake Effect Modifier
-
-/// Horizontal shake modifier for error feedback.
-///
-/// Animates `x` offset in a damped oscillation pattern.
-struct ShakeEffect: ViewModifier {
-    let trigger: Bool
-    @State private var shakeCount: CGFloat = 0
-
-    func body(content: Content) -> some View {
-        content
-            .offset(x: trigger ? sin(shakeCount * .pi * 2) * 4 : 0)
-            .onChange(of: trigger) { _, newValue in
-                guard newValue else { return }
-                shakeCount = 0
-                withAnimation(AppTheme.Motion.fieldError.resolveGated()) {
-                    shakeCount = 1.5
-                }
-            }
-    }
-}
-
