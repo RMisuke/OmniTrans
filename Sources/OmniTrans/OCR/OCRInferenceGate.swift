@@ -34,7 +34,7 @@ final class OCRInferenceGate: Sendable {
     private let lock: OSAllocatedUnfairLock<State>
     private let maxQueueWait: Duration
 
-    init(permits: Int = 2, maxQueueWait: Duration = .seconds(2)) {
+    init(permits: Int = 2, maxQueueWait: Duration = .seconds(5)) {
         self.lock = OSAllocatedUnfairLock(initialState: State(permits: max(1, permits)))
         self.maxQueueWait = maxQueueWait
     }
@@ -115,7 +115,7 @@ actor OCRInferenceBreaker {
     private var consecutiveTimeouts = 0
     private var cooldownUntil: ContinuousClock.Instant?
 
-    init(tripThreshold: Int = 2, cooldown: Duration = .seconds(10)) {
+    init(tripThreshold: Int = 3, cooldown: Duration = .seconds(8)) {
         self.tripThreshold = tripThreshold
         self.cooldown = cooldown
     }

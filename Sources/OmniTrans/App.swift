@@ -2,6 +2,8 @@ import SwiftUI
 import SwiftUI
 import AppKit
 import Carbon
+import ScreenCaptureKit
+import os
 import DisplayGeometry
 
 // MARK: - App Entry Point
@@ -51,6 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// OCR 状态提示 popover（`.applicationDefined`，不因点击外部/失焦自动关闭）。
     private var ocrStatusPopover: NSPopover?
     private var hotkeysDisabledItem: NSMenuItem?
+    /// OCR 权限弹窗防抖：5 分钟内不重复弹出。
+    private var lastPermissionAlertAt: ContinuousClock.Instant?
 
     // MARK: - Lifecycle
 
@@ -97,16 +101,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 guard let self else { return }
                 let msg: String
+                let needsSettingsButton: Bool
                 switch note.name.rawValue {
                 case "OmniTransOCRCaptureFailed":
-                    msg = "屏幕捕获失败，请在「系统设置 → 隐私与安全性 → 屏幕录制」中授权 OmniTrans"
+                    // 区分权限问题 vs 其他捕获错误
+                    if #available(macOS 15.0, *), !CGPreflightScreenCaptureAccess() {
+                        msg = "需要屏幕录制权限 — 请在系统设置中授权"
+                        needsSettingsButton = true
+                    } else {
+                        msg = "屏幕捕获失败，请稍后重试"
+                        needsSettingsButton = false
+                    }
                 case "OmniTransOCREngineBusy":
                     msg = "OCR 引擎繁忙，请稍后再试"
+                    needsSettingsButton = false
                 default:
                     msg = "所选区域未检测到文字，请重新框选"
+                    needsSettingsButton = false
                 }
                 MainActor.assumeIsolated {
-                    self.showStatusBarBubble(message: msg, duration: 3.0)
+                    if needsSettingsButton {
+                        // 权限问题 → 弹出可操作弹窗（含「打开系统设置」按钮）
+                        if let last = self.lastPermissionAlertAt,
+                           last.duration(to: .now) < .seconds(300) {
+                            // 已经弹过 → 只显示简短提示
+                            self.showStatusBarBubble(message: msg, duration: 3.0)
+                        } else {
+                            self.lastPermissionAlertAt = .now
+                            self.showPermissionDeniedAlert()
+                        }
+                    } else {
+                        self.showStatusBarBubble(message: msg, duration: 3.0)
+                    }
                 }
             }
         }
@@ -114,6 +140,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ── OCR permission denied — actionable alert with "Open Settings" button ──
         NotificationCenter.default.addObserver(forName: Notification.Name("OmniTransOCRPermissionDenied"), object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
+                // 防抖：5 分钟内不重复弹窗（连续 OCR 失败会反复触发）
+                if let last = self?.lastPermissionAlertAt,
+                   last.duration(to: .now) < .seconds(300) { return }
+                self?.lastPermissionAlertAt = .now
                 self?.showPermissionDeniedAlert()
             }
         }
@@ -135,12 +165,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         HotkeyManager.shared.onOCRHotkey = { [weak self] in
             let warmup = OCRWarmupState.shared
+            // 缓存过期时静默触发后台重新预热（不置 isWarmingUp，不阻塞框选）
+            warmup.ensureCacheValid()
             if warmup.isWarmingUp {
                 self?.showStatusBarBubble(message: "OCR 引擎预热中，请稍候…", duration: 3.0)
                 return
             }
             if warmup.warmupFailed {
-                // 预热失败 → 手动重试预热，而非触发 OCR
                 warmup.retryWarmup()
                 self?.showStatusBarBubble(message: "OCR 引擎重新预热中…", duration: 3.0)
                 return
@@ -176,6 +207,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 成本移出用户路径。详见 Sources/OmniTrans/OCR/ANEWarmup.swift。
         Task.detached(priority: .utility) {
             await OCRCapturePipeline.warmUpANE()
+        }
+
+        // ── macOS 原生翻译引擎预热 ──
+        // `LanguageAvailability.status()` 在冷启动时枚举语言包需 5-15 秒，
+        // 不预热会导致首次原生翻译超时失败。预热带重试机制确保缓存建立。
+        if #available(macOS 26.0, *) {
+            SystemTranslationEngine.warmUp()
         }
 
         setupStatusItem()
@@ -766,6 +804,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !warmup.isWarmingUp, !warmup.warmupFailed else {
             showStatusBarBubble(message: "OCR 引擎预热中，请稍候…", duration: 3.0)
             return
+        }
+        // 预检屏幕录制权限 —— 未授权时弹出系统授权对话框，不启动 OCR
+        if #available(macOS 15.0, *) {
+            if !CGPreflightScreenCaptureAccess() {
+                os_log(.info, log: OSLog(subsystem: AppLogging.subsystem, category: "OCR"),
+                       "Screen Recording access not preflighted — requesting")
+                CGRequestScreenCaptureAccess()
+                // 延迟 1s 后检查是否已授权（系统弹窗可能被快速点击）
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(1))
+                    if !CGPreflightScreenCaptureAccess() {
+                        self.showPermissionDeniedAlert()
+                    }
+                }
+                return
+            }
         }
         // 方案 A：框选开始即反馈，取词事件响应及时
         setOCRStatus(.selecting)

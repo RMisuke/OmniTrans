@@ -60,7 +60,7 @@ enum ANEWarmup {
     ///   - interval: 失败重试间隔。
     ///   - attemptDeadline: 单次尝试的超时（弃管语义）。
     static func run(recognizer: any TextRecognizing,
-                    maxAttempts: Int = 15,
+                    maxAttempts: Int = 10,
                     baseInterval: Duration = .seconds(3),
                     maxInterval: Duration = .seconds(10),
                     attemptDeadline: Duration = .seconds(20)) async {
@@ -73,6 +73,8 @@ enum ANEWarmup {
 
         // E5RT Code 13 连续计数器：连续 2+ 次 Code 13 → 清理缓存重试
         var consecutiveE5RT13 = 0
+        // E5 模型不可用计数器：连续 2+ 次 "Unable to find a valid E5" → 放弃 ANE，使用 CPU 模式
+        var consecutiveE5NotFound = 0
 
         for attempt in 1...max(1, maxAttempts) {
             // 报告预热进度（主线程更新 @Published）
@@ -81,6 +83,13 @@ enum ANEWarmup {
             }
 
             var failed: Error?
+            // 用户 OCR 排队等待中 → 预热立即让出，不竞争闸门。
+            // 检测方式：闸门队列中有等待者时暂停预热。
+            if OCRInferenceGate.shared.queuedCount > 0 {
+                os_log(.info, log: log, "Warmup yielding — user OCR queued")
+                try? await Task.sleep(for: .seconds(2))
+                continue
+            }
             // 预热也经全局推理闸门 —— 若用户识别正占用管线，本轮尝试按失败处理、
             // 按 interval 重试，避免与真实 OCR 抢 ANE。
             do {
@@ -103,6 +112,21 @@ enum ANEWarmup {
                 OCRInferenceGate.shared.release()
             }
             if let failed {
+                // 检测 E5 模型不可用（"Unable to find a valid E5"）
+                if Self.isE5ModelNotFound(failed) {
+                    consecutiveE5NotFound += 1
+                    if consecutiveE5NotFound >= 2 {
+                        os_log(.error, log: log,
+                               "ANE warmup: E5 Neural Engine models not available — OCR will use CPU-only Vision")
+                        // 不标记失败，标记完成（降级模式）
+                        await MainActor.run {
+                            OCRWarmupState.shared.markComplete()
+                        }
+                        return
+                    }
+                } else {
+                    consecutiveE5NotFound = 0
+                }
                 // 检测 E5RT Code 13（E5 bundle 资源缺失/损坏）
                 if Self.isE5RTCode13(failed) {
                     consecutiveE5RT13 += 1
@@ -140,6 +164,17 @@ enum ANEWarmup {
         await MainActor.run {
             OCRWarmupState.shared.markFailed()
         }
+    }
+
+    // MARK: - E5 模型检测
+
+    /// 检测 E5 Neural Engine 模型是否不可用（硬件不支持或模型未安装）。
+    /// 系统日志："Unable to find a valid E5 in provided path ... Found bundles : { }"
+    private static func isE5ModelNotFound(_ error: Error) -> Bool {
+        let desc = String(describing: error)
+        return desc.contains("Unable to find a valid E5")
+            || desc.contains("Found bundles : { }")
+            || (desc.contains("GetE5PathFromCompositeBundle") && !desc.contains("timeout"))
     }
 
     // MARK: - E5RT 缓存清理

@@ -31,6 +31,15 @@ final class OCRWarmupState {
     /// 最大尝试次数（与 `ANEWarmup` 默认值一致）。
     let maxAttempts: Int = 15
 
+    /// 上次预热成功完成的时间戳。用于 OCR 快捷键触发时判断缓存是否可能已失效。
+    /// 长时间未使用后 ANE 缓存可能被系统释放，需要重新预热。
+    private(set) var lastWarmupCompletedAt: Date?
+
+    /// ANE 缓存有效期（秒）。
+    /// 超过此时间后，OCR 快捷键触发时自动执行一次轻量重新预热，
+    /// 防止长时间未使用后首次 OCR 因缓存释放而失败。
+    static let cacheValidityDuration: TimeInterval = 300 // 5 分钟
+
     private init() {}
 
     /// 更新预热进度。每次预热尝试后由 `ANEWarmup.run()` 调用。
@@ -46,6 +55,7 @@ final class OCRWarmupState {
         warmupFailed = false
         progress = 1.0
         currentAttempt = maxAttempts
+        lastWarmupCompletedAt = Date()
         NotificationCenter.default.post(name: .ocrWarmupComplete, object: nil)
     }
 
@@ -68,6 +78,27 @@ final class OCRWarmupState {
         Task.detached(priority: .utility) {
             await OCRCapturePipeline.warmUpANE()
         }
+    }
+
+    /// 检查 ANE 缓存是否仍然有效。
+    /// OCR 快捷键触发时调用：若距上次成功预热超过 `cacheValidityDuration`，
+    /// 触发一次轻量后台重新预热，确保首次 OCR 不会因缓存释放而失败。
+    /// - Returns: `true` 如果缓存仍有效可直接使用 OCR；`false` 表示正在重新预热中。
+    @discardableResult
+    func ensureCacheValid() -> Bool {
+        // 正在预热中或预热失败 → 由 OCR 热键回调处理（显示提示/重试）
+        guard !isWarmingUp, !warmupFailed else { return isWarmingUp || warmupFailed }
+        // 缓存有效 → 直接放行
+        if let lastCompleted = lastWarmupCompletedAt,
+           Date().timeIntervalSince(lastCompleted) < Self.cacheValidityDuration {
+            return true
+        }
+        // 缓存可能已失效 → 静默后台重新预热。不置 isWarmingUp（避免阻塞 OCR 热键），
+        // 与用户推理的竞争由 OCRInferenceGate 串行化；完成后 markComplete 刷新时间戳。
+        Task.detached(priority: .utility) {
+            await OCRCapturePipeline.warmUpANE()
+        }
+        return false
     }
 }
 
