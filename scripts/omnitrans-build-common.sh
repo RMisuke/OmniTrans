@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# OmniTrans 共享构建环境（供 build.sh / build-arm.sh / build-intel.sh source）
+# OmniTrans 共享构建环境（供 build.sh source）
 #
 # 职责：
 #   1. 自动选择开发者目录（兼容 Xcode 路径变化 + Command Line Tools 环境）
@@ -8,9 +8,9 @@
 #   3. 解析 SwiftPM release 产物路径（兼容 Xcode 27/Swift 6.4 等新旧布局）
 #   4. 封装统一 Swift 构建命令（始终走 xcrun + DEVELOPER_DIR）
 #   5. 生成最小 Info.plist（含阿里云 ATS 例外）
-#   6. 组装 .app（拷贝二进制、strip、图标、签名、去 quarantine）
+#   6. 组装 .app（拷贝二进制、strip、图标、Hardened Runtime 签名、去 quarantine）
 #
-# 被 source 后立即执行 omni_select_developer_dir，使三个脚本行为一致。
+# 被 source 后立即执行 omni_select_developer_dir。
 # ============================================================================
 
 set -euo pipefail
@@ -91,7 +91,7 @@ omni_swift_build_release() {
 
 # ── 6. 最小 Info.plist（含阿里云 ATS 例外）──
 omni_make_info_plist() {
-    local app_dir="$1" bundle_id="$2" version="${3:-6.5}"
+    local app_dir="$1" bundle_id="$2" version="${3:-0.7.0}"
     local minos="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
     cat > "$app_dir/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -106,6 +106,7 @@ omni_make_info_plist() {
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>${minos}</string>
     <key>CFBundleIconFile</key><string>icon.icns</string>
+    <key>CFBundleIconName</key><string>icon</string>
     <key>LSUIElement</key><true/>
     <key>NSAppTransportSecurity</key>
     <dict>
@@ -124,15 +125,35 @@ PLIST
 }
 
 # ── 7. 组装 .app（保留原有目录结构与命名：Contents/MacOS/OmniTrans + Resources/icons）──
+#    签名策略：
+#      - --options runtime：启用 Hardened Runtime（macOS 公证强制要求）
+#      - --entitlements：加载 Resource/entitlements.plist（ANE/Translation 框架权限）
+#      - --sign -：ad-hoc 签名（本地开发/测试）；正式分发需替换为 Developer ID 证书
 omni_assemble_app() {
-    local bin="$1" app_dir="$2" bundle_id="$3" version="${4:-6.5}"
+    local bin="$1" app_dir="$2" bundle_id="$3" version="${4:-0.7.0}"
     mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
     cp "$bin" "$app_dir/Contents/MacOS/OmniTrans"
+
+    # ── 激进 strip ──
+    # -x: 移除所有非全局符号（比 -u 更激进）
+    # -S: 移除调试符号
+    # -u: 保留局部符号（已被 -x 覆盖，兼容保留）
+    strip -x -S "$app_dir/Contents/MacOS/OmniTrans" 2>/dev/null || \
     strip -u -r "$app_dir/Contents/MacOS/OmniTrans" 2>/dev/null || true
+
     cp "$OMNI_ROOT/Resource/icon/icon.icns" "$app_dir/Contents/Resources/icon.icns"
     cp "$OMNI_ROOT/Resource/icon/menubar.icns" "$app_dir/Contents/Resources/menubar.icns"
     omni_make_info_plist "$app_dir" "$bundle_id" "$version"
-    codesign --force --deep --sign - "$app_dir" 2>&1
+
+    # ── Hardened Runtime 签名 ──
+    # 单次签名整个 bundle，启用 Hardened Runtime + entitlements
+    local entitlements="$OMNI_ROOT/Resource/entitlements.plist"
+    local sign_args=(--force --deep --options runtime --sign -)
+    if [ -f "$entitlements" ]; then
+        sign_args+=(--entitlements "$entitlements")
+    fi
+    codesign "${sign_args[@]}" "$app_dir" 2>&1
+
     xattr -cr "$app_dir" 2>/dev/null || true
 }
 

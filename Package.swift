@@ -20,7 +20,8 @@ let package = Package(
             path: "Sources/OmniTrans",
             swiftSettings: [
                 // ── Release-only optimizations ──
-                .unsafeFlags(["-whole-module-optimization"], .when(configuration: .release)),
+                // CMO: 跨模块内联，无需 WMO 即可获得大部分优化收益
+                // 注意：SwiftPM release 默认已启用 -O，无需额外指定
                 .unsafeFlags(["-cross-module-optimization"], .when(configuration: .release)),
 
                 // ── Swift 6 strict concurrency ──
