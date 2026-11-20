@@ -11,6 +11,11 @@ protocol TextCaptureStrategy {
 // MARK: - Strategy 1: Simulated Cmd+C
 
 struct ClipboardCaptureStrategy: TextCaptureStrategy {
+    /// 轮询上限：Electron（Typora 等）异步写剪贴板，双击选词在 renderer
+    /// 异步建立选区，旧 90ms 窗口常不足；检测到变化即止，正常路径均摊延迟不变（P0-G3）。
+    private static let pollDeadline: TimeInterval = 0.3
+    private static let pollInterval: TimeInterval = 0.003
+
     func tryCapture() -> String? {
         guard AXIsProcessTrusted() else {
             #if DEBUG
@@ -20,9 +25,10 @@ struct ClipboardCaptureStrategy: TextCaptureStrategy {
             return nil
         }
         let pb = NSPasteboard.general
-        let initialCount = pb.changeCount
-        // 全保真备份（审计 H10）：图片/文件等所有类型一并恢复。
+        // 先做全保真备份（读取可能耗时几十 ms），再取计数快照 ——
+        // 收窄快照与 Cmd+C 之间的竞态窗口（P0-G3）。
         let snapshot = PasteboardSnapshot(pb)
+        let initialCount = pb.changeCount
         defer {
             // Restore clipboard if *any* change occurred — not just initialCount+1.
             // This handles the case where a third-party app also modifies the
@@ -30,20 +36,31 @@ struct ClipboardCaptureStrategy: TextCaptureStrategy {
             if pb.changeCount != initialCount {
                 snapshot.restore(to: pb)
             }
+            // 同步监控基线并回收未消费的抑制：恢复写入不再触发自动翻译，
+            // 无写入时也不残留抑制吞掉用户下次复制（P0-G3）。
+            ClipboardMonitor.shared.resyncAfterCapture()
         }
         let src = CGEventSource(stateID: .hidSystemState)
         guard let down = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true),
               let up   = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
         else { return nil }
+        // 抑制 Cmd+C 写入触发的监控自动翻译（与 fire 交错干扰）
+        ClipboardMonitor.shared.addSuppression(1)
         down.flags = .maskCommand; up.flags = .maskCommand
         down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
+
         var captured: String?
-        for _ in 0..<30 {
+        let deadline = Date().timeIntervalSince1970 + Self.pollDeadline
+        while Date().timeIntervalSince1970 < deadline {
             if pb.changeCount != initialCount {
                 captured = pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let c = captured, !c.isEmpty { break }
             }
-            Thread.sleep(forTimeInterval: 0.003)
+            Thread.sleep(forTimeInterval: Self.pollInterval)
+        }
+        // 超时但计数已变 → 迟到写入：恢复前再读一次，不丢词（P0-G3）。
+        if captured == nil, pb.changeCount != initialCount {
+            captured = pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return captured
     }
@@ -70,6 +87,9 @@ struct AXCaptureStrategy: TextCaptureStrategy {
         else { return nil }
         let app = appRef as! AXUIElement
         AXUIElementSetMessagingTimeout(app, kAXTimeout)
+        // Chromium/Electron（Typora/Cursor/VSCode）默认不暴露完整 AX 树，
+        // 设置 AXManualAccessibility 激活，使 AX 兜底真正可用（P0-G3）。
+        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         guard let elemRef = app.copyAttribute(kAXFocusedUIElementAttribute as CFString),
               CFGetTypeID(elemRef) == AXUIElementGetTypeID()
         else { return nil }

@@ -272,7 +272,8 @@ enum VolcengineSigner {
             ("Version", "2020-06-01"),
             ("SourceLanguage", "en"),
             ("TargetLanguage", "zh"),
-            ("TextList", "[hello]"),
+            // 合法 JSON 数组（H2 遗漏的测试分支：旧 "[hello]" 非法必错）
+            ("TextList", "[\"hello\"]"),
             ("SignatureMethod", "HMAC-SHA256"),
             ("SignatureNonce", nonce),
             ("SignatureVersion", "1.0"),
