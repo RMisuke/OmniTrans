@@ -18,7 +18,7 @@ enum MacOSNativeProvider {
     }
 
     static func lookupWord(_ word: String) async -> DictionaryEntry {
-        let key = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() as NSString
+        let key = word.trimmingCharacters(in: .whitespacesAndNewlines) as NSString
 
         if let box = cache.object(forKey: key) { return box.entry }
 
@@ -31,9 +31,9 @@ enum MacOSNativeProvider {
             else {
                 let missing = DictionaryEntry(isWord: false, word: word, phonetic: "",
                     phoneticVariants: nil,
-                    definitions: [.init(pos: "—", posLabel: nil, senseNumber: nil, labels: nil, meaning: "系统词典未收录该词")],
+                    definitions: [.init(pos: "—", posLabel: nil, senseNumber: nil, labels: nil, meaning: "系统词典未收录该词，可切换 AI 引擎查询")],
                     examples: [], inflections: [])
-                MacOSNativeProvider.cache.setObject(DictEntryBox(missing), forKey: key)
+                // 未收录不缓存：避免本会话内永不重查（P0-R2）
                 return missing
             }
 

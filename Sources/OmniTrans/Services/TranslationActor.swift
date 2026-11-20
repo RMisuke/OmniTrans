@@ -377,9 +377,12 @@ actor TranslationActor {
                 .init(role: "user", content: text)
             ],
             temperature: p.temperature,
-            maxTokens: p.maxTokens,
+            // 词典 JSON 输出需要更大预算，1024 截断是解析失败主因之一（P0-R1）
+            maxTokens: isDictionaryMode ? max(p.maxTokens, 2048) : p.maxTokens,
             stream: true,
-            responseFormat: (isDictionaryMode && p.kind == .openAICompat)
+            // 所有 OpenAI 系 provider 启用 JSON mode（旧实现仅 openAICompat，
+            // 其余靠 prompt 约束，输出非 JSON 即解析失败）（P0-R1）
+            responseFormat: (isDictionaryMode && (p.kind == .openAICompat || p.kind == .openAI))
                 ? .init(type: "json_object")
                 : nil
         )

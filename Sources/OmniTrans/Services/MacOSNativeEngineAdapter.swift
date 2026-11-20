@@ -20,16 +20,11 @@ struct MacOSNativeEngineAdapter: TranslationEngineProtocol {
             let task = Task {
                 if isDictionaryMode {
                     // ── Dictionary mode: local CoreServices lookup ──
+                    // 未收录不 throw：yield 摘要正常结束，由上层展示「未收录」词条。
+                    // 旧实现 throw 后 catch 排除 native → isTranslating 永真卡死（P0-R3）。
                     let entry = await MacOSNativeProvider.lookupWord(text)
-                    if entry.isWord {
-                        let summary = buildDictionarySummary(from: entry)
-                        continuation.yield(summary)
-                        continuation.finish()
-                    } else {
-                        continuation.finish(
-                            throwing: TranslationService.TranslationError.apiError("系统词典未收录该词")
-                        )
-                    }
+                    continuation.yield(buildDictionarySummary(from: entry))
+                    continuation.finish()
                 } else if #available(macOS 26.0, *) {
                     // ── Translation mode: macOS 26+ ANE engine ──
                     // 复用共享单例，避免每次请求重建 actor + LanguageAvailability

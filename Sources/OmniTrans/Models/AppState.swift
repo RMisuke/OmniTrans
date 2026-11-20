@@ -256,7 +256,15 @@ final class AppState: ObservableObject {
     func translate(context: CapturedContext? = nil, forceRefresh: Bool = false) {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        guard let p = selectedProvider, p.isEnabled else { errorMessage = "请先选择并配置一个可用的 API"; return }
+        guard let p = selectedProvider, p.isEnabled else {
+            // 纯原生词典查询不依赖云端 API 配置（P0-R4）
+            if WordDetector.isWord(text), enabledProviders.contains(where: { $0.kind == .macOSNative }) {
+                session.isFromLocalCache = false
+                doTranslate(text: text, provider: APIProvider.native, context: context, forceRefresh: forceRefresh)
+                return
+            }
+            errorMessage = "请先选择并配置一个可用的 API"; return
+        }
 
         // Reset local cache flags
         session.isFromLocalCache = false
@@ -284,6 +292,23 @@ final class AppState: ObservableObject {
         doTranslate(text: text, provider: p, context: context, forceRefresh: forceRefresh)
     }
 
+    /// 原生词典结果统一入口：赋值 UI + 仅收录词缓存 L1。
+    /// 未收录（isWord=false）也赋值——entry 携带「未收录」释义供 UI 展示；
+    /// 但不缓存，避免本会话内永不重查（P0-R2）。
+    @MainActor
+    private func storeNativeDictionaryEntry(_ entry: DictionaryEntry, text: String, langKey: String) {
+        dictionaryEntry = entry
+        guard entry.isWord else { return }
+        let dk = "\(text)_\(langKey)" as NSString
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let ts = f.string(from: Date())
+        dictEntryCache.set(entry, modelName: "macOS 词典", timestamp: ts, forKey: dk)
+        session.isFromLocalCache = true
+        session.cachedModelName = "macOS 词典"
+        session.cacheTimestamp = ts
+    }
+
     @MainActor
     private func doTranslate(text: String, provider: APIProvider, context: CapturedContext? = nil, forceRefresh: Bool = false, fallbackDepth: Int = 0) {
         activeStreamTask?.cancel()
@@ -299,9 +324,17 @@ final class AppState: ObservableObject {
             let isWord = WordDetector.isWord(text)
 
             let effectiveProvider: APIProvider
-            if isWord, let dictID = self.dictProviderID,
-               let dictProvider = self.enabledProviders.first(where: { $0.id == dictID }) {
-                effectiveProvider = dictProvider
+            if isWord {
+                if let dictID = self.dictProviderID,
+                   let dictProvider = self.enabledProviders.first(where: { $0.id == dictID }) {
+                    effectiveProvider = dictProvider
+                } else if let aiProvider = self.enabledProviders.first(where: { !$0.kind.isTraditionalMT }) {
+                    // 词典源失效（禁用/删除）→ 回落首个可用非 MT 引擎，
+                    // 而非 selectedProvider（可能是 MT，永不进词典模式）（P0-R4）
+                    effectiveProvider = aiProvider
+                } else {
+                    effectiveProvider = provider
+                }
             } else {
                 effectiveProvider = provider
             }
@@ -326,7 +359,7 @@ final class AppState: ObservableObject {
 
             // ── L1 内存缓存 (最快, 零 I/O) ──
             if isDict, !forceRefresh, cacheEnabled, !isContextActive {
-                let l1Key = "\(text.lowercased())_\(langKey)" as NSString
+                let l1Key = "\(text)_\(langKey)" as NSString
                 if let cachedEntry = dictEntryCache.get(l1Key) {
                     self.dictionaryEntry = cachedEntry
                     self.isDictionaryMode = true
@@ -357,7 +390,7 @@ final class AppState: ObservableObject {
                 if let cached = await LocalDictionaryRepository.shared.fetchEntry(word: text, targetLang: langKey),
                    let entry = DictionaryEntry.parse(from: cached.jsonData, word: text) {
                     // Warm L1 — 后续查询零 I/O 直接命中内存
-                    let l1Key = "\(text.lowercased())_\(langKey)" as NSString
+                    let l1Key = "\(text)_\(langKey)" as NSString
                     self.dictEntryCache.set(entry, modelName: cached.modelName, timestamp: cached.timestamp, forKey: l1Key)
                     // Populate UI
                     self.dictionaryEntry = entry
@@ -421,19 +454,7 @@ final class AppState: ObservableObject {
                 if isDict {
                     if effectiveProvider.kind == .macOSNative {
                         let entry = await MacOSNativeProvider.lookupWord(text)
-                        self.dictionaryEntry = entry
-                        if entry.isWord {
-                            // Native 结果仅存 L1 (本地查询无 token 消耗)
-                            let dk = "\(text.lowercased())_\(langKey)" as NSString
-                            let nativeModel = "macOS 词典"
-                            let nowNative = ISO8601DateFormatter()
-                            nowNative.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                            let tsNative = nowNative.string(from: Date())
-                            self.dictEntryCache.set(entry, modelName: nativeModel, timestamp: tsNative, forKey: dk)
-                            self.session.isFromLocalCache = true
-                            self.session.cachedModelName = nativeModel
-                            self.session.cacheTimestamp = tsNative
-                        }
+                        self.storeNativeDictionaryEntry(entry, text: text, langKey: langKey)
                     } else if let parser = dictParser,
                               let entry = await parser.flush() {
                         self.dictionaryEntry = entry
@@ -441,7 +462,7 @@ final class AppState: ObservableObject {
                         // ── Hard-lock: 菜单栏兜底渲染 ──
                         self.session.lastValidDictionaryJson = fullText
                         // ── L1 内存缓存 (上下文感知结果使用独立键) ──
-                        let dk = "\(text.lowercased())_\(langKey)\(ctxTag)" as NSString
+                        let dk = "\(text)_\(langKey)\(ctxTag)" as NSString
                         let aiModel = effectiveProvider.modelName
                         let nowAI = ISO8601DateFormatter()
                         nowAI.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -462,11 +483,18 @@ final class AppState: ObservableObject {
                             }
                         }
                     } else {
-                        self.dictionaryEntry = nil
+                        // AI 返回 200 但 JSON 解析失败（截断/非 JSON 输出）→
+                        // 视同失败，回退原生词典（P0-R1：旧实现置 nil 后走成功路径，永不回退）
+                        guard !Task.isCancelled else { return }
+                        let entry = await MacOSNativeProvider.lookupWord(text)
+                        self.storeNativeDictionaryEntry(entry, text: text, langKey: langKey)
                     }
                 } else {
                     self.dictionaryEntry = nil
                 }
+
+                // 成功路径同样检查取消：旧任务挂起恢复后不得覆盖新请求状态（P0-R5）
+                guard !Task.isCancelled else { return }
 
                 // ── End translation AFTER dictionaryEntry is set ──
                 // Must come after dictionaryEntry assignment so SwiftUI
@@ -488,14 +516,17 @@ final class AppState: ObservableObject {
                 if error is CancellationError || Task.isCancelled { return }
                 NetworkLogger.logError("Stream", error)
 
-                if isDict && effectiveProvider.kind != .macOSNative {
+                if isDict {
+                    // 词典请求失败 → 统一回退原生词典（含 native 源自身失败，
+                    // 旧实现排除 native 导致 catch 空转、isTranslating 永真卡死）（P0-R1/R3）
                     NetworkLogger.log("DictFallback", "switching to macOS native dictionary")
-                    // Try flushing partial results before fallback
                     if let parser = dictParser, let partial = await parser.flush() {
                         self.dictionaryEntry = partial
                     }
                     let entry = await MacOSNativeProvider.lookupWord(text)
-                    if entry.isWord { self.dictionaryEntry = entry }
+                    guard !Task.isCancelled else { return }
+                    // 未收录也赋值：entry 携带「未收录」释义，UI 可见而非空白（P0-R2）
+                    self.storeNativeDictionaryEntry(entry, text: text, langKey: langKey)
                     self.translatedText = ""
                     self.isTranslating = false
                     self.streamingFinished = true
@@ -503,17 +534,20 @@ final class AppState: ObservableObject {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
                         self?.showSuccessPulse = false
                     }
+                    self.addHistory(text: text, result: chunks.joined(), provider: effectiveProvider)
+                    self.isDictionaryMode = false
                     return
                 }
 
-                let fallbackOn = UserDefaults.standard.bool(forKey: "fallback_on_failure")
+                // 回退默认启用（P0-R3：fallback_on_failure 全仓库无写入点恒 false，
+                // 等价于功能不存在；深度上限已由 H1 保护）
                 let errStr = error.localizedDescription.lowercased()
                 let isAuthError = errStr.contains("401") || errStr.contains("403") || errStr.contains("unauthorized") || errStr.contains("invalid api key") || errStr.contains("key 无效")
 
-                NetworkLogger.log("Fallback", "fallbackOn=\(fallbackOn) isAuth=\(isAuthError) error=\(error.localizedDescription.prefix(80))")
+                NetworkLogger.log("Fallback", "isAuth=\(isAuthError) error=\(error.localizedDescription.prefix(80))")
 
                 // 深度上限：每个 provider 至多尝试一次，防止全失败时取模回绕无限递归（审计 H1）
-                if fallbackOn, !isAuthError, fallbackDepth < self.enabledProviders.count,
+                if !isAuthError, fallbackDepth < self.enabledProviders.count,
                    let next = Self.nextFallbackProvider(after: effectiveProvider, in: self.enabledProviders) {
                     NetworkLogger.log("Fallback", "switching \(effectiveProvider.name) → \(next.name)")
                     self.selectedProviderID = next.id

@@ -81,7 +81,7 @@ actor LocalDictionaryRepository {
     /// Fetches a cached entry. Returns `nil` on cache miss.
     func fetchEntry(word: String, targetLang: String) -> CachedDictEntry? {
         guard let db else { return nil }
-        let key = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let key = word.trimmingCharacters(in: .whitespacesAndNewlines)
         let sql = "SELECT model_name, json_data, updated_at FROM custom_dictionary WHERE query_word = ? AND target_lang = ?"
 
         var stmt: OpaquePointer?
@@ -107,7 +107,7 @@ actor LocalDictionaryRepository {
     ///   user explicitly requests a re‑lookup (force refresh).
     func saveEntry(word: String, targetLang: String, modelName: String, jsonData: String, overwrite: Bool = false) {
         guard let db else { return }
-        let key = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let key = word.trimmingCharacters(in: .whitespacesAndNewlines)
         let ts = Self.localTimestampString()
 
         let sql: String
