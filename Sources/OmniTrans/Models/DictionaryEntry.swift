@@ -115,19 +115,52 @@ private struct RawDict: Codable {
 
 /// Detects whether a query string is a single‑word lookup.
 enum WordDetector {
-    /// Detects whether a query is suitable for dictionary lookup.
-    /// Relaxed from the original 30-char limit to 50 to support longer compound words
-    /// and non-Latin scripts (CJK continuous text, agglutinative languages).
+    /// 判断查询是否适合词典查词（P0-G2 重写）。
+    /// 旧规则仅「≤50 字符 + 含字母」：不检查空格（how are you 判词）、
+    /// 中文整句判词、内部标点不检查。新规则：
+    /// 1. 内部空格 → 句；2. 首尾标点剥离；3. 内部断句标点 → 句；
+    /// 4. 数字主导 → 非词；5. CJK+拉丁混合 → 句；6. 纯 CJK ≤4 字 → 词；
+    /// 7. 拉丁 ≤30 字符且仅含字母/数字/复合字符（- . '）。
     static func isWord(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 50,
-              !trimmed.contains("\n"),
-              trimmed.rangeOfCharacter(from: .letters) != nil
-        else { return false }
-        // Allow hyphens and periods in compound words (e.g. state-of-the-art, Dr.)
-        let cleaned = trimmed.replacingOccurrences(of: "-", with: "")
-                             .replacingOccurrences(of: ".", with: "")
-        return !cleaned.isEmpty
+        guard !trimmed.isEmpty, !trimmed.contains("\n") else { return false }
+
+        // 1. 内部空格 → 短语/句子（state-of-the-art 等复合词无空格，不受影响）
+        if trimmed.contains(where: { $0.isWhitespace }) { return false }
+
+        // 2. 剥离首尾标点（hello, / "wait!" / Dr. / 你好。）
+        let edgePunct = CharacterSet(charactersIn: ".,!?;:'\"“”‘’()（）[]【】。，、！？；：…")
+        let core = trimmed.trimmingCharacters(in: edgePunct)
+        guard !core.isEmpty else { return false }
+
+        // 3. 内部断句标点 → 句（wait—what / and/or / 你好，世界）
+        let breakers = CharacterSet(charactersIn: "—–/,;:!?\"“”()（）[]【】，、；：！？…")
+        if core.rangeOfCharacter(from: breakers) != nil { return false }
+
+        var cjk = 0, latin = 0, digit = 0, other = 0
+        for scalar in core.unicodeScalars {
+            if (0x4E00...0x9FFF).contains(scalar.value) || (0x3400...0x4DBF).contains(scalar.value) {
+                cjk += 1
+            } else if CharacterSet.letters.contains(scalar) {
+                latin += 1
+            } else if CharacterSet.decimalDigits.contains(scalar) {
+                digit += 1
+            } else if scalar == "-" || scalar == "." || scalar == "'" {
+                // 复合词允许字符（state-of-the-art / Dr. / don't）
+            } else {
+                other += 1
+            }
+        }
+        guard other == 0 else { return false }
+
+        // 4. 数字主导 → 非词（12345 / 3.14）
+        if digit > latin + cjk { return false }
+        // 5. CJK + 拉丁混合 → 句（用AI翻译）
+        if cjk > 0 && latin > 0 { return false }
+        // 6. 纯 CJK：词语/成语 ≤4 字，更长 → 句
+        if cjk > 0 { return core.count <= 4 }
+        // 7. 拉丁：≤30 字符且含字母
+        return latin > 0 && core.count <= 30
     }
 }
 
