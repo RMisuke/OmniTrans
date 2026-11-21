@@ -167,6 +167,42 @@ actor LocalDictionaryRepository {
 
     /// Batch import CSV rows with conflict strategy.
     /// Returns the number of rows that failed to import.
+    /// RFC4180 最小 CSV 行解析：引号包裹字段 + `""` 转义（P0-5）。
+    /// 旧实现 `components(separatedBy: ",")` 会在 json_data 含逗号时截断，
+    /// 坏行随后被自愈逻辑删除 → 导入数据静默丢失。
+    static func parseCSVLine(_ line: String) -> [String] {
+        var fields: [String] = []
+        var current = ""
+        var inQuotes = false
+        var i = line.startIndex
+        while i < line.endIndex {
+            let c = line[i]
+            if inQuotes {
+                if c == "\"" {
+                    let next = line.index(after: i)
+                    if next < line.endIndex, line[next] == "\"" {
+                        current.append("\"")
+                        i = next
+                    } else {
+                        inQuotes = false
+                    }
+                } else {
+                    current.append(c)
+                }
+            } else if c == "\"" {
+                inQuotes = true
+            } else if c == "," {
+                fields.append(current)
+                current = ""
+            } else {
+                current.append(c)
+            }
+            i = line.index(after: i)
+        }
+        fields.append(current)
+        return fields
+    }
+
     @discardableResult
     func batchImport(lines: [String], overwrite: Bool) -> Int {
         let ts = Self.localTimestampString()
@@ -186,12 +222,13 @@ actor LocalDictionaryRepository {
 
         var errorCount = 0
         for line in lines {
-            let cols = line.components(separatedBy: ",")
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+            let cols = Self.parseCSVLine(line)
             guard cols.count >= 4 else { errorCount += 1; continue }
-            let word   = cols[0].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-            let lang   = cols[1].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-            let model  = cols[2].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-            let json   = cols[3].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let word   = cols[0]
+            let lang   = cols[1]
+            let model  = cols[2]
+            let json   = cols[3]
 
             sqlite3_reset(stmt)
             sqlite3_clear_bindings(stmt)

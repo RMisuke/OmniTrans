@@ -52,4 +52,31 @@ final class DictionaryRefactorTests: XCTestCase {
         let decoded = try JSONDecoder().decode(DictionaryEntry.self, from: data)
         XCTAssertEqual(decoded, entry)
     }
+
+    // MARK: - P0-5：CSV 解析
+
+    func testCSVPlainFields() {
+        let cols = LocalDictionaryRepository.parseCSVLine("hello,zh,macOS 词典,updated_at")
+        XCTAssertEqual(cols, ["hello", "zh", "macOS 词典", "updated_at"])
+    }
+
+    /// json_data 内含逗号必须保留（旧实现 components(separatedBy:) 会截断）。
+    func testCSVQuotedFieldWithCommas() {
+        let line = "\"hello\",\"zh\",\"gpt-4o\",\"{\"\"pos\"\":\"\"n.\"\",\"\"meaning\"\":\"\"你好，世界\"\"}\""
+        let cols = LocalDictionaryRepository.parseCSVLine(line)
+        XCTAssertEqual(cols.count, 4)
+        XCTAssertEqual(cols[3], #"{"pos":"n.","meaning":"你好，世界"}"#)
+    }
+
+    /// 引号字段内转义引号 `""` → 单个 `"`。
+    func testCSVEscapedQuotes() {
+        let cols = LocalDictionaryRepository.parseCSVLine("\"a\"\"b\",c")
+        XCTAssertEqual(cols, ["a\"b", "c"])
+    }
+
+    /// 引号内的逗号不分列。
+    func testCSVCommaInsideQuotes() {
+        let cols = LocalDictionaryRepository.parseCSVLine("\"hello, world\",zh")
+        XCTAssertEqual(cols, ["hello, world", "zh"])
+    }
 }

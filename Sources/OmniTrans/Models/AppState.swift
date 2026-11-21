@@ -275,7 +275,8 @@ final class AppState: ObservableObject {
 
         // ── Composite cache key: text + lang + provider + context-awareness state ──
         let cacheKey = Self.buildCacheKey(text: text, targetLang: targetLang, providerID: p.id, isContextAwareEnabled: configuration.isContextAwareEnabled, contextIntensity: configuration.contextIntensity, context: context) as NSString
-        if cacheOn, let cached = translationCache.get(cacheKey) {
+        // forceRefresh（重试）必须绕过缓存与同文跳过（P0-3：旧实现导致重试按钮失效）
+        if cacheOn, !forceRefresh, let cached = translationCache.get(cacheKey) {
             translatedText = cached
             isTranslating = false; streamingFinished = true
             showSuccessPulse = true
@@ -285,8 +286,8 @@ final class AppState: ObservableObject {
             return
         }
 
-        // Skip if nothing changed (same text, target, and provider)
-        if text == lastText, targetLang == lastTarget, selectedProviderID == lastProviderID, !translatedText.isEmpty { return }
+        // Skip if nothing changed (same text, target, and provider) — 重试除外（P0-3）
+        if !forceRefresh, text == lastText, targetLang == lastTarget, selectedProviderID == lastProviderID, !translatedText.isEmpty { return }
 
         doTranslate(text: text, provider: p, context: context, forceRefresh: forceRefresh)
     }
@@ -306,6 +307,14 @@ final class AppState: ObservableObject {
         session.isFromLocalCache = true
         session.cachedModelName = "macOS 词典"
         session.cacheTimestamp = ts
+        // 归一化 JSON 落 L2 —— 冷启动不再重查 DCS，且与 AI 条目同 schema（P0-4）
+        let normalized = Self.jsonString(for: entry)
+        Task.detached(priority: .utility) {
+            await LocalDictionaryRepository.shared.saveEntry(
+                word: text, targetLang: langKey,
+                modelName: "macOS 词典", jsonData: normalized, overwrite: false
+            )
+        }
     }
 
     /// 词典失败统一回退原生（JSON 解析失败 / 网络失败共用，P1-A）。
@@ -546,16 +555,20 @@ final class AppState: ObservableObject {
                     self.session.cachedModelName = aiModel
                     self.session.cacheTimestamp = tsAI
                     // L2 SQLite 持久化（parse 已校验合法性；仅非上下文感知）
+                    // L2 SQLite 持久化：存**归一化** JSON（含双源合并字段），
+                    // 与 L1/历史/召回同 schema（P0-4：旧实现存 AI 原始 JSON，
+                    // 重启后音标/变形丢失）
+                    let normalized = Self.jsonString(for: merged)
                     if !isContextActive, merged.isWord {
                         Task.detached(priority: .utility) {
                             await LocalDictionaryRepository.shared.saveEntry(
                                 word: text, targetLang: langKey,
-                                modelName: aiModel, jsonData: fullText,
+                                modelName: aiModel, jsonData: normalized,
                                 overwrite: forceRefresh
                             )
                         }
                     }
-                    self.finishDictionaryLookup(historyJSON: fullText, text: text, provider: effectiveProvider)
+                    self.finishDictionaryLookup(historyJSON: normalized, text: text, provider: effectiveProvider)
                     return
                 } else {
                     self.dictionaryEntry = nil
