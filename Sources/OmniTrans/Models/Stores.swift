@@ -17,6 +17,30 @@ final class TranslationSessionStore {
     /// AI 流式输出速率（tok/s，估算值）。nil = 不显示标签
     /// （缓存命中 / native / 传统 MT / 词典模式）（P2）。
     var tokenRate: Double? = nil
+    /// 查询模式手动覆盖 —— 用户矫正自动判定的取词/翻译（修复2）。
+    enum QueryModeOverride: String, CaseIterable, Sendable {
+        case auto, dictionary, translation
+
+        var label: String {
+            switch self {
+            case .auto: "自动"
+            case .dictionary: "取词"
+            case .translation: "翻译"
+            }
+        }
+
+        var next: QueryModeOverride {
+            switch self {
+            case .auto: .dictionary
+            case .dictionary: .translation
+            case .translation: .auto
+            }
+        }
+    }
+
+    /// 查询模式覆盖：auto = WordDetector 自动判定；dictionary/translation = 强制。
+    var modeOverride: QueryModeOverride = .auto
+
     /// 首字延迟（秒），与 tokenRate 同生命周期。
     var ttft: TimeInterval? = nil
     var inputText: String = ""

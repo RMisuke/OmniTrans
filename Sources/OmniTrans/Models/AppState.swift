@@ -82,6 +82,7 @@ final class AppState: ObservableObject {
     private var lastText = ""
     private var lastTarget: TranslationLanguage = .chinese
     private var lastProviderID: UUID? = nil
+    private var lastDictProviderID: UUID? = nil
     private var activeStreamTask: Task<Void, Never>?
 
     init() {
@@ -253,8 +254,10 @@ final class AppState: ObservableObject {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         guard let p = selectedProvider, p.isEnabled else {
-            // 纯原生词典查询不依赖云端 API 配置（P0-R4）
-            if WordDetector.isWord(text), enabledProviders.contains(where: { $0.kind == .macOSNative }) {
+            // 纯原生词典查询不依赖云端 API 配置（P0-R4）；词典模式尊重手动覆盖（修复2）
+            let treatAsWord = session.modeOverride == .dictionary
+                || (session.modeOverride == .auto && WordDetector.isWord(text))
+            if treatAsWord, enabledProviders.contains(where: { $0.kind == .macOSNative }) {
                 session.isFromLocalCache = false
                 doTranslate(text: text, provider: APIProvider.native, context: context, forceRefresh: forceRefresh)
                 return
@@ -286,8 +289,12 @@ final class AppState: ObservableObject {
             return
         }
 
-        // Skip if nothing changed (same text, target, and provider) — 重试除外（P0-3）
-        if !forceRefresh, text == lastText, targetLang == lastTarget, selectedProviderID == lastProviderID, !translatedText.isEmpty { return }
+        // Skip if nothing changed (same text, target, providers) — 重试除外（P0-3）
+        // 修复3：词典源切换（dictProviderID 变化）也算"变了"，否则词典视图下切
+        // API 后点翻译会被此处直接 return。
+        if !forceRefresh, text == lastText, targetLang == lastTarget,
+           selectedProviderID == lastProviderID, dictProviderID == lastDictProviderID,
+           !translatedText.isEmpty { return }
 
         doTranslate(text: text, provider: p, context: context, forceRefresh: forceRefresh)
     }
@@ -371,14 +378,27 @@ final class AppState: ObservableObject {
         streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
         session.tokenRate = nil
         session.ttft = nil
-        lastText = text; lastTarget = targetLang; lastProviderID = selectedProviderID
+        // 修复3：记录上一轮的翻译源与词典源，用于判定"用户切换了 API"
+        let previousProviderID = lastProviderID
+        let previousDictProviderID = lastDictProviderID
+        lastText = text; lastTarget = targetLang
+        lastProviderID = selectedProviderID
+        lastDictProviderID = dictProviderID
+        let providerChanged = previousProviderID != nil
+            && (previousProviderID != selectedProviderID || previousDictProviderID != dictProviderID)
 
         activeStreamTask = Task(priority: .userInitiated) { @MainActor [weak self] in
             guard let self else { return }
             // Probe is deferred to FallbackRouter.resolveWithFallback() only on
             // failure — uses lightweight HEAD request (M2), consuming no API quota.
             // Success path skips probe entirely for minimum latency.
-            let isWord = WordDetector.isWord(text)
+            // 查询模式（修复2）：手动覆盖优先于自动判定
+            let isWord: Bool
+            switch self.session.modeOverride {
+            case .auto:        isWord = WordDetector.isWord(text)
+            case .dictionary:  isWord = true
+            case .translation: isWord = false
+            }
 
             let effectiveProvider: APIProvider
             if isWord {
@@ -414,7 +434,8 @@ final class AppState: ObservableObject {
             let isContextActive = context?.hasContext == true && configuration.isContextAwareEnabled
 
             // ── L1 内存缓存 (最快, 零 I/O) ──
-            if isDict, !forceRefresh, cacheEnabled, !isContextActive {
+            // 修复3：切换 API 后绕过 provider 无关的词典缓存，强制新请求
+            if isDict, !forceRefresh, !providerChanged, cacheEnabled, !isContextActive {
                 let l1Key = "\(text)_\(langKey)" as NSString
                 if let cachedEntry = dictEntryCache.get(l1Key) {
                     self.dictionaryEntry = cachedEntry
@@ -442,7 +463,8 @@ final class AppState: ObservableObject {
             }
 
             // ── L2 SQLite 持久缓存 (磁盘 I/O, 命中后预热 L1) ──
-            if isDict, !forceRefresh, cacheEnabled, !isContextActive {
+            // 修复3：切换 API 后绕过（同上）
+            if isDict, !forceRefresh, !providerChanged, cacheEnabled, !isContextActive {
                 if let cached = await LocalDictionaryRepository.shared.fetchEntry(word: text, targetLang: langKey) {
                     if let entry = DictionaryEntry.parse(from: cached.jsonData, word: text) {
                         // Warm L1 — 后续查询零 I/O 直接命中内存
@@ -560,7 +582,8 @@ final class AppState: ObservableObject {
                                 await LocalDictionaryRepository.shared.saveEntry(
                                     word: text, targetLang: langKey,
                                     modelName: aiModel, jsonData: normalized,
-                                    overwrite: forceRefresh
+                                    // 切换 API 后的新结果应覆盖旧条目（否则重启后仍显示旧 API 结果）
+                                    overwrite: forceRefresh || providerChanged
                                 )
                             }
                         }
@@ -676,6 +699,8 @@ final class AppState: ObservableObject {
         activeStreamTask?.cancel()
         inputText = text; translatedText = ""; errorMessage = nil; isTranslating = false; lastText = ""
         dictionaryEntry = nil; isDictionaryMode = false
+        // 新的取词/打开窗口 → 模式覆盖回到自动（修复2）
+        session.modeOverride = .auto
         streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
         showPermissionHint = !HotkeyManager.isTrusted && text.isEmpty
 

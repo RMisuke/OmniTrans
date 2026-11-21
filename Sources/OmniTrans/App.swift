@@ -159,9 +159,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let text, !text.isEmpty {
                 self?.fire(text: text, context: context)
             } else {
-                // 取词失败不弹历史窗：抢焦点后下次 Cmd+C 投给 OmniTrans 而非
-                // 目标应用，造成连锁失败；改状态栏气泡保焦点（P0-G3）。
-                self?.showStatusBarBubble(message: "未取到文本，请重新选择后重试", duration: 2.5)
+                // 未取到文本 → 直接打开主窗口（工作区），供手动输入/选择历史（修复1）
+                self?.showHistoryWorkspace()
             }
         }
         HotkeyManager.shared.onOCRHotkey = { [weak self] in

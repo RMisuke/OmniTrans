@@ -935,6 +935,14 @@ struct FloatingPanelContent: View {
 
     // MARK: - Bottom Bar (macOS 26 Liquid Glass)
 
+    private var modeOverrideIcon: String {
+        switch session.modeOverride {
+        case .auto:        "sparkles"
+        case .dictionary:  "character.book.closed"
+        case .translation: "character.bubble"
+        }
+    }
+
     private var bottomBar: some View {
         HStack(spacing: AppTheme.spaceXS) {
             // ── 目标语言选择器 (globe + label) ──
@@ -993,6 +1001,28 @@ struct FloatingPanelContent: View {
             .liquidGlassButton()
             .onHover { hovered in bottomBarHoveredBtn = hovered ? "ctx" : nil }
             .help(isContextAware ? "上下文感知已启用" : "上下文感知已关闭")
+
+            // ── 查询模式开关（自动/取词/翻译）— 手动矫正自动判定（修复2） ──
+            Button {
+                session.modeOverride = session.modeOverride.next
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: modeOverrideIcon)
+                        .font(.system(size: 11))
+                    Text(session.modeOverride.label)
+                        .font(.system(size: 9, weight: .medium))
+                }
+                .foregroundColor(session.modeOverride == .auto ? AppTheme.textCaptionGray : AppTheme.accentAction)
+                .padding(.horizontal, 6).padding(.vertical, 4)
+                .contentShape(Rectangle())
+                .brightness(bottomBarHoveredBtn == "mode" ? 0.12 : 0)
+                .scaleEffect(bottomBarHoveredBtn == "mode" ? 1.04 : 1.0)
+                .animation(AppTheme.Motion.buttonHover.resolveGated(), value: bottomBarHoveredBtn == "mode")
+            }
+            .frame(height: 22)
+            .liquidGlassButton()
+            .onHover { hovered in bottomBarHoveredBtn = hovered ? "mode" : nil }
+            .help("查询模式：自动判定 → 强制取词 → 强制翻译（点击切换，下次取词恢复自动）")
 
             Spacer()
 
