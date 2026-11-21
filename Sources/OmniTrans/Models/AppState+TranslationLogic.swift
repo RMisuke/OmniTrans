@@ -9,6 +9,23 @@ import Foundation
 /// explicit parameters and return values without touching `AppState` state.
 extension AppState {
 
+    // MARK: - Dictionary Dual-Source Merge
+
+    /// 双源字段合并纯函数（P1-3）：释义/例句以 AI 为准，
+    /// 音标/音标变体/变形词 AI 缺失时用 native 补缺。
+    nonisolated static func merged(ai: DictionaryEntry, native: DictionaryEntry) -> DictionaryEntry {
+        guard native.isWord else { return ai }
+        return DictionaryEntry(
+            isWord: ai.isWord,
+            word: ai.word,
+            phonetic: ai.phonetic.isEmpty ? native.phonetic : ai.phonetic,
+            phoneticVariants: ai.phoneticVariants ?? native.phoneticVariants,
+            definitions: ai.definitions.isEmpty ? native.definitions : ai.definitions,
+            examples: ai.examples.isEmpty ? native.examples : ai.examples,
+            inflections: ai.inflections.isEmpty ? native.inflections : ai.inflections
+        )
+    }
+
     // MARK: - Fallback Chain
 
     /// Returns the next enabled provider after `current` in list order (wraps around).

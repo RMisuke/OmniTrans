@@ -163,24 +163,32 @@ enum WordDetector {
     /// 4. 数字主导 → 非词；5. CJK+拉丁混合 → 句；6. 纯 CJK ≤4 字 → 词；
     /// 7. 拉丁 ≤30 字符且仅含字母/数字/复合字符（- . '）。
     static func isWord(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !trimmed.contains("\n") else { return false }
+        // 归一化（P1-3）：NFD 组合字符（café）、弯引号（don’t）统一，
+        // 否则组合符落入 other、弯引号落入断句符导致误判为句。
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+            .replacingOccurrences(of: "’", with: "'")
+            .replacingOccurrences(of: "‘", with: "'")
+            .replacingOccurrences(of: "“", with: "\"")
+            .replacingOccurrences(of: "”", with: "\"")
+        guard !normalized.isEmpty, !normalized.contains("\n") else { return false }
 
         // 1. 内部空格 → 短语/句子（state-of-the-art 等复合词无空格，不受影响）
-        if trimmed.contains(where: { $0.isWhitespace }) { return false }
+        if normalized.contains(where: { $0.isWhitespace }) { return false }
 
         // 2. 剥离首尾标点（hello, / "wait!" / Dr. / 你好。）
-        let edgePunct = CharacterSet(charactersIn: ".,!?;:'\"“”‘’()（）[]【】。，、！？；：…")
-        let core = trimmed.trimmingCharacters(in: edgePunct)
+        let edgePunct = CharacterSet(charactersIn: ".,!?;:'\"()[]。，、！？；：…")
+        let core = normalized.trimmingCharacters(in: edgePunct)
         guard !core.isEmpty else { return false }
 
         // 3. 内部断句标点 → 句（wait—what / and/or / 你好，世界）
-        let breakers = CharacterSet(charactersIn: "—–/,;:!?\"“”()（）[]【】，、；：！？…")
+        let breakers = CharacterSet(charactersIn: "—–/,;:!?\"()[]，、；：！？…")
         if core.rangeOfCharacter(from: breakers) != nil { return false }
 
         var cjk = 0, latin = 0, digit = 0, other = 0
         for scalar in core.unicodeScalars {
-            if (0x4E00...0x9FFF).contains(scalar.value) || (0x3400...0x4DBF).contains(scalar.value) {
+            let v = scalar.value
+            if Self.isCJKIdeograph(v) || Self.isKanaOrHangul(v) {
                 cjk += 1
             } else if CharacterSet.letters.contains(scalar) {
                 latin += 1
@@ -202,6 +210,21 @@ enum WordDetector {
         if cjk > 0 { return core.count <= 4 }
         // 7. 拉丁：≤30 字符且含字母
         return latin > 0 && core.count <= 30
+    }
+
+    /// CJK 表意文字（含扩展 A/B/C/D/E/F/G/兼容区）（P1-3）。
+    private static func isCJKIdeograph(_ v: UInt32) -> Bool {
+        (0x4E00...0x9FFF).contains(v)      // 基本区
+            || (0x3400...0x4DBF).contains(v)   // 扩展 A
+            || (0x20000...0x2A6DF).contains(v) // 扩展 B
+            || (0x2A700...0x2EBEF).contains(v) // 扩展 C-F
+            || (0x30000...0x3134F).contains(v) // 扩展 G
+            || (0xF900...0xFAFF).contains(v)   // 兼容表意
+    }
+
+    /// 日文假名 / 韩文音节（按 CJK 计入）。
+    private static func isKanaOrHangul(_ v: UInt32) -> Bool {
+        (0x3040...0x30FF).contains(v) || (0xAC00...0xD7AF).contains(v)
     }
 }
 
