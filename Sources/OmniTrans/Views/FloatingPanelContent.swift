@@ -812,11 +812,25 @@ struct FloatingPanelContent: View {
 
     private var translationResultView: some View {
         ScrollView {
-            Text(session.translatedText)
-                .font(.system(size: 15))
-                .textSelection(.enabled)
-                .foregroundColor(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(session.translatedText)
+                    .font(.system(size: 15))
+                    .textSelection(.enabled)
+                    .foregroundColor(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                // AI 流式速率标签（P2）：灰色小字，流式实时更新、完成冻结均值；
+                // 缓存/native/MT/词典不设置 tokenRate 故自动隐藏
+                if let rate = session.tokenRate {
+                    HStack(spacing: 8) {
+                        Text("≈ \(Int(rate.rounded())) tok/s")
+                        if let ttft = session.ttft {
+                            Text("首字 \(String(format: "%.1f", ttft))s")
+                        }
+                    }
+                    .font(.system(size: 10))
+                    .foregroundColor(AppTheme.textCaptionGray)
+                }
+            }
         }
         .padding(AppTheme.spaceMD)
         .background(

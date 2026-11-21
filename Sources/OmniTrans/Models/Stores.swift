@@ -14,6 +14,11 @@ final class TranslationSessionStore {
     var translatedText: String = ""
     var isTranslating: Bool = false
     var streamingFinished: Bool = false
+    /// AI 流式输出速率（tok/s，估算值）。nil = 不显示标签
+    /// （缓存命中 / native / 传统 MT / 词典模式）（P2）。
+    var tokenRate: Double? = nil
+    /// 首字延迟（秒），与 tokenRate 同生命周期。
+    var ttft: TimeInterval? = nil
     var inputText: String = ""
     var showSuccessPulse: Bool = false
     var errorMessage: String? = nil

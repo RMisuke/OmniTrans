@@ -266,6 +266,9 @@ final class AppState: ObservableObject {
         session.isFromLocalCache = false
         session.cachedModelName = ""
         session.cacheTimestamp = ""
+        // 速率标签在每个新请求开始时隐藏（P2）
+        session.tokenRate = nil
+        session.ttft = nil
 
         // ── Cache gate ──
         let cacheOn = configuration.isCacheEnabled
@@ -364,6 +367,8 @@ final class AppState: ObservableObject {
         activeStreamTask?.cancel()
         isTranslating = true; errorMessage = nil; translatedText = ""
         streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
+        session.tokenRate = nil
+        session.ttft = nil
         lastText = text; lastTarget = targetLang; lastProviderID = selectedProviderID
 
         activeStreamTask = Task(priority: .userInitiated) { @MainActor [weak self] in
@@ -474,6 +479,11 @@ final class AppState: ObservableObject {
                 return
             }
 
+            // 速率测量（P2）：仅 AI 流式；传统 MT / native / 词典不显示标签
+            let measureTokenRate = !isDict && !effectiveProvider.kind.isTraditionalMT
+                && effectiveProvider.kind != .macOSNative
+            var rateMeter = TokenRateMeter()
+
             let ctx = EngineRoutingContext(text: text, provider: effectiveProvider, isWord: isDict)
             let engine = TranslationEngineFactory.makeEngine(context: ctx)
             let stream = engine.execute(
@@ -497,6 +507,10 @@ final class AppState: ObservableObject {
                     if !isDict {
                         // @MainActor Task — direct update, no actor hop needed
                         self.translatedText = chunks.joined()
+                        if measureTokenRate, rateMeter.feed(batch) {
+                            self.session.tokenRate = rateMeter.rate
+                            self.session.ttft = rateMeter.ttft
+                        }
                     }
                 }
                 if !isDict {
@@ -549,6 +563,12 @@ final class AppState: ObservableObject {
 
                 // 成功路径同样检查取消：旧任务挂起恢复后不得覆盖新请求状态（P0-R5）
                 guard !Task.isCancelled else { return }
+
+                // 完成时冻结为整体均值（排除首字延迟）（P2）
+                if measureTokenRate {
+                    self.session.tokenRate = rateMeter.finalRate() ?? rateMeter.rate
+                    self.session.ttft = rateMeter.ttft
+                }
 
                 // ── End translation AFTER dictionaryEntry is set ──
                 // Must come after dictionaryEntry assignment so SwiftUI
