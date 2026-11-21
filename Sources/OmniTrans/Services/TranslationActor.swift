@@ -129,6 +129,20 @@ let streamURLSession: URLSession = {
     return URLSession(configuration: config, delegate: pinningDelegate, delegateQueue: nil)
 }()
 
+// MARK: - SSE line parsing (P1: 纯函数，可单测)
+
+/// SSE `data:` 行 → JSON payload。兼容 `data: `（标准）与 `data:{…}`（无空格），
+/// 过滤 `[DONE]` 与空负载；`event:`/注释行返回 nil。
+enum SSELineParser {
+    static func jsonPayload(fromSSELine line: String) -> Data? {
+        guard line.hasPrefix("data:") else { return nil }
+        var payload = line.dropFirst(5)
+        if payload.hasPrefix(" ") { payload = payload.dropFirst() }
+        guard !payload.isEmpty, !payload.contains("[DONE]") else { return nil }
+        return Data(payload.utf8)
+    }
+}
+
 // MARK: - Translation Actor
 
 /// Isolated actor for all network I/O, SSE parsing, and JSON decoding.
@@ -187,8 +201,7 @@ actor TranslationActor {
         var emittedChars = 0
         for try await line in bytes.lines {
             try Task.checkCancellation()
-            guard line.hasPrefix("data: "), !line.contains("[DONE]") else { continue }
-            let jsonData = Data(line.utf8.dropFirst(6))
+            guard let jsonData = SSELineParser.jsonPayload(fromSSELine: line) else { continue }
             let chunk: T
             do {
                 chunk = try decoder.decode(T.self, from: jsonData)
@@ -213,6 +226,21 @@ actor TranslationActor {
         if emittedChars == 0 {
             throw TranslationService.TranslationError.apiError("模型未返回任何内容（可能被拦截或服务异常）")
         }
+    }
+
+    /// 解析 SSE 并在**任何退出路径**冲刷节流缓冲（P1-1：错误/取消时最后 ≤80ms 文本不再丢失）。
+    private func parseAndFlush<T: Decodable>(
+        bytes: URLSession.AsyncBytes,
+        throttle: ThrottledStream,
+        extractText: @escaping (T) throws -> String?
+    ) async throws {
+        do {
+            try await parseSSEStream(bytes: bytes, throttle: throttle, extractText: extractText)
+        } catch {
+            await throttle.flush()
+            throw error
+        }
+        await throttle.flush()
     }
 
     /// Reads the error body from a failed SSE response (first 1024 bytes).
@@ -423,7 +451,7 @@ actor TranslationActor {
         }
 
         let t = ThrottledStream(c)
-        try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: OAIStreamChunk) throws -> String? in
+        try await parseAndFlush(bytes: bytes, throttle: t) { (chunk: OAIStreamChunk) throws -> String? in
             if let err = chunk.error {
                 throw TranslationService.TranslationError.apiError(err.error.message)
             }
@@ -472,7 +500,7 @@ actor TranslationActor {
         }
 
         let t = ThrottledStream(c)
-        try await parseSSEStream(bytes: bytes, throttle: t) { (event: AnthStreamEvent) throws -> String? in
+        try await parseAndFlush(bytes: bytes, throttle: t) { (event: AnthStreamEvent) throws -> String? in
             if event.type == "error", let err = event.error {
                 throw TranslationService.TranslationError.apiError(err.error.message)
             }
@@ -515,7 +543,7 @@ actor TranslationActor {
         }
 
         let t = ThrottledStream(c)
-        try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: GemStreamChunk) throws -> String? in
+        try await parseAndFlush(bytes: bytes, throttle: t) { (chunk: GemStreamChunk) throws -> String? in
             if let err = chunk.error {
                 throw TranslationService.TranslationError.apiError(err.error.message)
             }

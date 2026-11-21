@@ -304,7 +304,8 @@ final class AppState: ObservableObject {
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let ts = f.string(from: Date())
         dictEntryCache.set(entry, modelName: "macOS 词典", timestamp: ts, forKey: dk)
-        session.isFromLocalCache = true
+        // 新鲜原生查询 → 非本地缓存（P1-3 语义修正）
+        session.isFromLocalCache = false
         session.cachedModelName = "macOS 词典"
         session.cacheTimestamp = ts
         // 归一化 JSON 落 L2 —— 冷启动不再重查 DCS，且与 AI 条目同 schema（P0-4）
@@ -344,19 +345,11 @@ final class AppState: ObservableObject {
 
     /// 双源字段合并（D9）：释义/例句以 AI 为准；音标/音标变体/变形词
     /// AI 缺失时用 native 补缺（native 独有 phoneticVariants/inflections）。
+    /// 纯函数部分在 AppState+TranslationLogic（P1-3，可单测）。
     @MainActor
     private func mergeNativeDictionaryFields(into entry: DictionaryEntry, word: String) async -> DictionaryEntry {
         let native = await MacOSNativeProvider.lookupWord(word)
-        guard native.isWord else { return entry }
-        return DictionaryEntry(
-            isWord: entry.isWord,
-            word: entry.word,
-            phonetic: entry.phonetic.isEmpty ? native.phonetic : entry.phonetic,
-            phoneticVariants: entry.phoneticVariants ?? native.phoneticVariants,
-            definitions: entry.definitions.isEmpty ? native.definitions : entry.definitions,
-            examples: entry.examples.isEmpty ? native.examples : entry.examples,
-            inflections: entry.inflections.isEmpty ? native.inflections : entry.inflections
-        )
+        return Self.merged(ai: entry, native: native)
     }
 
     private static func jsonString(for entry: DictionaryEntry) -> String {
@@ -419,7 +412,6 @@ final class AppState: ObservableObject {
             //    缓存键追加 "_ctx" 后缀以区分上下文感知与非上下文感知的结果。
             //    这确保语境含义不同的同词查询能得到各自对应的词典结果。
             let isContextActive = context?.hasContext == true && configuration.isContextAwareEnabled
-            let ctxTag = isContextActive ? "_ctx" : ""
 
             // ── L1 内存缓存 (最快, 零 I/O) ──
             if isDict, !forceRefresh, cacheEnabled, !isContextActive {
@@ -506,31 +498,33 @@ final class AppState: ObservableObject {
 
             if isDict { self.isDictionaryMode = true }
 
-            // ── 收集全部 chunk（词典：一次性解析；翻译：流式更新）──
+            // ── 收集全部 chunk（词典：一次性解析；翻译：增量拼接渲染）──
             var chunks: [String] = []
             chunks.reserveCapacity(64)
+            // P1-1：增量累加替代每批 chunks.joined() 的全量重拼
+            var rendered = ""
 
             do {
                 for try await batch in stream {
                     chunks.append(batch)
                     if !isDict {
                         // @MainActor Task — direct update, no actor hop needed
-                        self.translatedText = chunks.joined()
+                        rendered += batch
+                        self.translatedText = rendered
                         if measureTokenRate, rateMeter.feed(batch) {
                             self.session.tokenRate = rateMeter.rate
                             self.session.ttft = rateMeter.ttft
                         }
                     }
                 }
-                if !isDict {
-                    self.translatedText = chunks.joined()
+                if !isDict, chunks.isEmpty {
+                    self.translatedText = ""
                 }
 
                 // ── Cache successful result (composite key, 仅用于非词典模式) ──
                 if !isDict, self.configuration.isCacheEnabled {
-                    let fullText = chunks.joined()
                     let ck = Self.buildCacheKey(text: text, targetLang: self.targetLang, providerID: effectiveProvider.id, isContextAwareEnabled: self.configuration.isContextAwareEnabled, contextIntensity: self.configuration.contextIntensity, context: context) as NSString
-                    self.translationCache.set(fullText, forKey: ck)
+                    self.translationCache.set(rendered, forKey: ck)
                 }
 
                 if isDict {
@@ -547,25 +541,28 @@ final class AppState: ObservableObject {
                     let merged = await self.mergeNativeDictionaryFields(into: entry, word: text)
                     guard !Task.isCancelled else { return }
                     self.dictionaryEntry = merged
-                    let dk = "\(text)_\(langKey)\(ctxTag)" as NSString
                     let aiModel = effectiveProvider.modelName
                     let tsAI = Self.nowTimestamp()
-                    self.dictEntryCache.set(merged, modelName: aiModel, timestamp: tsAI, forKey: dk)
-                    self.session.isFromLocalCache = true
+                    // 新鲜网络结果 → 非"本地缓存"（P1-3：旧实现误标 fromCache=true，
+                    // UI 会显示"由 X 生成于 Y"缓存徽标）
+                    self.session.isFromLocalCache = false
                     self.session.cachedModelName = aiModel
                     self.session.cacheTimestamp = tsAI
-                    // L2 SQLite 持久化（parse 已校验合法性；仅非上下文感知）
-                    // L2 SQLite 持久化：存**归一化** JSON（含双源合并字段），
-                    // 与 L1/历史/召回同 schema（P0-4：旧实现存 AI 原始 JSON，
-                    // 重启后音标/变形丢失）
+                    // 归一化 JSON（含双源合并字段），与 L1/历史/召回同 schema（P0-4）
                     let normalized = Self.jsonString(for: merged)
-                    if !isContextActive, merged.isWord {
-                        Task.detached(priority: .utility) {
-                            await LocalDictionaryRepository.shared.saveEntry(
-                                word: text, targetLang: langKey,
-                                modelName: aiModel, jsonData: normalized,
-                                overwrite: forceRefresh
-                            )
+                    // 缓存键读写对齐（P1-3）：上下文感知结果不写 L1/L2（读取侧本就跳过），
+                    // 消除永不命中的 `_ctx` 键。
+                    if !isContextActive {
+                        let dk = "\(text)_\(langKey)" as NSString
+                        self.dictEntryCache.set(merged, modelName: aiModel, timestamp: tsAI, forKey: dk)
+                        if merged.isWord {
+                            Task.detached(priority: .utility) {
+                                await LocalDictionaryRepository.shared.saveEntry(
+                                    word: text, targetLang: langKey,
+                                    modelName: aiModel, jsonData: normalized,
+                                    overwrite: forceRefresh
+                                )
+                            }
                         }
                     }
                     self.finishDictionaryLookup(historyJSON: normalized, text: text, provider: effectiveProvider)
@@ -596,7 +593,7 @@ final class AppState: ObservableObject {
                 }
                 // ⚠️ addHistory must be called BEFORE isDictionaryMode reset,
                 // otherwise HistoryEntry.isDictionaryMode is always false
-                self.addHistory(text: text, result: chunks.joined(), provider: effectiveProvider)
+                self.addHistory(text: text, result: rendered, provider: effectiveProvider)
                 self.isDictionaryMode = false
             } catch {
                 // 被取消的旧请求不得降级/重试，避免旧结果覆盖新译文（审计 H1）
