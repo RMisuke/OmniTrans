@@ -170,17 +170,28 @@ struct FloatingPanelContent: View {
     /// - 不在调度时捕获状态快照，而是在 Task 执行时直接从 `@MainActor` session 读取最新值。
     ///   前一个 Task 已被取消时不会执行，因此存活 Task 读取的一定是最新状态。
     /// - 相比快照方式，闭包捕获更轻量（仅捕获 `currentChromeH`），减少每次 token 到达的开销。
+    @State var lastHeightApplyAt: Date = .distantPast
+
     func scheduleHeightUpdate(debounce: Bool = false) {
         guard panelSize == "dynamic" else { return }
         guard !AppState.isUserDraggingWindow else { return }
 
         heightDebounceTask?.cancel()
-        let delay: UInt64 = debounce ? 50_000_000 : 0
         let currentChromeH = chromeHeight
 
+        // 节流 + 尾随（P0-6）：等待时长基于「距上次执行」而非「距上次事件」。
+        // 旧实现在 15-80ms 的 token 批下每批都 cancel 重置，任务几乎永不执行
+        // （窗口在流式期间停住、结束才跃变）。现在执行频率稳定在 ~20Hz。
+        let minInterval: TimeInterval = debounce ? 0.05 : 0
+        let elapsed = Date().timeIntervalSince(lastHeightApplyAt)
+        let wait = max(0, minInterval - elapsed)
+
         let task = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: delay)
-            guard !Task.isCancelled else { return }
+            if wait > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+            }
+            self.lastHeightApplyAt = Date()
 
             let calculator = ContentHeightCalculator(
                 bodyFontSize: 15,
@@ -219,7 +230,9 @@ struct FloatingPanelContent: View {
                 target = calculator.defaultTargetHeight
             }
 
-            FloatingWindowManager.shared.updateHeight(target, animated: true)
+            // 流式期间不做帧动画（P0-6）：15-80ms 的动画会互相重叠并持续
+            // 重排整棵树；仅在流结束/模式切换时动画。
+            FloatingWindowManager.shared.updateHeight(target, animated: !self.session.isTranslating)
         }
         heightDebounceTask = task
     }
