@@ -309,12 +309,6 @@ actor TranslationActor {
         }
     }
 
-    // MARK: - Local Ollama fallback
-
-    func resolveWithFallback(_ provider: APIProvider) async -> (APIProvider, Bool) {
-        await FallbackRouter.resolveWithFallback(provider)
-    }
-
     // MARK: - Private: stream dispatch
 
     private func performStream(

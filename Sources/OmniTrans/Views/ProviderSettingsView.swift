@@ -162,11 +162,17 @@ struct ProviderSettingsView: View {
         Button {
             testResults[p.id] = .testing
             Task {
-                let r = await APITestService.testConnection(for: p)
+                // 手动测试允许计费探测（P1-B：仅此路径可触发付费供应商验证）
+                let result = await ProbeService.shared.probe(p, allowPaid: true, force: true)
                 await MainActor.run {
-                    switch r {
-                    case .success(let l): testResults[p.id] = .success(latency: l)
-                    case .failure(let m): testResults[p.id] = .failure(m)
+                    if let result {
+                        if result.isSuccess {
+                            testResults[p.id] = .success(latency: Double(result.latencyMs) / 1000)
+                        } else {
+                            testResults[p.id] = .failure(result.error?.localizedDescription ?? "未知错误")
+                        }
+                    } else {
+                        testResults[p.id] = .failure("探测不可用")
                     }
                     Task { try? await Task.sleep(nanoseconds: 5_000_000_000); await MainActor.run { testResults[p.id] = nil } }
                 }

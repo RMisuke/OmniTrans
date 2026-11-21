@@ -13,7 +13,7 @@ final class AppState: ObservableObject {
     @MainActor static var isUserDraggingWindow = false
 
     @Published var providers: [APIProvider] = []
-    @Published var selectedProviderID: UUID? { didSet { FallbackRouter.invalidatePrimaryProbe() } }
+    @Published var selectedProviderID: UUID?
     /// Provider for word/dictionary lookups. Falls back to selectedProviderID if nil.
     @Published var dictProviderID: UUID?
     @Published var sourceLang: TranslationLanguage = .auto { didSet { ProviderStorageManager.saveSourceLang(sourceLang) } }

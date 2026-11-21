@@ -16,28 +16,33 @@ enum APITestService {
     static func testConnection(for provider: APIProvider) async -> TestResult {
         let start = Date()
         do {
-            switch provider.kind {
-            case .openAI, .openAICompat, .ollama:
-                try await testOpenAI(provider: provider)
-            case .anthropic:
-                try await testAnthropic(provider: provider)
-            case .gemini:
-                try await testGoogle(provider: provider)
-            case .macOSNative:
-                break // local, always available
-            case .googleMT:
-                try await testGoogleMT(provider: provider)
-            case .bingMT:
-                try await testBingMT(provider: provider)
-            case .alibabaMT:
-                try await testAlibabaMT(provider: provider)
-            case .volcengineMT:
-                try await testVolcengineMT(provider: provider)
-            }
+            try await testConnectionThrowing(for: provider)
             let latency = Date().timeIntervalSince(start)
             return .success(latency: latency)
         } catch {
-            return .failure(error.localizedDescription)
+            return .failure(ProbeError.classify(error).localizedDescription)
+        }
+    }
+
+    /// 抛出式探测入口（ProbeService 使用）：错误携带 HTTP 状态码供分类（P1-B）。
+    static func testConnectionThrowing(for provider: APIProvider) async throws {
+        switch provider.kind {
+        case .openAI, .openAICompat, .ollama:
+            try await testOpenAI(provider: provider)
+        case .anthropic:
+            try await testAnthropic(provider: provider)
+        case .gemini:
+            try await testGoogle(provider: provider)
+        case .macOSNative:
+            break // local, always available
+        case .googleMT:
+            try await testGoogleMT(provider: provider)
+        case .bingMT:
+            try await testBingMT(provider: provider)
+        case .alibabaMT:
+            try await testAlibabaMT(provider: provider)
+        case .volcengineMT:
+            try await testVolcengineMT(provider: provider)
         }
     }
 
@@ -238,17 +243,22 @@ enum APITestService {
     }
 
     private static func testAlibabaMT(provider: APIProvider) async throws {
-        // Use a real signed API call to verify credentials
+        // Use a real signed API call to verify credentials（端点尊重用户配置，P1-B）
+        let endpoint = provider.baseURL.isEmpty ? "https://mt.cn-hangzhou.aliyuncs.com" : provider.baseURL
         try await AlibabaCloudSigner.testConnectivity(
             accessKeyId: provider.apiKey,
-            accessKeySecret: provider.apiSecret
+            accessKeySecret: provider.apiSecret,
+            endpoint: endpoint
         )
     }
 
     private static func testVolcengineMT(provider: APIProvider) async throws {
+        // 端点来自 provider.baseURL（旧实现硬编码忽略用户配置，P1-B）
+        let endpoint = provider.baseURL.isEmpty ? "https://translate.volcengineapi.com" : provider.baseURL
         try await VolcengineSigner.testConnectivity(
             accessKey: provider.apiKey,
-            secretKey: provider.apiSecret
+            secretKey: provider.apiSecret,
+            endpoint: endpoint
         )
     }
 }

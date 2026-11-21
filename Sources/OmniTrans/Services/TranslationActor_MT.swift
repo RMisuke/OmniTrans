@@ -196,7 +196,8 @@ enum AlibabaCloudSigner {
         )
     }
 
-    static func testConnectivity(accessKeyId: String, accessKeySecret: String) async throws {
+    static func testConnectivity(accessKeyId: String, accessKeySecret: String,
+                                 endpoint: String = "https://mt.cn-hangzhou.aliyuncs.com") async throws {
         let timestamp = SignerUtilities.iso8601Timestamp()
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let params: [(String, String)] = [
@@ -214,7 +215,7 @@ enum AlibabaCloudSigner {
             ("Version", "2018-10-12"),
         ]
         try await SignerUtilities.testConnectivity(
-            endpoint: "https://mt.cn-hangzhou.aliyuncs.com",
+            endpoint: endpoint,
             accessKey: accessKeyId, secretKey: accessKeySecret,
             params: params, hash: Insecure.SHA1.self, label: "Alibaba"
         ) { body in
@@ -263,7 +264,8 @@ enum VolcengineSigner {
         )
     }
 
-    static func testConnectivity(accessKey: String, secretKey: String) async throws {
+    static func testConnectivity(accessKey: String, secretKey: String,
+                                 endpoint: String = "https://translate.volcengineapi.com") async throws {
         let timestamp = SignerUtilities.iso8601Timestamp()
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let params: [(String, String)] = [
@@ -280,7 +282,7 @@ enum VolcengineSigner {
             ("Timestamp", timestamp),
         ]
         try await SignerUtilities.testConnectivity(
-            endpoint: "https://translate.volcengineapi.com",
+            endpoint: endpoint,
             accessKey: accessKey, secretKey: secretKey,
             params: params, hash: SHA256.self, label: "Volcengine"
         ) { body in

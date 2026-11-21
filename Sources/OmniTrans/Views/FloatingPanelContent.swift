@@ -45,6 +45,8 @@ struct FloatingPanelContent: View {
     @State var isBreathing = false
     @State var isProbingAPI = false
     @State var apiConnectionFailed = false
+    /// 计费供应商未手动验证过 → 灰灯（P1-B：状态灯永不自动触发计费探测）
+    @State var apiUnverified = false
     @AppStorage("is_context_aware") var isContextAware = true
     @AppStorage("panel_size") var panelSize: String = "default"
     @State var panelVisible = false
@@ -64,10 +66,6 @@ struct FloatingPanelContent: View {
     /// 动态高度防抖任务 — 流式输出时合并高频更新。
     @State var heightDebounceTask: Task<Void, Never>?
 
-    /// API 连通性探测节流：上次探测时间戳。
-    /// 两次探测间隔不得小于 `FloatingPanelLayout.apiProbeMinInterval`（30s）。
-    @State var lastProbeTime: Date = .distantPast
-
     /// 输入文本：直接绑定到 session.inputText，确保 opt+D 划词后
     /// 原文立即同步到输入框，不再依赖 onAppear/onChange 时序。
     private var inputText: Binding<String> {
@@ -77,7 +75,7 @@ struct FloatingPanelContent: View {
         )
     }
 
-    enum StatusColor { case green, yellow, red }
+    enum StatusColor { case green, yellow, red, gray }
 
     // MARK: - Mode Detection
 
@@ -347,56 +345,59 @@ struct FloatingPanelContent: View {
     // MARK: - Status Indicator
 
     func updateStatusFromSession() {
-        // 状态互斥：红 > 黄 > 绿，绝不同时出现两种颜色
+        // 状态互斥：红 > 黄 > 灰 > 绿（P1-B：灰 = 计费供应商未验证）
         if session.errorMessage != nil {
             // 有错误 → 红灯常亮（最高优先级）
             isBreathing = false
             statusColor = .red
         } else if apiConnectionFailed {
-            // API 连接失败 → 红灯常亮
+            // 仅 auth/network 类失败亮红（配额/模型错误不占连通灯）
             isBreathing = false
             statusColor = .red
         } else if isProbingAPI || session.isTranslating {
             // 正在探测或翻译中 → 黄灯闪烁（中间态）
             isBreathing = true
             statusColor = .yellow
+        } else if apiUnverified {
+            // 计费供应商未手动验证 → 灰灯，不自动烧配额
+            isBreathing = false
+            statusColor = .gray
         } else {
-            // 空闲 / 上次探测成功 / 翻译完成 → 绿灯常亮
+            // 空闲 / 验证通过 / 翻译完成 → 绿灯常亮
             isBreathing = false
             statusColor = .green
         }
         statusVisible = true
     }
 
-    /// Runs an async API connectivity probe against the current provider.
-    /// 带节流控制：两次探测间隔不得小于 `apiProbeMinInterval`（30s）。
+    /// 统一探测（P1-B）：免费探测可自动执行；计费供应商状态灯永不自动触发，
+    /// 无新鲜手动验证结果时显示灰灯（未验证）。节流/缓存/去重由 ProbeService 负责。
     func probeAPIConnectivity() {
         guard let provider = state.selectedProvider,
               provider.kind != .macOSNative
         else {
             apiConnectionFailed = false
+            apiUnverified = false
             updateStatusFromSession()
             return
         }
-
-        // P3-#13: API 探测节流 — 避免 onChange 链式触发高频重复探测
-        let now = Date()
-        guard now.timeIntervalSince(lastProbeTime) >= FloatingPanelLayout.apiProbeMinInterval else { return }
-        lastProbeTime = now
 
         isProbingAPI = true
         apiConnectionFailed = false
         updateStatusFromSession()
 
         Task { [provider] in
-            let result = await APITestService.testConnection(for: provider)
+            let result = await ProbeService.shared.probe(provider, allowPaid: false)
             await MainActor.run {
                 self.isProbingAPI = false
-                switch result {
-                case .success:
+                if let result {
+                    self.apiUnverified = false
+                    self.apiConnectionFailed = !result.isSuccess
+                        && (result.error?.isConnectivityFailure ?? false)
+                } else {
+                    // 计费供应商且无手动验证缓存 → 不探测、灰灯
+                    self.apiUnverified = true
                     self.apiConnectionFailed = false
-                case .failure:
-                    self.apiConnectionFailed = true
                 }
                 self.updateStatusFromSession()
             }
@@ -471,6 +472,7 @@ struct FloatingPanelContent: View {
             case .green:  return Color(red: 0.157, green: 0.784, blue: 0.251)
             case .yellow: return Color(red: 1.000, green: 0.800, blue: 0.000)  // #FFCC00 — vibrant neon amber
             case .red:    return Color(red: 1.000, green: 0.373, blue: 0.341)
+            case .gray:   return Color(white: 0.55)
             }
         }()
 
