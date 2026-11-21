@@ -100,6 +100,19 @@ actor LocalDictionaryRepository {
         return CachedDictEntry(modelName: model, jsonData: json, timestamp: ts)
     }
 
+    /// 删除一条缓存（坏数据自愈用，P1-A：存量坏 JSON 删除后由本次网络重查覆盖）。
+    func deleteEntry(word: String, targetLang: String) {
+        guard let db else { return }
+        let key = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sql = "DELETE FROM custom_dictionary WHERE query_word = ? AND target_lang = ?"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT_COPY)
+        sqlite3_bind_text(stmt, 2, targetLang, -1, SQLITE_TRANSIENT_COPY)
+        sqlite3_step(stmt)
+    }
+
     /// Saves a dictionary entry with **write‑once** semantics by default.
     ///
     /// - Parameter overwrite: When `false` (default), uses `INSERT OR IGNORE` —

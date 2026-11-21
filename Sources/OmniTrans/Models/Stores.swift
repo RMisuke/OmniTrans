@@ -21,17 +21,11 @@ final class TranslationSessionStore {
     var showErrorPulse: Bool = false
     var isDictionaryMode: Bool = false
     var dictionaryEntry: DictionaryEntry? = nil
-    var detectedIsWord: Bool = false
     var showPermissionHint: Bool = false
     var isFromLocalCache: Bool = false
     var cachedModelName: String = ""
     var cacheTimestamp: String = ""
 
-    /// 最后一次成功解析的词典 JSON 字符串。
-    /// 用于菜单栏 `TranslationView` 的「硬锁定」回退 —— 当流式尾帧
-    /// 将 `translatedText` 覆盖为空/非 JSON 内容时，视图回退到此缓存值，
-    /// 确保词典布局不会坍缩为空白区域。
-    var lastValidDictionaryJson: String? = nil
 }
 
 // MARK: - Configuration Store

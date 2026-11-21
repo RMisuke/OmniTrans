@@ -50,6 +50,21 @@ struct DictionaryEntry: Codable, Equatable {
 
     var isEmpty: Bool { !isWord && definitions.isEmpty && examples.isEmpty }
 
+    /// 词条纯文本（复制/朗读用）：单词 + 音标 + 释义 + 例句，
+    /// 而非只有 word（P1-A D8）。
+    var plainText: String {
+        var lines: [String] = [word]
+        if !phonetic.isEmpty { lines.append(phonetic) }
+        for def in definitions {
+            let pos = def.pos == "—" ? "" : "[\(def.pos)] "
+            lines.append("\(pos)\(def.meaning)")
+        }
+        for ex in examples {
+            lines.append(ex.zh.isEmpty ? ex.en : "\(ex.en) — \(ex.zh)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     static func empty(for word: String) -> DictionaryEntry {
         DictionaryEntry(isWord: false, word: word, phonetic: "",
             phoneticVariants: nil, definitions: [], examples: [], inflections: [])
@@ -104,13 +119,39 @@ struct DictionaryEntry: Codable, Equatable {
 }
 
 /// Intermediate decodable for LLM JSON output (no `word` field).
-private struct RawDict: Codable {
+/// 兼容 `is_word` / `isWord` 与 snake/camel 两种音标字段键名（P1-A：
+/// prompt 输出 `is_word`，旧解码只认 `isWord`，字段永为 nil 靠 ?? true 掩盖）。
+private struct RawDict: Decodable {
     let isWord: Bool?
     let phonetic: String?
     let phoneticVariants: [DictionaryEntry.PhoneticVariant]?
     let definitions: [DictionaryEntry.Definition]?
     let examples: [DictionaryEntry.Example]?
     let inflections: [DictionaryEntry.Inflection]?
+
+    private enum CodingKeys: String, CodingKey {
+        case isWord, is_word, phonetic, definitions, examples, inflections
+        case phoneticVariants, phonetic_variants
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // prompt 输出 is_word；兼容旧 camelCase
+        if let w = try c.decodeIfPresent(Bool.self, forKey: .is_word) {
+            isWord = w
+        } else {
+            isWord = try c.decodeIfPresent(Bool.self, forKey: .isWord)
+        }
+        phonetic = try c.decodeIfPresent(String.self, forKey: .phonetic)
+        if let v = try c.decodeIfPresent([DictionaryEntry.PhoneticVariant].self, forKey: .phoneticVariants) {
+            phoneticVariants = v
+        } else {
+            phoneticVariants = try c.decodeIfPresent([DictionaryEntry.PhoneticVariant].self, forKey: .phonetic_variants)
+        }
+        definitions = try c.decodeIfPresent([DictionaryEntry.Definition].self, forKey: .definitions)
+        examples = try c.decodeIfPresent([DictionaryEntry.Example].self, forKey: .examples)
+        inflections = try c.decodeIfPresent([DictionaryEntry.Inflection].self, forKey: .inflections)
+    }
 }
 
 /// Detects whether a query string is a single‑word lookup.
@@ -164,78 +205,4 @@ enum WordDetector {
     }
 }
 
-// MARK: - Streaming Dictionary JSON Parser
-
-/// Incrementally parses LLM-streamed JSON chunks into partial `DictionaryEntry`
-/// results, so the UI can display definitions *before* the model finishes
-/// emitting the full JSON object.  Only `definitions` and `word` are updated
-/// incrementally; `examples` and `phonetic` are filled on final flush.
-actor StreamingDictParser {
-    private var buffer = ""
-    private var word: String
-    private var partialDefs: [DictionaryEntry.Definition] = []
-    private var phonetic: String = ""
-
-    init(word: String) {
-        self.word = word
-    }
-
-    /// Feed a raw SSE chunk.  Returns a partial entry if new definitions
-    /// were extracted, or `nil` if nothing new was found.
-    func feed(_ chunk: String) -> DictionaryEntry? {
-        buffer += chunk
-        let prevCount = partialDefs.count
-        partialDefs = extractDefinitions(from: buffer)
-        if !phonetic.isEmpty { /* already found */ }
-        else if let p = extractPhonetic(from: buffer) { phonetic = p }
-        guard partialDefs.count > prevCount else { return nil }
-        return buildPartial()
-    }
-
-    /// Flush remaining buffer and return the best-available entry.
-    /// Falls back to full `DictionaryEntry.parse` for the complete result.
-    func flush() -> DictionaryEntry? {
-        // Try full parse first for the definitive result
-        if let full = DictionaryEntry.parse(from: buffer, word: word) {
-            return full
-        }
-        // Fall back to partial with whatever we have
-        guard !partialDefs.isEmpty else { return nil }
-        return buildPartial()
-    }
-
-    private func buildPartial() -> DictionaryEntry {
-        DictionaryEntry(
-            isWord: true, word: word,
-            phonetic: phonetic,
-            phoneticVariants: nil,
-            definitions: partialDefs,
-            examples: [],
-            inflections: []
-        )
-    }
-
-    // MARK: - Regex-based partial extraction
-
-    /// Matches individual definition blocks like:
-    /// `{"pos": "n.", "meaning": "hello"}`
-    private func extractDefinitions(from raw: String) -> [DictionaryEntry.Definition] {
-        let pattern = #/\{\s*"pos"\s*:\s*"([^"]+)"\s*,\s*"meaning"\s*:\s*"([^"]+)"\s*\}/#
-        var defs: [DictionaryEntry.Definition] = []
-        for match in raw.matches(of: pattern) {
-            let pos = String(match.1)
-            let meaning = String(match.2)
-                .replacingOccurrences(of: "\\\"", with: "\"")
-                .replacingOccurrences(of: "\\n", with: "\n")
-            defs.append(.init(pos: pos, posLabel: nil, senseNumber: nil, labels: nil, meaning: meaning))
-        }
-        return defs
-    }
-
-    /// Extracts phonetic from partial JSON like `"phonetic": "/həˈloʊ/"`
-    private func extractPhonetic(from raw: String) -> String? {
-        let pattern = #/"phonetic"\s*:\s*"([^"]+)"/#
-        guard let match = raw.firstMatch(of: pattern) else { return nil }
-        return String(match.1)
-    }
-}
+/// Detects whether a query string is a single‑word lookup.

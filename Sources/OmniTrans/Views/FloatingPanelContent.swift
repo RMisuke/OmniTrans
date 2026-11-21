@@ -1045,7 +1045,8 @@ struct FloatingPanelContent: View {
     private func copyResult() {
         let text: String
         if let entry = session.dictionaryEntry {
-            text = entry.word
+            // 复制完整词条（单词+音标+释义+例句），而非只有单词（P1-A D8）
+            text = entry.plainText
         } else if !session.translatedText.isEmpty {
             text = session.translatedText
         } else {
@@ -1061,7 +1062,8 @@ struct FloatingPanelContent: View {
     private func speakResult() {
         let text: String
         if let entry = session.dictionaryEntry {
-            text = entry.word
+            // 朗读完整词条（单词+音标+释义），而非只有单词（P1-A D8）
+            text = entry.plainText
         } else if !session.translatedText.isEmpty {
             text = session.translatedText
         } else {
