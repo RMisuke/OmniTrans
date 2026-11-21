@@ -57,11 +57,16 @@ struct FloatingPanelContent: View {
     @State var bottomBarHoveredBtn: String? = nil
 
     /// 动态测量的 Chrome 高度（topBar + inputCard + bottomBar + 间距）。
-    /// 初始值 180 为估算回退，首次布局完成后通过 GeometryReader 更新。
+    /// 初始值 180 为估算回退，上下 Chrome 实测后更新（P1-2：持续测量）。
     @State var chromeHeight: CGFloat = FloatingPanelLayout.chromeInitialEstimate
 
-    /// 标记 Chrome 是否已完成首次测量，防止窗口高度变化触发重复测量导致布局震荡。
-    @State var chromeMeasured = false
+    /// 上下 Chrome 的实测高度（onGeometryChange 持续更新）。
+    @State var chromeTopHeight: CGFloat = 0
+    @State var chromeBottomHeight: CGFloat = 0
+
+    /// 流式高度测量节流：上次测量时的文本长度与目标高度（P1-2）。
+    @State var lastStreamingMeasuredLen: Int = 0
+    @State var lastStreamingTarget: CGFloat = 0
 
     /// 动态高度防抖任务 — 流式输出时合并高频更新。
     @State var heightDebounceTask: Task<Void, Never>?
@@ -208,9 +213,21 @@ struct FloatingPanelContent: View {
                 target = calculator.defaultTargetHeight
 
             case .translating:
-                target = session.isTranslating
-                    ? calculator.streamingTargetHeight(currentText: session.translatedText)
-                    : calculator.defaultTargetHeight
+                if session.isTranslating {
+                    // 流式测量节流（P1-2）：文本每增长 ≥24 字符才重新全量测量，
+                    // 其余复用上次目标；流结束走 .translation 分支做一次精确测量。
+                    let len = session.translatedText.count
+                    if lastStreamingTarget == 0 || len < lastStreamingMeasuredLen
+                        || len - lastStreamingMeasuredLen >= 24 {
+                        lastStreamingTarget = calculator.streamingTargetHeight(currentText: session.translatedText)
+                        lastStreamingMeasuredLen = len
+                    }
+                    target = lastStreamingTarget
+                } else {
+                    lastStreamingTarget = 0
+                    lastStreamingMeasuredLen = 0
+                    target = calculator.defaultTargetHeight
+                }
 
             case .translation:
                 target = calculator.translationTargetHeight(text: session.translatedText)
@@ -247,17 +264,18 @@ struct FloatingPanelContent: View {
                             .padding(.bottom, 8)
                     }
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { applyChromeMeasurement(top: $0) }
             } else {
                 VStack(spacing: 0) {
                     topBar
                     inputCard
                         .padding(.bottom, 8)
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { applyChromeMeasurement(top: $0) }
             }
             middleArea
                 .frame(maxHeight: .infinity)
                 .animation(AppTheme.Motion.contentSwap.resolveGated(), value: displayMode)
-                .background(alignment: .center) { chromeHeightMeasurer }
             if #available(macOS 26.0, *) {
                 GlassEffectContainer {
                     VStack(spacing: 0) {
@@ -265,11 +283,13 @@ struct FloatingPanelContent: View {
                             .padding(.top, 4)
                     }
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { applyChromeMeasurement(bottom: $0) }
             } else {
                 VStack(spacing: 0) {
                     bottomBar
                         .padding(.top, 4)
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { applyChromeMeasurement(bottom: $0) }
             }
         }
         .frame(minWidth: FloatingPanelLayout.panelWidth,
@@ -328,30 +348,16 @@ struct FloatingPanelContent: View {
 
     // MARK: - Chrome Height Measurement
 
-    /// 通过 GeometryReader 在首次布局时测量 Chrome 高度。
-    /// Chrome = topBar + inputCard + bottomBar + 间距。
-    /// **一次性测量**：首次布局完成后记录，此后无论窗口高度如何变化都不再重新测量，
-    /// 避免 `测量 → 更新窗口高度 → 内容高度变化 → 再次测量` 的布局震荡循环。
-    @ViewBuilder
-    private var chromeHeightMeasurer: some View {
-        GeometryReader { geometry in
-            Color.clear
-                .onAppear {
-                    guard !chromeMeasured else { return }
-                    updateChromeHeight(middleAreaHeight: geometry.size.height)
-                }
-        }
-    }
-
-    /// 根据 middleArea 实测高度计算并锁定 Chrome 高度。
-    /// 范围守卫 [120, 300] 确保只接受有效值，拒绝动画过渡期的异常数据。
-    /// `chromeMeasured` 标记确保该方法**最多执行一次**，切断布局反馈循环。
-    func updateChromeHeight(middleAreaHeight: CGFloat) {
-        let windowH = FloatingWindowManager.shared.currentHeight
-        let computed = windowH - middleAreaHeight
-        if computed >= FloatingPanelLayout.chromeMin && computed <= FloatingPanelLayout.chromeMax {
-            chromeHeight = computed
-            chromeMeasured = true
+    /// 持续测量上下 Chrome 高度并求和（P1-2）。
+    /// chromeHeight 不参与布局，因此 `测量 → 调高窗口 → 再测量` 不会形成震荡环；
+    /// 旧实现在首次测量后永久锁定，输入框 1→3 行 / 预热条出现后高度模型失真，
+    /// 首次测量落在守卫范围外时还会永久停留在 180pt 估算值。
+    func applyChromeMeasurement(top: CGFloat? = nil, bottom: CGFloat? = nil) {
+        if let top { chromeTopHeight = top }
+        if let bottom { chromeBottomHeight = bottom }
+        let total = chromeTopHeight + chromeBottomHeight
+        if total >= FloatingPanelLayout.chromeMin && total <= FloatingPanelLayout.chromeMax {
+            chromeHeight = total
         }
     }
 

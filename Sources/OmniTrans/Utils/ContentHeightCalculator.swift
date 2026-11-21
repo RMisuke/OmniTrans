@@ -9,11 +9,17 @@ final class LineCountCache: @unchecked Sendable {
     private let cache = NSCache<NSString, NSNumber>()
 
     func object(forKey key: NSString) -> NSNumber? { cache.object(forKey: key) }
-    func setObject(_ obj: NSNumber, forKey key: NSString) { cache.setObject(obj, forKey: key) }
+    func setObject(_ obj: NSNumber, forKey key: NSString, cost: Int = 0) {
+        cache.setObject(obj, forKey: key, cost: cost)
+    }
     func removeAllObjects() { cache.removeAllObjects() }
     var countLimit: Int {
         get { cache.countLimit }
         set { cache.countLimit = newValue }
+    }
+    var totalCostLimit: Int {
+        get { cache.totalCostLimit }
+        set { cache.totalCostLimit = newValue }
     }
 }
 
@@ -64,6 +70,8 @@ struct ContentHeightCalculator {
     private static let lineCountCache: LineCountCache = {
         let cache = LineCountCache()
         cache.countLimit = cacheLimit
+        // 按文本长度计费（P1-2：防止 200 条长译文常驻）
+        cache.totalCostLimit = 1_000_000
         return cache
     }()
 
@@ -128,7 +136,7 @@ struct ContentHeightCalculator {
         let lh = lineHeight
         let count = max(1, Int(ceil(h / lh)))
 
-        Self.lineCountCache.setObject(NSNumber(value: count), forKey: key)
+        Self.lineCountCache.setObject(NSNumber(value: count), forKey: key, cost: key.length)
         return count
     }
 
