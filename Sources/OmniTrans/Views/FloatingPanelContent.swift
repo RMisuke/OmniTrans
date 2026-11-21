@@ -552,6 +552,7 @@ struct FloatingPanelContent: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(minWidth: 100, maxWidth: 140)
+                .help("翻译引擎：\(currentProviderName)（点击切换供应商）")
             }
         }
     }
@@ -634,6 +635,7 @@ struct FloatingPanelContent: View {
                 .foregroundColor(AppTheme.textSecondary)
         }
         .buttonStyle(.plain)
+        .help("清空输入")
         .padding(4)
         .transition(.opacity.animation(AppTheme.Motion.clearFade.resolve()))
         .animation(AppTheme.Motion.clearFade.resolveGated(), value: inputText.wrappedValue.isEmpty)
@@ -935,7 +937,7 @@ struct FloatingPanelContent: View {
     // MARK: - Bottom Bar (macOS 26 Liquid Glass)
 
     private var modeOverrideIcon: String {
-        switch session.modeOverride {
+        switch state.modeOverride {
         case .auto:        "sparkles"
         case .dictionary:  "character.book.closed"
         case .translation: "character.bubble"
@@ -973,6 +975,7 @@ struct FloatingPanelContent: View {
             .frame(height: 26)
             .liquidGlassButton()
             .onHover { hovered in bottomBarHoveredBtn = hovered ? "lang" : nil }
+            .help("目标语言（点击切换）")
 
             // ── 上下文感知开关（图标型：省宽度、不截断；蓝色=开启）──
             bottomBarToggle("brain.head.profile",
@@ -984,10 +987,10 @@ struct FloatingPanelContent: View {
 
             // ── 查询模式开关（自动/取词/翻译 循环；高亮=强制）──
             bottomBarToggle(modeOverrideIcon,
-                            active: session.modeOverride != .auto,
+                            active: state.modeOverride != .auto,
                             id: "mode",
-                            help: "查询模式：\(session.modeOverride.label)（点击切换为\(session.modeOverride.next.label)，下次取词恢复自动）") {
-                session.modeOverride = session.modeOverride.next
+                            help: "查询模式：\(state.modeOverride.label)（点击切换为\(state.modeOverride.next.label)，下次取词恢复自动）") {
+                state.modeOverride = state.modeOverride.next
             }
 
             Spacer()
@@ -1013,6 +1016,7 @@ struct FloatingPanelContent: View {
             .frame(height: 26)
             .liquidGlassProminentButton()
             .layoutPriority(1)
+            .help(hasResult ? "用当前引擎重新请求（写入新历史）" : "开始翻译 / 查词")
             .disabled(inputText.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || session.isTranslating)
         }
         .padding(.horizontal, 12).padding(.vertical, 6)

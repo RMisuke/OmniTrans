@@ -14,6 +14,8 @@ final class AppState: ObservableObject {
 
     @Published var providers: [APIProvider] = []
     @Published var selectedProviderID: UUID?
+    /// 查询模式手动覆盖（自动/取词/翻译）—— 面板底栏开关（修复2）。
+    @Published var modeOverride: QueryModeOverride = .auto
     /// Provider for word/dictionary lookups. Falls back to selectedProviderID if nil.
     @Published var dictProviderID: UUID?
     @Published var sourceLang: TranslationLanguage = .auto { didSet { ProviderStorageManager.saveSourceLang(sourceLang) } }
@@ -255,8 +257,8 @@ final class AppState: ObservableObject {
         guard !text.isEmpty else { return }
         guard let p = selectedProvider, p.isEnabled else {
             // 纯原生词典查询不依赖云端 API 配置（P0-R4）；词典模式尊重手动覆盖（修复2）
-            let treatAsWord = session.modeOverride == .dictionary
-                || (session.modeOverride == .auto && WordDetector.isWord(text))
+            let treatAsWord = modeOverride == .dictionary
+                || (modeOverride == .auto && WordDetector.isWord(text))
             if treatAsWord, enabledProviders.contains(where: { $0.kind == .macOSNative }) {
                 session.isFromLocalCache = false
                 doTranslate(text: text, provider: APIProvider.native, context: context, forceRefresh: forceRefresh)
@@ -394,7 +396,7 @@ final class AppState: ObservableObject {
             // Success path skips probe entirely for minimum latency.
             // 查询模式（修复2）：手动覆盖优先于自动判定
             let isWord: Bool
-            switch self.session.modeOverride {
+            switch self.modeOverride {
             case .auto:        isWord = WordDetector.isWord(text)
             case .dictionary:  isWord = true
             case .translation: isWord = false
@@ -700,7 +702,7 @@ final class AppState: ObservableObject {
         inputText = text; translatedText = ""; errorMessage = nil; isTranslating = false; lastText = ""
         dictionaryEntry = nil; isDictionaryMode = false
         // 新的取词/打开窗口 → 模式覆盖回到自动（修复2）
-        session.modeOverride = .auto
+        modeOverride = .auto
         streamingFinished = false; showSuccessPulse = false; showErrorShake = false; showErrorPulse = false
         showPermissionHint = !HotkeyManager.isTrusted && text.isEmpty
 
