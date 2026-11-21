@@ -126,7 +126,7 @@ final class AppState: ObservableObject {
 
     func load() {
         #if DEBUG
-        KeychainManager.debugDump()  // debug: verify keys on launch
+        SecretStore.debugDump()  // debug: verify keys on launch
         #endif
         providers = ProviderStorageManager.loadProviders()
         // Native always first

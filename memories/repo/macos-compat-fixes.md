@@ -207,3 +207,22 @@ build 有大量 Swift 6 严格并发 warning，现为 0 error / 0 warning，`swi
 - **M 系列**：签名 URL 脱敏、TTS utterance 身份守卫、SSE onTermination、语言包仅 installed 缓存、耗时公式补整秒、busy 上抛、预热 markFailed、原子写、MainActor hop、UserDefaults 观察者
 - 死代码清除约 12 处；ATS 阿里云例外移除（远端全 https）；版本统一 0.7.0
 - 测试 49 → 58+ 例；Debug/Release 0 error / 0 warning
+
+## 密钥存储重构：钥匙串 → 本地加密存储（2026-11-21）
+
+**问题**：重新编译后打开应用弹系统钥匙串密码，且输入正确密码被拒。根因：Phase 0
+的 R2 改动删除 entitlements `keychain-access-groups` 并启用 Hardened Runtime，
+叠加 ad-hoc 签名每次编译 cdhash 变化 → 钥匙串条目 access group/签名 ACL 全失配
+→ SecurityAgent 弹窗；组失配下正确密码也可能被拒，重复失败还会锁定登录钥匙串。
+
+**重构**：`SecretStore`（替代 KeychainManager，删除全部 SecItem 代码）
+- 主密钥：`SecRandomCopyBytes` 32B，存 `.master.key`（0600）——替代 IOPlatformUUID
+  派生（换主板不再丢钥），不再访问钥匙串（零弹窗）
+- 密文：整表 `[UUID: SecretFields]` → JSON → AES-256-GCM 单密文块
+  `secrets.v2.json`（0600）；每次保存新 nonce + 原子写，实例锁串行化
+- 迁移：v1 `secrets.json` 首次访问自动解密重加密（LegacyV1 仅迁移用）并删旧文件；
+  钥匙串存量不自动导入（读取即弹窗），受影响用户重输一次 API Key
+- 安全边界：防误传/云备份泄漏/其他用户/未解锁磁盘；不防同账户恶意进程；
+  静态加密依赖 FileVault（README 已注明）
+- 测试 8 例：往返、跨实例持久化、删除/空保存、权限与密钥尺寸、坏密文、
+  错主密钥、v1 迁移、不可解密 v1

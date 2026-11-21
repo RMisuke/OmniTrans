@@ -33,7 +33,7 @@ enum ProviderStorageManager {
     /// 线程安全的密钥缓存。启动时从 Keychain 一次性加载，
     /// 后续 `cachedValue` 调用零磁盘 I/O。
     fileprivate static let cacheLock = OSAllocatedUnfairLock(initialState: (
-        cache: [UUID: KeychainFields](),
+        cache: [UUID: SecretFields](),
         loaded: false
     ))
 
@@ -43,20 +43,20 @@ enum ProviderStorageManager {
     static func preloadSecrets() {
         cacheLock.withLock { state in
             guard !state.loaded else { return }
-            state.cache = KeychainManager.batchReadAll()
+            state.cache = SecretStore.shared.batchReadAll()
             state.loaded = true
         }
     }
 
     /// 获取指定 provider 的密钥字段（零 I/O）。
-    static func cachedFields(for providerID: UUID) -> KeychainFields {
-        cacheLock.withLock { $0.cache[providerID] ?? KeychainFields() }
+    static func cachedFields(for providerID: UUID) -> SecretFields {
+        cacheLock.withLock { $0.cache[providerID] ?? SecretFields() }
     }
 
     /// 单字段查找（零 I/O）—— 供翻译链路高频调用。
     static func cachedValue(for providerID: UUID, field: String) -> String {
         cacheLock.withLock { state in
-            let f = state.cache[providerID] ?? KeychainFields()
+            let f = state.cache[providerID] ?? SecretFields()
             switch field {
             case "apiKey":    return f.apiKey
             case "apiSecret": return f.apiSecret
@@ -80,7 +80,7 @@ enum ProviderStorageManager {
         return cacheLock.withLock { state in
             decoded.map { provider in
                 var p = provider
-                let fields = state.cache[p.id] ?? KeychainFields()
+                let fields = state.cache[p.id] ?? SecretFields()
                 if p.apiKey.isEmpty && !fields.apiKey.isEmpty { p.apiKey = fields.apiKey }
                 if p.apiSecret.isEmpty && !fields.apiSecret.isEmpty { p.apiSecret = fields.apiSecret }
                 if p.customRegion.isEmpty && !fields.customRegion.isEmpty { p.customRegion = fields.customRegion }
@@ -104,12 +104,12 @@ enum ProviderStorageManager {
 
         // ── Step 1: 增量 Keychain 写入（仅变更项） ──
         for p in providers {
-            let newFields = KeychainFields(
+            let newFields = SecretFields(
                 apiKey: p.apiKey,
                 apiSecret: p.apiSecret,
                 customRegion: p.customRegion
             )
-            let oldFields = cacheLock.withLock { $0.cache[p.id] ?? KeychainFields() }
+            let oldFields = cacheLock.withLock { $0.cache[p.id] ?? SecretFields() }
 
             // 仅当密钥内容发生变化时才触发 Keychain I/O
             guard newFields.apiKey != oldFields.apiKey
@@ -118,10 +118,10 @@ enum ProviderStorageManager {
             else { continue }
 
             if !newFields.isEmpty {
-                KeychainManager.saveFields(newFields, for: p.id)
+                SecretStore.shared.saveFields(newFields, for: p.id)
                 cacheLock.withLock { $0.cache[p.id] = newFields }
             } else {
-                KeychainManager.deleteAllFields(for: p.id)
+                SecretStore.shared.deleteAllFields(for: p.id)
                 _ = cacheLock.withLock { $0.cache.removeValue(forKey: p.id) }
             }
         }
@@ -140,7 +140,7 @@ enum ProviderStorageManager {
 
     /// 删除指定 provider 的密钥（从 Keychain + 缓存中移除）。
     static func deleteProviderSecrets(for id: UUID) {
-        KeychainManager.deleteAllFields(for: id)
+        SecretStore.shared.deleteAllFields(for: id)
         _ = cacheLock.withLock { $0.cache.removeValue(forKey: id) }
     }
 

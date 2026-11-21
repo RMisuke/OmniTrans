@@ -4,7 +4,7 @@ import Foundation
 
 /// `~/Library/Application Support/OmniTrans` 路径的唯一来源。
 ///
-/// 所有持久化子系统（KeychainManager、HistoryActor、LocalDictionaryRepository）
+/// 所有持久化子系统（SecretStore、HistoryActor、LocalDictionaryRepository）
 /// 统一使用此类型，避免路径构造和目录创建逻辑的重复。
 ///
 /// ## 性能设计
@@ -21,11 +21,6 @@ enum StoragePaths {
 
     /// Application Support/OmniTrans 目录。
     static var appSupportDir: URL { cachedDir }
-
-    /// 加密密钥文件路径。
-    static var secretsFile: URL {
-        appSupportDir.appendingPathComponent("secrets.json")
-    }
 
     /// JSONL 翻译历史归档路径。
     static var historyArchive: URL {
