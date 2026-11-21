@@ -254,3 +254,15 @@ L2 统一存归一化 JSON（含 native 补全），native 查词补写 L2；历
 - **词典**：WordDetector Unicode 归一化 + CJK 扩展区；`_ctx` 键读写对齐；
   isFromLocalCache 语义修正；双源合并纯函数化
 - 验证：113 例测试 0 失败；Debug/Release 0 警告
+
+## Backlog 清理（2026-11-21）
+
+- 布局常量：删除 22 个零引用常量，heightForMode/结果卡片接线常量
+- 拖拽看门狗（300ms 复位 + 高度补算）、updateHeight 屏幕 clamp、
+  hide/updateHeight 接入 AnimationGate（reduce-motion 直接跳变）、
+  去除与 OmniPanel 重复的 shadowPath
+- SQLite：NULL 安全列读取、db 守卫、全失败回滚、时间戳格式器复用
+- TokenRate：CJK 系数 1.35；OpenAI stream_options.include_usage 真实
+  completion_tokens 校准终值（无 usage 回退估算）
+- 未做：三重缓冲背压（AsyncThrowingStream 无界是简化取舍，chunk 体积
+  小、消费端快于网络；如未来出现卡顿再评估有界缓冲）
