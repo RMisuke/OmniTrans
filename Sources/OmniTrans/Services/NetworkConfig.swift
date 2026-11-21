@@ -20,6 +20,8 @@ enum NetworkConfig {
     // MARK: Session-level (sharedURLSession)
     static let requestTimeout: TimeInterval = 30
     static let resourceTimeout: TimeInterval = 60
+    /// SSE 专用资源超时 —— 长翻译流可能持续数分钟（P0-2：共享会话 60s 会掐断）
+    static let streamResourceTimeout: TimeInterval = 300
     static let maxConnectionsPerHost = 10
     /// Whether to wait for connectivity instead of failing immediately (P1)
     static let waitsForConnectivity = true

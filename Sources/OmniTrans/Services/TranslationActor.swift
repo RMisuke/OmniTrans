@@ -110,6 +110,25 @@ let sharedURLSession: URLSession = {
     return URLSession(configuration: config, delegate: pinningDelegate, delegateQueue: nil)
 }()
 
+/// SSE 专用会话：resource 超时 300s（P0-2：共享会话 60s 会掐断长翻译流）。
+/// 其余配置与共享会话一致（TLS pinning delegate、gzip、连接池）。
+let streamURLSession: URLSession = {
+    let config = URLSessionConfiguration.default
+    config.httpShouldUsePipelining = true
+    config.httpMaximumConnectionsPerHost = NetworkConfig.maxConnectionsPerHost
+    config.urlCache = nil
+    config.requestCachePolicy = .reloadIgnoringLocalCacheData
+    config.timeoutIntervalForRequest = NetworkConfig.streamingTimeout
+    config.timeoutIntervalForResource = NetworkConfig.streamResourceTimeout
+    config.waitsForConnectivity = NetworkConfig.waitsForConnectivity
+    config.allowsExpensiveNetworkAccess = true
+    config.allowsConstrainedNetworkAccess = true
+    var headers = config.httpAdditionalHeaders ?? [:]
+    headers["Accept-Encoding"] = "gzip, identity"
+    config.httpAdditionalHeaders = headers
+    return URLSession(configuration: config, delegate: pinningDelegate, delegateQueue: nil)
+}()
+
 // MARK: - Translation Actor
 
 /// Isolated actor for all network I/O, SSE parsing, and JSON decoding.
@@ -128,6 +147,11 @@ actor TranslationActor {
     /// connection pool for zero additional TCP/TLS handshake latency.
     private func makeSession() -> URLSession {
         sharedURLSession
+    }
+
+    /// SSE 流式请求专用会话（resource 超时 300s，P0-2）。
+    private func makeStreamingSession() -> URLSession {
+        streamURLSession
     }
 
     // MARK: - Generic Network & SSE Helpers
@@ -155,20 +179,20 @@ actor TranslationActor {
         bytes: URLSession.AsyncBytes,
         throttle: ThrottledStream,
         decoder: JSONDecoder = JSONDecoder(),
-        extractText: @escaping (T) -> String?
+        extractText: @escaping (T) throws -> String?
     ) async throws {
         // B11: 不再用 `try?` 静默吞掉解码错误 —— 记录每行失败并统计连续失败，
         // 超过阈值即抛出，避免「流式无输出且无任何日志」的静默故障。
         var consecutiveFailures = 0
+        var emittedChars = 0
         for try await line in bytes.lines {
             try Task.checkCancellation()
             guard line.hasPrefix("data: "), !line.contains("[DONE]") else { continue }
             let jsonData = Data(line.utf8.dropFirst(6))
+            let chunk: T
             do {
-                let chunk = try decoder.decode(T.self, from: jsonData)
-                guard let text = extractText(chunk), !text.isEmpty else { continue }
+                chunk = try decoder.decode(T.self, from: jsonData)
                 consecutiveFailures = 0
-                await throttle.yield(text)
             } catch {
                 consecutiveFailures += 1
                 let preview = String(data: jsonData, encoding: .utf8)?.prefix(120) ?? "?"
@@ -178,7 +202,16 @@ actor TranslationActor {
                         "SSE 流解码连续失败（\(consecutiveFailures) 次），已中止"
                     )
                 }
+                continue
             }
+            // 业务错误（流内 error / 截断 / 内容拦截）直接抛出，不占用解码失败配额（P0-1）
+            guard let text = try extractText(chunk), !text.isEmpty else { continue }
+            emittedChars += text.count
+            await throttle.yield(text)
+        }
+        // 零输出兜底：模型被拦截或服务异常时不再静默返回空译文（P0-1）
+        if emittedChars == 0 {
+            throw TranslationService.TranslationError.apiError("模型未返回任何内容（可能被拦截或服务异常）")
         }
     }
 
@@ -361,6 +394,7 @@ actor TranslationActor {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         req.setValue("Bearer \(p.apiKey)", forHTTPHeaderField: "Authorization")
         req.timeoutInterval = NetworkConfig.streamingTimeout
 
@@ -382,15 +416,22 @@ actor TranslationActor {
         )
         req.httpBody = try JSONEncoder().encode(requestBody)
 
-        let session = makeSession()
+        let session = makeStreamingSession()
         let (bytes, resp) = try await session.bytes(for: req)
         try await validateSSEResponse(http: resp as? HTTPURLResponse, bytes: bytes) { data in
             (try? JSONDecoder().decode(OAIErr.self, from: data))?.error.message ?? "HTTP error"
         }
 
         let t = ThrottledStream(c)
-        try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: OAIStreamChunk) in
-            chunk.choices?.first?.delta?.content
+        try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: OAIStreamChunk) throws -> String? in
+            if let err = chunk.error {
+                throw TranslationService.TranslationError.apiError(err.error.message)
+            }
+            if let reason = chunk.choices?.first?.finish_reason,
+               reason == "length" || reason == "content_filter" {
+                throw TranslationService.TranslationError.apiError("输出不完整（\(reason)）")
+            }
+            return chunk.choices?.first?.delta?.content
         }
         await t.flush()
     }
@@ -409,6 +450,7 @@ actor TranslationActor {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         req.setValue(p.apiKey, forHTTPHeaderField: "x-api-key")
         req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         req.timeoutInterval = NetworkConfig.streamingTimeout
@@ -423,15 +465,21 @@ actor TranslationActor {
         )
         req.httpBody = try JSONEncoder().encode(requestBody)
 
-        let session = makeSession()
+        let session = makeStreamingSession()
         let (bytes, resp) = try await session.bytes(for: req)
         try await validateSSEResponse(http: resp as? HTTPURLResponse, bytes: bytes) { data in
             (try? JSONDecoder().decode(AnthErr.self, from: data))?.error.message ?? "HTTP error"
         }
 
         let t = ThrottledStream(c)
-        try await parseSSEStream(bytes: bytes, throttle: t) { (event: AnthStreamEvent) in
-            event.type == "content_block_delta" ? event.delta?.text : nil
+        try await parseSSEStream(bytes: bytes, throttle: t) { (event: AnthStreamEvent) throws -> String? in
+            if event.type == "error", let err = event.error {
+                throw TranslationService.TranslationError.apiError(err.error.message)
+            }
+            if event.delta?.stop_reason == "max_tokens" {
+                throw TranslationService.TranslationError.apiError("输出被截断（max_tokens）")
+            }
+            return event.type == "content_block_delta" ? event.delta?.text : nil
         }
         await t.flush()
     }
@@ -450,6 +498,7 @@ actor TranslationActor {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         req.setValue(p.apiKey, forHTTPHeaderField: "x-goog-api-key")
         req.timeoutInterval = NetworkConfig.streamingTimeout
 
@@ -459,15 +508,22 @@ actor TranslationActor {
         )
         req.httpBody = try JSONEncoder().encode(requestBody)
 
-        let session = makeSession()
+        let session = makeStreamingSession()
         let (bytes, resp) = try await session.bytes(for: req)
         try await validateSSEResponse(http: resp as? HTTPURLResponse, bytes: bytes) { data in
             (try? JSONDecoder().decode(GemErr.self, from: data))?.error.message ?? "HTTP error"
         }
 
         let t = ThrottledStream(c)
-        try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: GemStreamChunk) in
-            chunk.candidates?.first?.content?.parts?.first?.text
+        try await parseSSEStream(bytes: bytes, throttle: t) { (chunk: GemStreamChunk) throws -> String? in
+            if let err = chunk.error {
+                throw TranslationService.TranslationError.apiError(err.error.message)
+            }
+            if let fr = chunk.candidates?.first?.finishReason,
+               fr == "MAX_TOKENS" || fr == "SAFETY" || fr == "RECITATION" || fr == "BLOCKLIST" {
+                throw TranslationService.TranslationError.apiError("输出被截断或拦截（\(fr)）")
+            }
+            return chunk.candidates?.first?.content?.parts?.first?.text
         }
         await t.flush()
     }
@@ -932,24 +988,34 @@ struct OAIErr: Codable, Sendable {
     let error: Detail
 }
 private struct OAIStreamChunk: Codable, Sendable {
-    struct Choice: Codable, Sendable { struct Delta: Codable, Sendable { let content: String? }; let delta: Delta? }
+    struct Choice: Codable, Sendable {
+        struct Delta: Codable, Sendable { let content: String? }
+        let delta: Delta?
+        let finish_reason: String?
+    }
     let choices: [Choice]?
+    let error: OAIErr?
 }
 struct AnthErr: Codable, Sendable {
     struct Detail: Codable, Sendable { let message: String }
     let error: Detail
 }
 private struct AnthStreamEvent: Codable, Sendable {
-    struct Delta: Codable, Sendable { let text: String?; let type: String? }
-    let type: String?; let delta: Delta?
+    struct Delta: Codable, Sendable { let text: String?; let type: String?; let stop_reason: String? }
+    let type: String?; let delta: Delta?; let error: AnthErr?
 }
 struct GemErr: Codable, Sendable {
     struct Detail: Codable, Sendable { let message: String }
     let error: Detail
 }
 private struct GemStreamChunk: Codable, Sendable {
-    struct Cand: Codable, Sendable { struct Cont: Codable, Sendable { struct Part: Codable, Sendable { let text: String? }; let parts: [Part]? }; let content: Cont? }
+    struct Cand: Codable, Sendable {
+        struct Cont: Codable, Sendable { struct Part: Codable, Sendable { let text: String? }; let parts: [Part]? }
+        let content: Cont?
+        let finishReason: String?
+    }
     let candidates: [Cand]?
+    let error: GemErr?
 }
 
 // MARK: - TranslationEngineProtocol conformance
