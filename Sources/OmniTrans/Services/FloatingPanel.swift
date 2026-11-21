@@ -45,13 +45,13 @@ extension Notification.Name {
 final class FloatingPanel: OmniPanel, NSWindowDelegate {
     static let shared = FloatingPanel()
 
-    static let defaultWidth: CGFloat = 420
-    static let minHeight: CGFloat = 280
-    static let maxHeight: CGFloat = 800
+    static let defaultWidth: CGFloat = FloatingPanelLayout.panelWidth
+    static let minHeight: CGFloat = FloatingPanelLayout.panelMinHeight
+    static let maxHeight: CGFloat = FloatingPanelLayout.heightDynamicMax
 
     /// 动态模式下的高度边界（与 `FloatingPanelContent` 共享）。
-    static let dynamicMinHeight: CGFloat = 480
-    static let dynamicMaxHeight: CGFloat = 800
+    static let dynamicMinHeight: CGFloat = FloatingPanelLayout.heightDynamicMin
+    static let dynamicMaxHeight: CGFloat = FloatingPanelLayout.heightDynamicMax
 
     /// 关闭策略，从 UserDefaults 动态读取。
     var closeMethod: CloseMethod = .clickOutside
@@ -84,11 +84,35 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
         )
     }
 
-    @objc private func windowWillMove() { AppState.isUserDraggingWindow = true }
-    @objc private func windowDidMove()   { AppState.isUserDraggingWindow = false }
+    /// 拖拽看门狗：willMove 置位后 300ms 无后续 didMove 自动复位并补算高度。
+    /// 防止 didMove 丢失导致高度更新被永久阻断（backlog）。
+    private var dragWatchdog: Task<Void, Never>?
+
+    @objc private func windowWillMove() {
+        AppState.isUserDraggingWindow = true
+        scheduleDragEnd()
+    }
+
+    @objc private func windowDidMove() {
+        AppState.isUserDraggingWindow = true
+        scheduleDragEnd()
+    }
+
+    private func scheduleDragEnd() {
+        dragWatchdog?.cancel()
+        dragWatchdog = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            AppState.isUserDraggingWindow = false
+            self?.dragWatchdog = nil
+            // 拖拽结束后补算高度（拖拽期间高度更新被跳过）
+            NotificationCenter.default.post(name: .floatingPanelNeedsHeightUpdate, object: nil)
+        }
+    }
 
     deinit {
         pendingCloseTask?.cancel()
+        dragWatchdog?.cancel()
         // resignKeyObserver 是 non-Sendable 类型，不能从 nonisolated deinit 直接访问，
         // 使用 String-based 移除绕过类型系统限制。
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: self)
@@ -175,10 +199,10 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
 
     func heightForMode(_ mode: String) -> CGFloat {
         switch mode {
-        case "small":   return 320
-        case "large":   return 620
+        case "small":   return FloatingPanelLayout.heightSmall
+        case "large":   return FloatingPanelLayout.heightLarge
         case "dynamic": return Self.dynamicMinHeight
-        default:        return 460
+        default:        return FloatingPanelLayout.panelDefaultHeight
         }
     }
 
@@ -217,6 +241,12 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
         hideGeneration += 1
         let generation = hideGeneration
         Task { await TTSManager.shared.stop() }
+        // 动画门控（backlog）：减少动态效果/动画关闭时直接隐藏
+        guard AnimationGate.isEnabled && !AnimationEngine.isReducedMotion else {
+            guard hideGeneration == generation else { return }
+            orderOut(nil)
+            return
+        }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = AppTheme.Motion.panelHide.appKitDuration
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
@@ -250,22 +280,26 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
         newFrame.origin.y += newFrame.size.height - clamped
         newFrame.size = NSSize(width: w, height: clamped)
 
-        guard newFrame.size != frame.size else { return }
+        // 屏幕 clamp（backlog）：向上伸展不越出当前屏可见区
+        let screen = NSScreen.screens.first(where: { $0.frame.intersects(newFrame) }) ?? NSScreen.main
+        if let vf = screen?.visibleFrame {
+            if newFrame.maxY > vf.maxY {
+                newFrame.size.height = max(Self.minHeight, vf.maxY - newFrame.minY)
+            }
+            newFrame.origin.x = min(max(newFrame.origin.x, vf.minX), vf.maxX - newFrame.width)
+        }
 
-        if animate {
-            let newPath = CGPath(
-                roundedRect: CGRect(origin: .zero, size: newFrame.size),
-                cornerWidth: Self.panelCornerRadius,
-                cornerHeight: Self.panelCornerRadius,
-                transform: nil
-            )
+        guard newFrame.size != frame.size || newFrame.origin != frame.origin else { return }
+
+        // 动画门控（backlog）：系统减少动态效果 / 全局动画关闭时直接 setFrame。
+        // shadowPath 由 OmniPanel 的 wrapperFrameDidChange 统一同步，此处不再重复设置。
+        let shouldAnimate = animate && AnimationGate.isEnabled && !AnimationEngine.isReducedMotion
+        if shouldAnimate {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = AppTheme.Motion.panelResize.appKitDuration
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 ctx.allowsImplicitAnimation = true
                 animator().setFrame(newFrame, display: true)
-                // 同步动画 shadowPath，避免阴影瞬间跳变
-                contentView?.layer?.shadowPath = newPath
             } completionHandler: { [weak self] in
                 guard let self else { return }
                 Task { @MainActor in
@@ -274,6 +308,7 @@ final class FloatingPanel: OmniPanel, NSWindowDelegate {
             }
         } else {
             setFrame(newFrame, display: true)
+            contentView?.layoutSubtreeIfNeeded()
         }
     }
 }

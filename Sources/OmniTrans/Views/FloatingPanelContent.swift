@@ -861,7 +861,7 @@ struct FloatingPanelContent: View {
                 .strokeBorder(AppTheme.MaterialPolicy.cardStroke, lineWidth: 1)
         )
         .padding(.horizontal, FloatingPanelLayout.contentHorizontalInset)
-        .frame(minHeight: 80, maxHeight: panelSize == "dynamic" ? .infinity : 280)
+        .frame(minHeight: FloatingPanelLayout.resultMinHeight, maxHeight: panelSize == "dynamic" ? .infinity : FloatingPanelLayout.resultMaxHeightFixed)
     }
 
     // MARK: - Dictionary Result
@@ -930,7 +930,7 @@ struct FloatingPanelContent: View {
                 .strokeBorder(AppTheme.MaterialPolicy.cardStroke, lineWidth: 1)
         )
         .padding(.horizontal, FloatingPanelLayout.contentHorizontalInset)
-        .frame(minHeight: 80, maxHeight: panelSize == "dynamic" ? .infinity : 280)
+        .frame(minHeight: FloatingPanelLayout.resultMinHeight, maxHeight: panelSize == "dynamic" ? .infinity : FloatingPanelLayout.resultMaxHeightFixed)
     }
 
     // MARK: - Bottom Bar (macOS 26 Liquid Glass)

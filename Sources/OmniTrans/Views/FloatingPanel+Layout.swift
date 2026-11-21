@@ -39,54 +39,6 @@ enum FloatingPanelLayout {
     /// "dynamic" 模式最大高度。
     static let heightDynamicMax: CGFloat = 800
 
-    // MARK: - Margins & Padding
-
-    /// 顶部栏与底部栏水平内边距。
-    static let barHorizontalPadding: CGFloat = 12
-
-    /// 顶部栏与底部栏垂直内边距。
-    static let barVerticalPadding: CGFloat = 8
-
-    /// 输入卡片水平外间距（距面板边缘）。
-    static let inputCardHorizontalOuter: CGFloat = 16
-
-    /// 输入卡片垂直外间距。
-    static let inputCardVerticalOuter: CGFloat = 4
-
-    /// 输入卡片内边距（AppTheme.spaceMD 别名）。
-    static let inputCardInnerPadding: CGFloat = 17
-
-    /// 输入卡片间距。
-    static let inputCardSpacing: CGFloat = 8
-
-    /// 底部栏底部间距。
-    static let bottomBarBottom: CGFloat = 12
-
-    // MARK: - Icon Sizes
-
-    /// 应用图标尺寸。
-    static let appIconSize: CGFloat = 18
-
-    /// 状态指示灯尺寸。
-    static let statusDotSize: CGFloat = 8
-
-    /// 图钉按钮尺寸。
-    static let pinButtonSize: CGFloat = 22
-
-    /// 工具栏按钮尺寸。
-    static let toolbarBtnSize: CGFloat = 22
-
-    // MARK: - Font Sizes
-
-    /// 顶部栏标签字号。
-    static let topBarLabelSize: CGFloat = 11
-
-    /// 供应商菜单字号。
-    static let providerMenuSize: CGFloat = 9
-
-    /// 底部栏按钮字号。
-    static let bottomBarLabelSize: CGFloat = 10
-
     // MARK: - Result Area
 
     /// 译文卡片最小高度。
@@ -98,28 +50,13 @@ enum FloatingPanelLayout {
     /// 译文正文行高计算字号（系统 15pt）。
     static let resultBodyFontSize: CGFloat = 15
 
-    // MARK: - History
 
-    /// 历史列表最大高度。
-    static let historyListMaxHeight: CGFloat = 250
-
-    /// 历史卡片字号。
-    static let historyCardLabelSize: CGFloat = 12
-
-    /// 历史卡片内容字号。
-    static let historyCardContentSize: CGFloat = 11
 
     // MARK: - Editor
 
     /// TextEditor 默认垂直 containerInset。
     /// NSTextView default vertical inset ≈ 8pt，但 TextEditor 实测约 6pt。
     static let textContainerVerticalInset: CGFloat = 6
-
-    /// 输入框翻译模式最小行数。
-    static let inputMinLines: Int = 3
-
-    /// 输入框翻译模式最大行数。
-    static let inputMaxLines: Int = 5
 
     // MARK: - Text Layout
 
@@ -152,11 +89,6 @@ enum FloatingPanelLayout {
     static var defaultContentTransition: AnyTransition {
         .opacity.combined(with: .move(edge: .bottom))
     }
-
-    // MARK: - API Probe
-
-    /// API 连通性探测最小间隔（秒）。
-    static let apiProbeMinInterval: TimeInterval = 30
 
     // MARK: - v0.8.1 Surface Tokens（哑光画布表面规格）
 
