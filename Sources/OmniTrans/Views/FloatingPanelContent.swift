@@ -50,7 +50,6 @@ struct FloatingPanelContent: View {
     @AppStorage("is_context_aware") var isContextAware = true
     @AppStorage("panel_size") var panelSize: String = "default"
     @State var panelVisible = false
-    @State var brainPulse = false
     @State var pinned = false
 
     /// 底栏当前悬停按钮标识（用于 hover 高亮反馈）。
@@ -975,54 +974,21 @@ struct FloatingPanelContent: View {
             .liquidGlassButton()
             .onHover { hovered in bottomBarHoveredBtn = hovered ? "lang" : nil }
 
-            // ── 上下文感知开关 — micro-pulse on toggle ──
-            Button {
-                withAnimation(AppTheme.Motion.brainPulseAnim.resolveGated()) { brainPulse = true }
+            // ── 上下文感知开关（图标型：省宽度、不截断；蓝色=开启）──
+            bottomBarToggle("brain.head.profile",
+                            active: isContextAware,
+                            id: "ctx",
+                            help: "上下文感知：\(isContextAware ? "开" : "关")（点击切换）") {
                 isContextAware.toggle()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    withAnimation(AppTheme.Motion.brainPulseAnim.resolveGated()) { brainPulse = false }
-                }
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "brain.head.profile")
-                        .font(.system(size: 11))
-                        .scaleEffect(brainPulse ? 1.25 : 1.0)
-                    Text(isContextAware ? "context on" : "context off")
-                        .font(.system(size: 9, weight: .medium))
-                }
-                .foregroundColor(isContextAware ? AppTheme.accentAction : AppTheme.textCaptionGray)
-                .padding(.horizontal, 6).padding(.vertical, 4)
-                .contentShape(Rectangle())
-                .brightness(bottomBarHoveredBtn == "ctx" ? 0.12 : 0)
-                .scaleEffect(bottomBarHoveredBtn == "ctx" ? 1.04 : 1.0)
-                .animation(AppTheme.Motion.buttonHover.resolveGated(), value: bottomBarHoveredBtn == "ctx")
             }
-            .frame(height: 22)
-            .liquidGlassButton()
-            .onHover { hovered in bottomBarHoveredBtn = hovered ? "ctx" : nil }
-            .help(isContextAware ? "上下文感知已启用" : "上下文感知已关闭")
 
-            // ── 查询模式开关（自动/取词/翻译）— 手动矫正自动判定（修复2） ──
-            Button {
+            // ── 查询模式开关（自动/取词/翻译 循环；高亮=强制）──
+            bottomBarToggle(modeOverrideIcon,
+                            active: session.modeOverride != .auto,
+                            id: "mode",
+                            help: "查询模式：\(session.modeOverride.label)（点击切换为\(session.modeOverride.next.label)，下次取词恢复自动）") {
                 session.modeOverride = session.modeOverride.next
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: modeOverrideIcon)
-                        .font(.system(size: 11))
-                    Text(session.modeOverride.label)
-                        .font(.system(size: 9, weight: .medium))
-                }
-                .foregroundColor(session.modeOverride == .auto ? AppTheme.textCaptionGray : AppTheme.accentAction)
-                .padding(.horizontal, 6).padding(.vertical, 4)
-                .contentShape(Rectangle())
-                .brightness(bottomBarHoveredBtn == "mode" ? 0.12 : 0)
-                .scaleEffect(bottomBarHoveredBtn == "mode" ? 1.04 : 1.0)
-                .animation(AppTheme.Motion.buttonHover.resolveGated(), value: bottomBarHoveredBtn == "mode")
             }
-            .frame(height: 22)
-            .liquidGlassButton()
-            .onHover { hovered in bottomBarHoveredBtn = hovered ? "mode" : nil }
-            .help("查询模式：自动判定 → 强制取词 → 强制翻译（点击切换，下次取词恢复自动）")
 
             Spacer()
 
@@ -1042,7 +1008,7 @@ struct FloatingPanelContent: View {
                     Text(hasResult ? (session.dictionaryEntry != nil || session.isDictionaryMode ? "重新查词" : "重新翻译") : modeLabel)
                         .font(.system(size: 11, weight: .semibold))
                 }
-                .padding(.horizontal, 10).padding(.vertical, 5)
+                .padding(.horizontal, 8).padding(.vertical, 5)
             }
             .frame(height: 26)
             .liquidGlassProminentButton()
@@ -1053,6 +1019,36 @@ struct FloatingPanelContent: View {
         // macOS 26+: Liquid Glass 工具栏表面；更早版本：实底回退
         .liquidGlassToolbar(in: RoundedRectangle(cornerRadius: AppTheme.hudCornerRadius, style: .continuous))
         .padding(.horizontal, 12).padding(.bottom, 12)
+    }
+
+    /// 底栏图标型开关（28×26，与复制/朗读同规格）—— 图标省宽度、无文字截断，
+    /// 状态用颜色表达：active 高亮，非 active 灰。
+    private func bottomBarToggle(_ icon: String, active: Bool, id: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundColor(active ? AppTheme.accentAction : AppTheme.textCaptionGray)
+                .frame(width: 22, height: 18)
+        }
+        .buttonStyle(PressableButtonStyle())
+        .help(help)
+        .frame(width: 28, height: 26)
+        .background {
+            let shape = RoundedRectangle(cornerRadius: AppTheme.radiusSM, style: .continuous)
+            Group {
+                if #available(macOS 26.0, *) {
+                    Color.clear.glassEffect(.regular, in: shape)
+                } else {
+                    AppTheme.MaterialPolicy.cardBackground
+                        .overlay(shape.strokeBorder(AppTheme.MaterialPolicy.cardStroke))
+                        .clipShape(shape)
+                }
+            }
+            .brightness(bottomBarHoveredBtn == id ? 0.12 : 0)
+            .scaleEffect(bottomBarHoveredBtn == id ? 1.04 : 1.0)
+            .animation(AppTheme.Motion.buttonHover.resolveGated(), value: bottomBarHoveredBtn == id)
+        }
+        .onHover { hovered in bottomBarHoveredBtn = hovered ? id : nil }
     }
 
     /// 底栏图标按钮 — 统一高度 + hover/press 反馈。
