@@ -226,3 +226,31 @@ build 有大量 Swift 6 严格并发 warning，现为 0 error / 0 warning，`swi
   静态加密依赖 FileVault（README 已注明）
 - 测试 8 例：往返、跨实例持久化、删除/空保存、权限与密钥尺寸、坏密文、
   错主密钥、v1 迁移、不可解密 v1
+
+## 功能审计 P0 修复（2026-11-21）
+
+**流式**：解析层识别流内 error（OpenAI/Anthropic/Gemini）与 finish_reason
+（length/content_filter/max_tokens/SAFETY）→ 抛错触发回退；零输出兜底；
+extractText 改 throwing 不占解码失败配额；SSE 专用 session resource 60s→300s
++ `Accept: text/event-stream`。
+
+**词典/翻译**：forceRefresh 绕过翻译缓存与同文跳过（重试按钮修复）；
+L2 统一存归一化 JSON（含 native 补全），native 查词补写 L2；历史统一 schema
+（召回不再解码失败）；CSV 导入改 RFC4180 引号感知解析（4 例测试）。
+
+**窗口**：高度更新改「节流+尾随」（基准=距上次执行），修复流式期间任务饥饿；
+流式期间 animate:false，消除 0.22s 动画重叠风暴。
+
+验证：102 例测试 0 失败；后续 P1 项（增量渲染、chrome 持续测量、WordDetector
+归一化、流测试）待办。
+
+## 功能审计 P1 修复（2026-11-21）
+
+- **流式**：增量拼接渲染（去每批 joined）；SSELineParser 纯函数（兼容
+  `data:{…}`，过滤 [DONE]）；parseAndFlush 错误/取消路径冲刷缓冲；
+  11 例新测试（SSE/合并/归一化）
+- **窗口**：上下 Chrome 改 onGeometryChange 持续测量；流式高度测量节流
+  （≥24 字符才全量 boundingRect）；NSCache 按长度计费 + costLimit
+- **词典**：WordDetector Unicode 归一化 + CJK 扩展区；`_ctx` 键读写对齐；
+  isFromLocalCache 语义修正；双源合并纯函数化
+- 验证：113 例测试 0 失败；Debug/Release 0 警告
