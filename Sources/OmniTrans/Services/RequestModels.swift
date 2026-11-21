@@ -15,6 +15,8 @@ struct OAIChatCompletionRequest: Encodable {
     let maxTokens: Int
     let stream: Bool
     let responseFormat: ResponseFormat?
+    /// 流式 usage 上报（backlog：用于 tok/s 终值校准）
+    let streamOptions: StreamOptions?
 
     struct Message: Encodable {
         let role: String
@@ -25,10 +27,16 @@ struct OAIChatCompletionRequest: Encodable {
         let type: String
     }
 
+    struct StreamOptions: Encodable {
+        let includeUsage: Bool
+        enum CodingKeys: String, CodingKey { case includeUsage = "include_usage" }
+    }
+
     enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream
         case maxTokens = "max_tokens"
         case responseFormat = "response_format"
+        case streamOptions = "stream_options"
     }
 }
 

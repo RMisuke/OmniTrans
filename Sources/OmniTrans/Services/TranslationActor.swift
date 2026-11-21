@@ -129,6 +129,11 @@ let streamURLSession: URLSession = {
     return URLSession(configuration: config, delegate: pinningDelegate, delegateQueue: nil)
 }()
 
+/// 流内 usage 捕获盒（解析闭包非隔离，跨闭包写值需显式 Sendable）。
+private final class UsageBox: @unchecked Sendable {
+    var tokens: Int?
+}
+
 // MARK: - SSE line parsing (P1: 纯函数，可单测)
 
 /// SSE `data:` 行 → JSON payload。兼容 `data: `（标准）与 `data:{…}`（无空格），
@@ -155,6 +160,9 @@ actor TranslationActor {
 
     /// Active translation task — cancelled on new request.
     private var activeStreamTask: Task<Void, Never>?
+
+    /// 最近一次 OpenAI 系流式响应的真实 completion_tokens（usage 校准用，backlog）。
+    private(set) var lastCompletionTokens: Int?
 
     /// Returns the shared `URLSession` with HTTP/2 pipelining enabled.
     /// No per-request session creation — all requests reuse the same
@@ -274,6 +282,7 @@ actor TranslationActor {
         context: CapturedContext? = nil
     ) -> AsyncThrowingStream<String, Error> {
         activeStreamTask?.cancel()
+        lastCompletionTokens = nil
 
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -304,6 +313,7 @@ actor TranslationActor {
         context: CapturedContext? = nil
     ) -> AsyncThrowingStream<String, Error> {
         activeStreamTask?.cancel()
+        lastCompletionTokens = nil
 
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -440,7 +450,9 @@ actor TranslationActor {
             // 其余靠 prompt 约束，输出非 JSON 即解析失败）（P0-R1）
             responseFormat: (isDictionaryMode && (p.kind == .openAICompat || p.kind == .openAI))
                 ? .init(type: "json_object")
-                : nil
+                : nil,
+            // 末尾 chunk 返回真实 completion_tokens，用于 tok/s 终值校准（backlog）
+            streamOptions: .init(includeUsage: true)
         )
         req.httpBody = try JSONEncoder().encode(requestBody)
 
@@ -451,6 +463,7 @@ actor TranslationActor {
         }
 
         let t = ThrottledStream(c)
+        let usageBox = UsageBox()
         try await parseAndFlush(bytes: bytes, throttle: t) { (chunk: OAIStreamChunk) throws -> String? in
             if let err = chunk.error {
                 throw TranslationService.TranslationError.apiError(err.error.message)
@@ -459,8 +472,10 @@ actor TranslationActor {
                reason == "length" || reason == "content_filter" {
                 throw TranslationService.TranslationError.apiError("输出不完整（\(reason)）")
             }
+            if let tokens = chunk.usage?.completion_tokens { usageBox.tokens = tokens }
             return chunk.choices?.first?.delta?.content
         }
+        self.lastCompletionTokens = usageBox.tokens
         await t.flush()
     }
 
@@ -593,7 +608,8 @@ actor TranslationActor {
             temperature: p.temperature,
             maxTokens: p.maxTokens,
             stream: false,
-            responseFormat: nil
+            responseFormat: nil,
+            streamOptions: nil
         )
         req.httpBody = try JSONEncoder().encode(requestBody)
 
@@ -1021,8 +1037,10 @@ private struct OAIStreamChunk: Codable, Sendable {
         let delta: Delta?
         let finish_reason: String?
     }
+    struct Usage: Codable, Sendable { let completion_tokens: Int? }
     let choices: [Choice]?
     let error: OAIErr?
+    let usage: Usage?
 }
 struct AnthErr: Codable, Sendable {
     struct Detail: Codable, Sendable { let message: String }

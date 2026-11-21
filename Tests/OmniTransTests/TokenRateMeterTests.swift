@@ -6,8 +6,8 @@ import XCTest
 final class TokenRateMeterTests: XCTestCase {
 
     func testEstimateTokensCJK() {
-        XCTAssertEqual(TokenRateMeter.estimateTokens("你好"), 2.0)
-        XCTAssertEqual(TokenRateMeter.estimateTokens("こんにちは"), 5.0)  // 假名按 CJK 计
+        XCTAssertEqual(TokenRateMeter.estimateTokens("你好"), 2.7, accuracy: 0.001)
+        XCTAssertEqual(TokenRateMeter.estimateTokens("こんにちは"), 6.75, accuracy: 0.001)  // 假名按 CJK 计
     }
 
     func testEstimateTokensLatin() {
@@ -16,7 +16,7 @@ final class TokenRateMeterTests: XCTestCase {
     }
 
     func testEstimateTokensMixed() {
-        XCTAssertEqual(TokenRateMeter.estimateTokens("AI你好"), 2.5)    // 2 拉丁 ÷4 + 2 CJK
+        XCTAssertEqual(TokenRateMeter.estimateTokens("AI你好"), 3.2, accuracy: 0.001)    // 2 拉丁 ÷4 + 2 CJK×1.35
     }
 
     func testTTFTRecordedAtFirstBatch() {
@@ -51,6 +51,25 @@ final class TokenRateMeterTests: XCTestCase {
         _ = meter.feed("aaaa", now: start.addingTimeInterval(1.0))   // 1 token，首字延迟 1s
         _ = meter.feed("aaaa", now: start.addingTimeInterval(2.0))   // 再 1 token
         XCTAssertEqual(try XCTUnwrap(meter.finalRate()), 2.0, accuracy: 0.01)
+    }
+
+    /// 服务端真实 usage 校准：10 tokens / 1s = 10 tok/s。
+    func testActualTokensOverrideEstimate() {
+        let start = Date()
+        var meter = TokenRateMeter(startAt: start)
+        _ = meter.feed("aaaa", now: start.addingTimeInterval(1.0))
+        _ = meter.feed("aaaa", now: start.addingTimeInterval(2.0))
+        XCTAssertEqual(try? XCTUnwrap(meter.finalRate(actualTokens: 10)), 10.0)
+    }
+
+    /// 无 usage 时回退到估算均值。
+    func testActualTokensNilFallsBackToEstimate() {
+        let start = Date()
+        var meter = TokenRateMeter(startAt: start)
+        _ = meter.feed("aaaa", now: start.addingTimeInterval(1.0))
+        _ = meter.feed("aaaa", now: start.addingTimeInterval(2.0))
+        XCTAssertNil(meter.finalRate(actualTokens: nil))
+        XCTAssertEqual(try? XCTUnwrap(meter.finalRate()), 2.0)
     }
 
     /// 单 batch（非流式）无整体均值 → 不显示标签。

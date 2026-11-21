@@ -574,9 +574,13 @@ final class AppState: ObservableObject {
                 // 成功路径同样检查取消：旧任务挂起恢复后不得覆盖新请求状态（P0-R5）
                 guard !Task.isCancelled else { return }
 
-                // 完成时冻结为整体均值（排除首字延迟）（P2）
+                // 完成时冻结为整体均值（排除首字延迟）（P2）；
+                // OpenAI 系有真实 usage 时优先用 completion_tokens 校准（backlog）
                 if measureTokenRate {
-                    self.session.tokenRate = rateMeter.finalRate() ?? rateMeter.rate
+                    let actualTokens = await TranslationActor.shared.lastCompletionTokens
+                    self.session.tokenRate = rateMeter.finalRate(actualTokens: actualTokens)
+                        ?? rateMeter.finalRate()
+                        ?? rateMeter.rate
                     self.session.ttft = rateMeter.ttft
                 }
 

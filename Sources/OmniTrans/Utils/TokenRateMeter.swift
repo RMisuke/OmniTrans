@@ -6,8 +6,8 @@ import Foundation
 /// 批级瞬时速率做 EMA 平滑，UI 以 ≤2Hz 发布；完成时冻结为整体均值
 /// （排除首字延迟 TTFT）。
 ///
-/// token 估算为 BPE 近似：CJK（含日文假名/韩文）字符 ×1.0，其他字符 ÷4.0。
-/// 标签以 `≈` 前缀表明为估算值。
+/// token 估算为 BPE 近似：CJK（含日文假名/韩文）字符 ×1.35（o200k 实测中位，
+/// backlog 校准），其他字符 ÷4.0。标签以 `≈` 前缀表明为估算值。
 struct TokenRateMeter {
     private(set) var totalTokens: Double = 0
     /// 实时速率（tok/s），首个可测间隔之前为 nil。
@@ -41,7 +41,7 @@ struct TokenRateMeter {
                 other += 1
             }
         }
-        return Double(cjk) + Double(other) / 4.0
+        return Double(cjk) * 1.35 + Double(other) / 4.0
     }
 
     /// 喂入一个 batch。
@@ -72,5 +72,14 @@ struct TokenRateMeter {
         guard let first = firstBatchAt, let last = lastBatchAt,
               last.timeIntervalSince(first) > 0.001 else { return nil }
         return totalTokens / last.timeIntervalSince(first)
+    }
+
+    /// 用服务端真实 completion_tokens 校准终值（OpenAI 系 usage 上报，backlog）。
+    /// 真实 token 数 / 生成时长（排除 TTFT），比字符估算更准。
+    func finalRate(actualTokens: Int?) -> Double? {
+        guard let actualTokens, actualTokens > 0,
+              let first = firstBatchAt, let last = lastBatchAt,
+              last.timeIntervalSince(first) > 0.001 else { return nil }
+        return Double(actualTokens) / last.timeIntervalSince(first)
     }
 }

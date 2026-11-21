@@ -31,12 +31,24 @@ actor LocalDictionaryRepository {
     /// Example: `"2026-07-10T12:30:00+08:00"`
     /// This ensures the timestamp is always stored with proper timezone context,
     /// avoiding the UTC-vs-local mismatch that `CURRENT_TIMESTAMP` causes.
+    // ISO8601DateFormatter 格式化是线程安全的；仅 actor 内使用（非隔离标注消除告警）
+    nonisolated(unsafe) private static let timestampFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
     private static func localTimestampString() -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: Date())
+        timestampFormatter.string(from: Date())
     }
     static let shared = LocalDictionaryRepository()
+
+    /// NULL 安全的列读取（backlog：sqlite3_column_text 返回 NULL 时
+    /// String(cString:) 会崩溃，如列被写空/NULL 的异常行）。
+    private static func columnString(_ stmt: OpaquePointer?, _ index: Int32) -> String {
+        guard let c = sqlite3_column_text(stmt, index) else { return "" }
+        return String(cString: c)
+    }
 
     private var db: OpaquePointer?
 
@@ -93,9 +105,9 @@ actor LocalDictionaryRepository {
 
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
 
-        let model = String(cString: sqlite3_column_text(stmt, 0))
-        let json  = String(cString: sqlite3_column_text(stmt, 1))
-        let ts    = String(cString: sqlite3_column_text(stmt, 2))
+        let model = Self.columnString(stmt, 0)
+        let json  = Self.columnString(stmt, 1)
+        let ts    = Self.columnString(stmt, 2)
 
         return CachedDictEntry(modelName: model, jsonData: json, timestamp: ts)
     }
@@ -162,6 +174,7 @@ actor LocalDictionaryRepository {
 
     /// Deletes all rows (destructive wipe).
     func deleteAll() {
+        guard let db else { return }
         sqlite3_exec(db, "DELETE FROM custom_dictionary", nil, nil, nil)
     }
 
@@ -205,6 +218,7 @@ actor LocalDictionaryRepository {
 
     @discardableResult
     func batchImport(lines: [String], overwrite: Bool) -> Int {
+        guard let db else { return lines.count }
         let ts = Self.localTimestampString()
         let conflictStrategy = overwrite
             ? "ON CONFLICT(query_word, target_lang) DO UPDATE SET model_name=excluded.model_name, json_data=excluded.json_data, updated_at=?"
@@ -242,9 +256,15 @@ actor LocalDictionaryRepository {
             }
             if sqlite3_step(stmt) != SQLITE_DONE { errorCount += 1 }
         }
-        sqlite3_exec(db, "COMMIT", nil, nil, nil)
-        if errorCount > 0 {
-            os_log(.error, log: dictRepoLog, "batchImport: %d/%d rows failed", errorCount, lines.count)
+        // 全部失败 → 回滚（backlog：旧实现始终 COMMIT，空事务也提交）
+        if errorCount > 0 && errorCount >= lines.count {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            os_log(.error, log: dictRepoLog, "batchImport: all %d rows failed — rolled back", lines.count)
+        } else {
+            sqlite3_exec(db, "COMMIT", nil, nil, nil)
+            if errorCount > 0 {
+                os_log(.error, log: dictRepoLog, "batchImport: %d/%d rows failed", errorCount, lines.count)
+            }
         }
         return errorCount
     }
@@ -259,11 +279,11 @@ actor LocalDictionaryRepository {
 
         var rows: [CachedDictEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let word  = String(cString: sqlite3_column_text(stmt, 0))
-            let lang  = String(cString: sqlite3_column_text(stmt, 1))
-            let model = String(cString: sqlite3_column_text(stmt, 2))
-            let json  = String(cString: sqlite3_column_text(stmt, 3))
-            let ts    = String(cString: sqlite3_column_text(stmt, 4))
+            let word  = Self.columnString(stmt, 0)
+            let lang  = Self.columnString(stmt, 1)
+            let model = Self.columnString(stmt, 2)
+            let json  = Self.columnString(stmt, 3)
+            let ts    = Self.columnString(stmt, 4)
             rows.append(CachedDictEntry(modelName: model, jsonData: json, timestamp: ts,
                                         word: word, targetLang: lang))
         }
